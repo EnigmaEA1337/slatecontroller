@@ -190,7 +190,15 @@ fi
   logger -t "$LOG_TAG" "committing step #$fire : $kind '$name'"
   case "$kind" in
     profile)
-      if [ -x /usr/local/bin/slate-ctrl ]; then
+      # No-op if the target profile is already active. Skipping the
+      # full slate-ctrl apply (which would reload firewall, restart
+      # wifi, re-paint screen…) when nothing would actually change.
+      # `state/active` is written by slate-ctrl itself on each apply,
+      # so it's the canonical "current profile" marker.
+      cur=$(cat /etc/slate-controller/state/active 2>/dev/null | head -1)
+      if [ "$cur" = "$name" ]; then
+        logger -t "$LOG_TAG" "profile '$name' already active — skip apply"
+      elif [ -x /usr/local/bin/slate-ctrl ]; then
         /usr/local/bin/slate-ctrl apply "$name" >>/tmp/slate-ctrl-cycle.log 2>&1
       else
         logger -t "$LOG_TAG" "slate-ctrl missing — cannot apply '$name'"
