@@ -102,11 +102,12 @@ async def _task_ssh_key_only(
     *,
     ssh: SlateSSH,
     keypair_store: SSHKeypairStore,
+    device_slug: str,
 ) -> AdoptionTaskReport:
     """Ensure SSH key auth is deployed AND password auth is off."""
     ctx = _TaskCtx("SSH key-only auth")
     ctx.start()
-    status = await keypair_store.get_status()
+    status = await keypair_store.get_status(device_slug)
     if not status.generated:
         # We could auto-generate + deploy, but that's destructive (changes
         # the key on the Slate). Safer to bail and surface a clear message.
@@ -177,7 +178,7 @@ async def run_adoption(
         reports.append(await _task_force_https(ssh=ssh))
     if options.ssh_key_only:
         reports.append(await _task_ssh_key_only(
-            ssh=ssh, keypair_store=keypair_store,
+            ssh=ssh, keypair_store=keypair_store, device_slug=device_slug,
         ))
     if options.disable_upnp:
         reports.append(await _task_disable_upnp(ssh=ssh))

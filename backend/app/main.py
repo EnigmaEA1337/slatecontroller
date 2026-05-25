@@ -277,16 +277,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # time, which produces the proper cyber-theme PNG using the Slate's
     # own TTF fonts.
 
-    # SSH keypair store. If a previously-deployed key exists, switch SSH to
-    # use it so we don't fall back to password unnecessarily.
+    # SSH keypair store (per-device). If the default device already has a
+    # deployed keypair, switch its SSH channel to use it so we don't fall
+    # back to password unnecessarily. Per-device routing of multi-device
+    # SSH channels is a future iteration ; today only the default device
+    # is wired into app.state.slate_ssh.
     ssh_keypair_store = SSHKeypairStore(session_factory)
     app.state.ssh_keypair_store = ssh_keypair_store
-    ssh_status = await ssh_keypair_store.get_status()
-    if ssh_status.generated and ssh_status.deployed_to_slate:
-        private_pem = await ssh_keypair_store.get_private_pem()
+    try:
+        ssh_status = await ssh_keypair_store.get_status(default_device.slug)
+    except Exception as exc:  # noqa: BLE001 — boot must keep going
+        logger.warning("ssh_keypair.boot_status_failed", error=str(exc))
+        ssh_status = None
+    if ssh_status and ssh_status.generated and ssh_status.deployed_to_slate:
+        private_pem = await ssh_keypair_store.get_private_pem(default_device.slug)
         if private_pem:
             await app.state.slate_ssh.use_private_key(private_pem)
-            logger.info("slate_ssh.using_stored_keypair")
+            logger.info(
+                "slate_ssh.using_stored_keypair", device=default_device.slug,
+            )
 
     # AdGuard manager — pilots /etc/init.d/adguardhome via SSH + talks to the
     # REST API on :3000 for stats and filters.

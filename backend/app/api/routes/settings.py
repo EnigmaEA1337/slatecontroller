@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_slate_ssh, get_ssh_keypair_store
+from app.api.deps import get_device_store, get_slate_ssh, get_ssh_keypair_store
+from app.devices.store import DeviceStore
 from app.auth import User, get_current_user
 from app.settings.ssh_keys import (
     SSHKeypairStatus,
@@ -24,6 +25,25 @@ from app.slate.ssh import SlateSSH, SlateSSHError
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+# The /settings/ssh-keypair routes manage the **default** device's
+# keypair (singleton-shaped UX for V1). Per-device routes will move
+# under /api/devices/{slug}/ssh-keypair once multi-device routing lands.
+async def _default_device_slug(store: DeviceStore) -> str:
+    """Resolve the default device's slug. 503 if no device is registered yet."""
+    row = await store.get_default()
+    if row is None:
+        # Fallback : pick the lowest-id device (mirrors lifespan boot logic).
+        # If there is none at all → 503.
+        rows = await store.list_all()
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no device registered — adopt a Slate first",
+            )
+        return rows[0].slug
+    return row.slug
 
 
 # ---------------------------- Pydantic IO ---------------------------- #
@@ -78,9 +98,11 @@ async def get_ssh_keypair_status(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
+    device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> SSHKeypairStatusResponse:
-    """Return whether a keypair exists and whether it's been deployed."""
-    status_ = await store.get_status()
+    """Return whether a keypair exists for the default device and whether it's been deployed."""
+    slug = await _default_device_slug(device_store)
+    status_ = await store.get_status(slug)
     return SSHKeypairStatusResponse.of(status_, auth_mode=ssh.auth_mode)
 
 
@@ -93,15 +115,20 @@ async def generate_ssh_keypair(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
+    device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> SSHKeypairStatusResponse:
     """Generate a fresh Ed25519 keypair, replacing any existing one.
 
     Does NOT push it to the Slate — caller must POST .../deploy next.
     The previous private key is discarded; the new one is Fernet-encrypted.
     """
-    keypair = await store.generate_and_store()
-    logger.info("settings.ssh_keypair.generated", fingerprint=keypair.fingerprint_sha256)
-    status_ = await store.get_status()
+    slug = await _default_device_slug(device_store)
+    keypair = await store.generate_and_store(slug)
+    logger.info(
+        "settings.ssh_keypair.generated",
+        device=slug, fingerprint=keypair.fingerprint_sha256,
+    )
+    status_ = await store.get_status(slug)
     return SSHKeypairStatusResponse.of(status_, auth_mode=ssh.auth_mode)
 
 
@@ -111,13 +138,15 @@ async def deploy_ssh_keypair(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
+    device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> DeployResponse:
     """Push the public key to the Slate's authorized_keys, then switch to key auth.
 
     Requires the current SSH channel to be working (uses it to push the key).
     Optionally disables password auth on the Slate side.
     """
-    status_ = await store.get_status()
+    slug = await _default_device_slug(device_store)
+    status_ = await store.get_status(slug)
     if not status_.generated or not status_.public_openssh:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -147,10 +176,10 @@ async def deploy_ssh_keypair(
             detail=f"authorized_keys write failed: {result.stderr or result.stdout}",
         )
 
-    await store.mark_deployed()
+    await store.mark_deployed(slug)
 
     # Now switch our SSH channel to use the private key.
-    private_pem = await store.get_private_pem()
+    private_pem = await store.get_private_pem(slug)
     if private_pem is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -219,6 +248,7 @@ async def deploy_ssh_keypair(
 async def export_ssh_private_key(
     user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
+    device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> PlainTextResponse:
     """Download the private key PEM. Auth-protected, audit-logged.
 
@@ -226,7 +256,8 @@ async def export_ssh_private_key(
     The returned file matches what `ssh-keygen` would produce — usable with
     `ssh -i <file> root@<slate>`.
     """
-    pem = await store.get_private_pem()
+    slug = await _default_device_slug(device_store)
+    pem = await store.get_private_pem(slug)
     if pem is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -251,20 +282,22 @@ async def revoke_ssh_keypair(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
+    device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> None:
     """Delete the keypair from our DB and revert SSH channel to password auth.
 
     Note: does NOT remove the public key from the Slate's authorized_keys.
     Do that manually via SSH if you really want to revoke (`vi /etc/dropbear/authorized_keys`).
     """
-    deleted = await store.revoke()
+    slug = await _default_device_slug(device_store)
+    deleted = await store.revoke(slug)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="no keypair to revoke",
         )
     await ssh.use_private_key(None)
-    logger.info("settings.ssh_keypair.revoked")
+    logger.info("settings.ssh_keypair.revoked", device=slug)
 
 
 # ---- Controller URLs ----

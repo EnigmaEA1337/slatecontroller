@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import Request
 
 from app.adguard.manager import AdGuardManager
+from app.devices.store import DeviceStore
 from app.dns.manager import DnsProtectionManager
 from app.dns.store import DnsSecurityLevelStore
 from app.networks.store import NetworkStore
@@ -67,6 +68,12 @@ def get_wifi_store(request: Request) -> WifiSsidStore:
 def get_network_store(request: Request) -> NetworkStore:
     """Return the singleton `NetworkStore` bound to the application lifespan."""
     store: NetworkStore = request.app.state.network_store
+    return store
+
+
+def get_device_store(request: Request) -> DeviceStore:
+    """Return the singleton `DeviceStore` bound to the application lifespan."""
+    store: DeviceStore = request.app.state.device_store
     return store
 
 

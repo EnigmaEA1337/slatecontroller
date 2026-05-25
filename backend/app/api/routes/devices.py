@@ -51,13 +51,15 @@ async def _to_public(
 ) -> DevicePublic:
     creds = await store.get_rpc_credentials(row.slug)
     username = creds[0] if creds else "root"
-    has_kp = False
-    deployed = False
-    if row.is_default:
-        # Only the default device has its keypair in app_secrets (V1).
-        st = await keypair_store.get_status()
+    # Per-device keypair lookup: every device row potentially has its own.
+    # Errors decay to "no keypair" so a corrupted row never breaks listing.
+    try:
+        st = await keypair_store.get_status(row.slug)
         has_kp = st.generated
         deployed = st.deployed_to_slate
+    except Exception:  # noqa: BLE001 — keep listing resilient
+        has_kp = False
+        deployed = False
     # Backfill admin_urls from `host` if empty (legacy rows or fresh-from-
     # adoption rows where the user hasn't customized the URLs yet).
     admin_urls = list(row.admin_urls or [])

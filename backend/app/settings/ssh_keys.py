@@ -1,8 +1,19 @@
-"""SSH keypair generation + persistence for the Slate admin channel.
+"""SSH keypair generation + persistence for device admin channels.
 
 Generates Ed25519 keys (modern, short, fast). The private key is stored
-Fernet-encrypted in the `app_secrets` table; the public key is plain text
-(it's pasted into the Slate's `authorized_keys`).
+Fernet-encrypted in the `device_secrets` table (keyed by `device_id` +
+`kind='ssh_keypair'`); the public key + fingerprint + deployment marker
+live in the same row's `metadata_json` blob.
+
+Multi-device : every method takes a `device_slug` argument. The store
+resolves it to a `DeviceRow.id` to upsert/read the matching
+`device_secrets` row. There is no shared/global keypair anymore — each
+adopted device carries its own.
+
+Legacy migration : the alembic step
+`f3a1c8d9e021_move_ssh_keypair_to_device_secrets` copies any pre-
+existing `app_secrets[key='slate_ssh_keypair']` row onto the default
+device, then drops the source row so we never read a stale one.
 """
 
 from __future__ import annotations
@@ -18,11 +29,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import AppSecretRow
+from app.db.models import DeviceRow, DeviceSecretRow
 from app.exceptions import SlateError
 from app.vpn.crypto import VPNCryptoError, decrypt, encrypt
 
-SSH_KEY_SECRET_KEY = "slate_ssh_keypair"
+# device_secrets.kind value. Kept in sync with `app/devices/store.py`.
+SSH_KEYPAIR_SECRET_KIND = "ssh_keypair"
 
 
 class SSHKeyError(SlateError):
@@ -78,20 +90,44 @@ def _generate_keypair(comment: str = "slate-controller") -> SSHKeypair:
 
 
 class SSHKeypairStore:
-    """Async store for the (single) SSH keypair used by the backend → Slate channel."""
+    """Per-device SSH keypair store.
+
+    Every method takes a `device_slug` (the human-friendly identifier
+    visible in the UI) and operates on the device's row in
+    `device_secrets` where `kind = 'ssh_keypair'`.
+
+    On miss (device exists, no keypair yet) `get_status` returns a
+    `generated=False` snapshot ; `generate_and_store` creates the row ;
+    `mark_deployed` requires the row to exist.
+
+    If the device slug itself doesn't resolve, methods raise
+    `SSHKeyError` rather than silently returning a fresh-state snapshot,
+    so a typo in a route doesn't masquerade as "device has no key".
+    """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
-    async def _load_row(self) -> AppSecretRow | None:
-        async with self._sf() as session:
-            return await session.scalar(
-                select(AppSecretRow).where(AppSecretRow.key == SSH_KEY_SECRET_KEY)
-            )
+    async def _load_secret(
+        self, session: AsyncSession, device_slug: str,
+    ) -> tuple[DeviceRow, DeviceSecretRow | None]:
+        device = await session.scalar(
+            select(DeviceRow).where(DeviceRow.slug == device_slug),
+        )
+        if device is None:
+            raise SSHKeyError(f"unknown device slug {device_slug!r}")
+        secret = await session.scalar(
+            select(DeviceSecretRow).where(
+                DeviceSecretRow.device_id == device.id,
+                DeviceSecretRow.kind == SSH_KEYPAIR_SECRET_KIND,
+            ),
+        )
+        return device, secret
 
-    async def get_status(self) -> SSHKeypairStatus:
-        row = await self._load_row()
-        if row is None:
+    async def get_status(self, device_slug: str) -> SSHKeypairStatus:
+        async with self._sf() as session:
+            _device, secret = await self._load_secret(session, device_slug)
+        if secret is None:
             return SSHKeypairStatus(
                 generated=False,
                 public_openssh=None,
@@ -100,7 +136,7 @@ class SSHKeypairStore:
                 deployed_to_slate=False,
                 deployed_at=None,
             )
-        meta = row.metadata_json or {}
+        meta = secret.metadata_json or {}
         deployed_at_raw = meta.get("deployed_at")
         deployed_at = (
             datetime.fromisoformat(deployed_at_raw) if deployed_at_raw else None
@@ -109,25 +145,27 @@ class SSHKeypairStore:
             generated=True,
             public_openssh=meta.get("public_openssh"),
             fingerprint_sha256=meta.get("fingerprint_sha256"),
-            created_at=row.created_at,
+            created_at=secret.created_at,
             deployed_to_slate=bool(meta.get("deployed_at")),
             deployed_at=deployed_at,
         )
 
-    async def get_private_pem(self) -> str | None:
+    async def get_private_pem(self, device_slug: str) -> str | None:
         """Decrypt and return the stored private key, or None if not generated."""
-        row = await self._load_row()
-        if row is None:
+        async with self._sf() as session:
+            _device, secret = await self._load_secret(session, device_slug)
+        if secret is None:
             return None
         try:
-            return decrypt(row.encrypted_value)
+            return decrypt(secret.encrypted_value)
         except VPNCryptoError as exc:
             raise SSHKeyError(
-                f"Cannot decrypt stored SSH private key: {exc}"
+                f"Cannot decrypt SSH private key for {device_slug!r}: {exc}"
             ) from exc
 
-    async def generate_and_store(self) -> SSHKeypair:
-        """Replaces any existing keypair. Caller's responsibility to re-deploy."""
+    async def generate_and_store(self, device_slug: str) -> SSHKeypair:
+        """Replaces any existing keypair for this device. Caller is
+        responsible for re-deploying the new public key to the Slate."""
         keypair = await asyncio.to_thread(_generate_keypair)
         encrypted = encrypt(keypair.private_pem)
         metadata: dict = {
@@ -136,43 +174,40 @@ class SSHKeypairStore:
             # Note: NOT setting deployed_at — generation alone doesn't deploy.
         }
         async with self._sf() as session:
-            existing = await session.scalar(
-                select(AppSecretRow).where(AppSecretRow.key == SSH_KEY_SECRET_KEY)
-            )
-            if existing is None:
+            device, secret = await self._load_secret(session, device_slug)
+            if secret is None:
                 session.add(
-                    AppSecretRow(
-                        key=SSH_KEY_SECRET_KEY,
+                    DeviceSecretRow(
+                        device_id=device.id,
+                        kind=SSH_KEYPAIR_SECRET_KIND,
                         encrypted_value=encrypted,
                         metadata_json=metadata,
                     )
                 )
             else:
-                existing.encrypted_value = encrypted
-                existing.metadata_json = metadata
+                secret.encrypted_value = encrypted
+                secret.metadata_json = metadata
             await session.commit()
         return keypair
 
-    async def mark_deployed(self) -> None:
+    async def mark_deployed(self, device_slug: str) -> None:
         async with self._sf() as session:
-            row = await session.scalar(
-                select(AppSecretRow).where(AppSecretRow.key == SSH_KEY_SECRET_KEY)
-            )
-            if row is None:
-                raise SSHKeyError("no keypair to mark as deployed")
-            meta = dict(row.metadata_json or {})
+            _device, secret = await self._load_secret(session, device_slug)
+            if secret is None:
+                raise SSHKeyError(
+                    f"no keypair to mark deployed for {device_slug!r}",
+                )
+            meta = dict(secret.metadata_json or {})
             meta["deployed_at"] = datetime.now(UTC).isoformat()
-            row.metadata_json = meta
+            secret.metadata_json = meta
             await session.commit()
 
-    async def revoke(self) -> bool:
+    async def revoke(self, device_slug: str) -> bool:
         """Delete the keypair from storage. Returns True if something was deleted."""
         async with self._sf() as session:
-            row = await session.scalar(
-                select(AppSecretRow).where(AppSecretRow.key == SSH_KEY_SECRET_KEY)
-            )
-            if row is None:
+            _device, secret = await self._load_secret(session, device_slug)
+            if secret is None:
                 return False
-            await session.delete(row)
+            await session.delete(secret)
             await session.commit()
             return True
