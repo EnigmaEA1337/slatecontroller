@@ -1,34 +1,24 @@
 """Render menu frames for the reset-button profile cycle.
 
-One PNG per cursor position. When the cursor is at slot N, the menu
-frame N is shown on the Slate's panel: a vertical list of every step
-in the cycle, with slot N highlighted (accent border + filled chip).
+One PNG per cursor position. When the cursor is at slot N, frame N is
+painted on the Slate's panel during the select-then-commit window: a
+vertical list with slot N highlighted (accent strip + filled chip).
 
-The frames are pre-rendered controller-side (Pillow) and pushed to the
-Slate at sync time, so the on-press code path on the Slate is just a
-file copy → /dev/fb0. The agent has no Python, no Pillow, no font.
+The frames are pre-rendered controller-side (Pillow + the Slate's own
+TTF fonts, fetched via `font_cache`) and pushed to the Slate at sync
+time, so the on-press code path on the Slate is just `cat raw > fb0`.
+The agent has no Python, no Pillow, no fonts.
 
-Layout (320×240, landscape, then `_png_to_rgb565_portrait` rotates
-to the panel's native 240×320 portrait orientation) :
-
-  ┌─ CYCLE                    3 / 5 ─┐
-  │                                   │
-  │   ◌  home                         │
-  │   ◌  mission                      │
-  │   ▶  vacances              ◀──    │  ← highlighted
-  │   ◌  @update                      │
-  │   ◌  osint                        │
-  │                                   │
-  │  release reset to apply           │
-  └───────────────────────────────────┘
-
-The accent color follows the cycle highlight, not the profile colors.
+Aesthetic intent : the controller UI is a cyberpunk HUD ; the on-panel
+menu should feel like the same product, not a different system. We use
+the same TTF stack that `wallpaper_studio` uses for profile wallpapers,
+the same palette as the controller's CSS tokens, corner brackets, an
+accent strip on the selected row, and a discreet scanline overlay.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -44,101 +34,150 @@ from app.profiles.default_wallpaper import (
     SCAN,
     SCREEN_H,
     SCREEN_W,
-    _render_text,
 )
+from app.profiles.font_cache import fetch_font
 from app.settings.button_cycle import CycleStep
+from app.slate.ssh import SlateSSH
 
 
 # How many rows fit comfortably on the panel. Beyond this we paginate
 # around the cursor so the highlighted row is always visible.
 _MAX_VISIBLE_ROWS = 6
 
+_ROW_H = 28
+_TITLE_H = 26
+_FOOTER_H = 20
 
-def render_menu_png(
-    steps: list[CycleStep],
-    cursor: int,
+# Tints used only by the menu. Slightly different from the wallpaper
+# palette : we want the highlighted row to read as "selected" without
+# screaming.
+_SELECTED_FILL = (28, 14, 22)        # warm dark, accent-tinted
+_SELECTED_BORDER = DEFAULT_ACCENT
+_ROW_BG = (16, 16, 28)               # subtle pop against BG
+_HEADER_BG = (12, 12, 22)
+
+
+async def render_menu_frames_async(
+    ssh: SlateSSH, steps: list[CycleStep],
+) -> list[bytes]:
+    """Render one PNG per cursor position. Async because the TTF fonts
+    are fetched from the Slate via SSH on first use (cached locally
+    after that — see `font_cache.fetch_font`)."""
+    fonts = await _load_fonts(ssh)
+    return [_render_one(steps, i, fonts) for i in range(len(steps))]
+
+
+# ---------------------------- internals ---------------------------- #
+
+
+class _Fonts:
+    """Bundle of pre-loaded TTF faces at the sizes the menu uses."""
+
+    def __init__(
+        self,
+        *,
+        title: ImageFont.FreeTypeFont,
+        row: ImageFont.FreeTypeFont,
+        row_bold: ImageFont.FreeTypeFont,
+        small: ImageFont.FreeTypeFont,
+        small_mono: ImageFont.FreeTypeFont,
+    ) -> None:
+        self.title = title
+        self.row = row
+        self.row_bold = row_bold
+        self.small = small
+        self.small_mono = small_mono
+
+
+async def _load_fonts(ssh: SlateSSH) -> _Fonts:
+    medium = await fetch_font(ssh, "default_medium")
+    bold = await fetch_font(ssh, "default_bold")
+    mono = await fetch_font(ssh, "default_mono_medium")
+    return _Fonts(
+        title=ImageFont.truetype(str(bold), 13),
+        row=ImageFont.truetype(str(medium), 13),
+        row_bold=ImageFont.truetype(str(bold), 13),
+        small=ImageFont.truetype(str(medium), 9),
+        small_mono=ImageFont.truetype(str(mono), 9),
+    )
+
+
+def _render_one(
+    steps: list[CycleStep], cursor: int, fonts: _Fonts,
 ) -> bytes:
-    """Render PNG bytes for the menu with `cursor` slot highlighted.
-
-    Out of bounds cursor → highlights nothing (idle preview). Empty
-    `steps` → "no cycle configured" placeholder, useful so the cycle
-    script can paint *something* coherent if it's invoked before the
-    user has populated the list.
-    """
     img = Image.new("RGB", (SCREEN_W, SCREEN_H), BG)
     d = ImageDraw.Draw(img)
 
-    # Faint scanlines for the retro feel (mirrors default_wallpaper).
+    # Faint scanlines — matches the wallpaper aesthetic.
     for y in range(0, SCREEN_H, 3):
         d.line([(0, y), (SCREEN_W, y)], fill=SCAN)
 
-    # ── Title bar ────────────────────────────────────────────────
-    title_h = 22
-    d.rectangle([(0, 0), (SCREEN_W, title_h)], fill=BG_2)
-    d.line([(0, title_h), (SCREEN_W, title_h)], fill=BORDER_STRONG)
-    _paste_text(img, "CYCLE", scale=2, color=FG, pos=(10, 4))
-    counter = (
-        f"{cursor + 1} / {len(steps)}"
-        if 0 <= cursor < len(steps)
-        else f"— / {len(steps)}"
-    )
-    counter_img = _text_img(counter, scale=1, color=MUTED)
-    img.paste(counter_img, (SCREEN_W - counter_img.width - 10, 6))
+    _draw_title_bar(d, fonts, cursor=cursor, total=len(steps))
+    _draw_corners(d, color=BORDER_STRONG)
 
     if not steps:
-        _paste_text(
-            img,
-            "no cycle configured",
-            scale=2,
-            color=MUTED,
-            pos=(20, SCREEN_H // 2 - 8),
+        msg = "no cycle configured"
+        w = d.textbbox((0, 0), msg, font=fonts.row)[2]
+        d.text(
+            ((SCREEN_W - w) // 2, SCREEN_H // 2 - 8),
+            msg, fill=MUTED, font=fonts.row,
         )
+        _draw_footer(d, fonts, text="open Settings → Agent in the UI")
         return _to_png(img)
 
-    # ── Step list (paginated around cursor) ─────────────────────
     first, last = _visible_window(len(steps), cursor)
-    row_h = 26
-    y = title_h + 10
+    y = _TITLE_H + 6
     for i in range(first, last):
         step = steps[i]
         is_active = (i == cursor)
-        _draw_row(d, img, y=y, row_h=row_h, idx=i, step=step, active=is_active)
-        y += row_h
+        _draw_row(d, fonts, y=y, idx=i, step=step, active=is_active)
+        y += _ROW_H
 
-    # ── Footer hint ─────────────────────────────────────────────
-    footer_h = 18
-    fy = SCREEN_H - footer_h
-    d.rectangle([(0, fy), (SCREEN_W, SCREEN_H)], fill=BG_2)
-    d.line([(0, fy), (SCREEN_W, fy)], fill=BORDER_STRONG)
-    if 0 <= cursor < len(steps):
-        hint = "release reset to apply"
-    else:
-        hint = "press reset to start"
-    _paste_text(img, hint, scale=1, color=DIM, pos=(8, fy + 4))
-
+    _draw_footer(
+        d, fonts,
+        text=(
+            "press again to advance  ·  release 3s to apply"
+            if 0 <= cursor < len(steps)
+            else "press reset to start"
+        ),
+    )
     return _to_png(img)
 
 
-def render_menu_frames(steps: list[CycleStep]) -> list[bytes]:
-    """One PNG per cursor position. Returns `len(steps)` frames.
+def _draw_title_bar(
+    d: ImageDraw.ImageDraw, fonts: _Fonts, *, cursor: int, total: int,
+) -> None:
+    d.rectangle([(0, 0), (SCREEN_W, _TITLE_H)], fill=_HEADER_BG)
+    d.line([(0, _TITLE_H), (SCREEN_W, _TITLE_H)], fill=BORDER_STRONG)
+    # Accent block to anchor the eye on the left.
+    d.rectangle([(0, 0), (4, _TITLE_H)], fill=DEFAULT_ACCENT)
 
-    Empty `steps` → empty list (no frames to push; the cycle script
-    falls back to its silent log path).
-    """
-    return [render_menu_png(steps, i) for i in range(len(steps))]
+    title = "CYCLE"
+    d.text((14, 6), title, fill=FG, font=fonts.title)
+    title_w = d.textbbox((14, 6), title, font=fonts.title)[2]
+    sub = "profile selector"
+    d.text((title_w + 8, 9), sub, fill=DIM, font=fonts.small)
 
-
-# ---------------------------- helpers ---------------------------- #
+    if total > 0:
+        counter = (
+            f"{cursor + 1:02d}/{total:02d}" if 0 <= cursor < total
+            else f"--/{total:02d}"
+        )
+        cw = d.textbbox((0, 0), counter, font=fonts.small_mono)[2]
+        # Counter chip on the right side of the title bar.
+        cx = SCREEN_W - cw - 14
+        d.rectangle(
+            [(cx - 6, 5), (SCREEN_W - 8, 5 + 14)],
+            outline=BORDER_STRONG, fill=BG_2,
+        )
+        d.text((cx - 2, 7), counter, fill=FG, font=fonts.small_mono)
 
 
 def _visible_window(total: int, cursor: int) -> tuple[int, int]:
-    """Pick a [first, last) slice of `total` steps that keeps `cursor`
-    in view. Used when the list is longer than _MAX_VISIBLE_ROWS."""
     if total <= _MAX_VISIBLE_ROWS:
         return 0, total
     if cursor < 0:
         return 0, _MAX_VISIBLE_ROWS
-    # Try to centre cursor in the window when possible.
     half = _MAX_VISIBLE_ROWS // 2
     first = max(0, cursor - half)
     last = first + _MAX_VISIBLE_ROWS
@@ -150,63 +189,101 @@ def _visible_window(total: int, cursor: int) -> tuple[int, int]:
 
 def _draw_row(
     d: ImageDraw.ImageDraw,
-    img: Image.Image,
+    fonts: _Fonts,
     *,
     y: int,
-    row_h: int,
     idx: int,
     step: CycleStep,
     active: bool,
 ) -> None:
-    margin_x = 10
+    margin = 10
     box_top = y
-    box_bot = y + row_h - 4
+    box_bot = y + _ROW_H - 4
 
     if active:
-        # Accent strip on the left + softer fill on the row.
-        d.rectangle([(0, box_top), (4, box_bot)], fill=DEFAULT_ACCENT)
+        # Accent strip + tinted fill + accent outline. No bullet — the
+        # whole row IS the selection indicator.
         d.rectangle(
-            [(margin_x - 4, box_top), (SCREEN_W - margin_x, box_bot)],
-            fill=(20, 14, 24),
-            outline=DEFAULT_ACCENT,
+            [(margin, box_top), (SCREEN_W - margin, box_bot)],
+            fill=_SELECTED_FILL,
+            outline=_SELECTED_BORDER,
             width=1,
         )
-        bullet_color = DEFAULT_ACCENT
+        d.rectangle(
+            [(margin, box_top), (margin + 3, box_bot)],
+            fill=DEFAULT_ACCENT,
+        )
         text_color = FG
-        bullet = "▶"  # ▶
+        kind_color = DEFAULT_ACCENT
+        font = fonts.row_bold
     else:
+        # Subtle divider under each non-active row — keeps the list
+        # scannable without competing visually with the selection.
+        d.rectangle(
+            [(margin, box_top), (SCREEN_W - margin, box_bot)],
+            fill=_ROW_BG, outline=None,
+        )
         d.line(
-            [(margin_x, box_bot), (SCREEN_W - margin_x, box_bot)],
+            [(margin, box_bot), (SCREEN_W - margin, box_bot)],
             fill=BORDER,
         )
-        bullet_color = DIM
         text_color = MUTED
-        bullet = "◌"  # ◌
+        kind_color = DIM
+        font = fonts.row
 
-    # Bullet — pre-rendered text. Fits nicely with scale=1.
-    _paste_text(img, bullet, scale=2, color=bullet_color, pos=(margin_x + 4, y + 4))
+    # Index pill on the left ("01", "02", …) — uses mono so the digit
+    # column doesn't drift between rows.
+    pill = f"{idx + 1:02d}"
+    d.text((margin + 12, box_top + 6), pill, fill=kind_color, font=fonts.small_mono)
 
-    # Step kind prefix : profiles get nothing, actions get @ so the user
-    # spots them visually as different.
-    label = step.name if step.kind == "profile" else f"@{step.name}"
-    _paste_text(img, label, scale=2, color=text_color, pos=(margin_x + 28, y + 4))
+    # Kind hint and step name.
+    label = step.name
+    name_x = margin + 38
+    d.text((name_x, box_top + 5), label, fill=text_color, font=font)
+
+    # Tag on the right ("ACTION" / "PROFILE") so the user can tell at
+    # a glance what each slot does.
+    tag = "ACTION" if step.kind == "action" else "PROFILE"
+    tag_w = d.textbbox((0, 0), tag, font=fonts.small)[2]
+    d.text(
+        (SCREEN_W - margin - tag_w - 8, box_top + 8),
+        tag, fill=kind_color, font=fonts.small,
+    )
 
 
-def _text_img(text: str, *, scale: int, color: tuple[int, int, int]) -> Image.Image:
-    """Same as `_render_text` but tagged with a clearer name here."""
-    return _render_text(text, scale=scale, color=color)
+def _draw_corners(d: ImageDraw.ImageDraw, *, color: tuple[int, int, int]) -> None:
+    """L-shaped corner brackets in the four corners of the canvas.
+
+    Matches the controller's cyber-card look — tiny detail, big effect."""
+    L = 10
+    M = 2
+    # Top-left
+    d.line([(M, M), (M + L, M)], fill=color, width=1)
+    d.line([(M, M), (M, M + L)], fill=color, width=1)
+    # Top-right
+    d.line([(SCREEN_W - M, M), (SCREEN_W - M - L, M)], fill=color, width=1)
+    d.line([(SCREEN_W - M, M), (SCREEN_W - M, M + L)], fill=color, width=1)
+    # Bottom-left
+    d.line([(M, SCREEN_H - M), (M + L, SCREEN_H - M)], fill=color, width=1)
+    d.line([(M, SCREEN_H - M), (M, SCREEN_H - M - L)], fill=color, width=1)
+    # Bottom-right
+    d.line(
+        [(SCREEN_W - M, SCREEN_H - M), (SCREEN_W - M - L, SCREEN_H - M)],
+        fill=color, width=1,
+    )
+    d.line(
+        [(SCREEN_W - M, SCREEN_H - M), (SCREEN_W - M, SCREEN_H - M - L)],
+        fill=color, width=1,
+    )
 
 
-def _paste_text(
-    img: Image.Image,
-    text: str,
-    *,
-    scale: int,
-    color: tuple[int, int, int],
-    pos: tuple[int, int],
+def _draw_footer(
+    d: ImageDraw.ImageDraw, fonts: _Fonts, *, text: str,
 ) -> None:
-    tile = _text_img(text, scale=scale, color=color)
-    img.paste(tile, pos)
+    fy = SCREEN_H - _FOOTER_H
+    d.rectangle([(0, fy), (SCREEN_W, SCREEN_H)], fill=_HEADER_BG)
+    d.line([(0, fy), (SCREEN_W, fy)], fill=BORDER_STRONG)
+    d.text((10, fy + 5), text, fill=DIM, font=fonts.small)
 
 
 def _to_png(img: Image.Image) -> bytes:

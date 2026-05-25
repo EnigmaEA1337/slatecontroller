@@ -322,7 +322,7 @@ async def sync_button_cycle(
     `{"steps": []}` and prunes all menu frames so the agent has an
     explicit "cycle disabled" signal.
     """
-    from app.profiles.cycle_menu_renderer import render_menu_frames
+    from app.profiles.cycle_menu_renderer import render_menu_frames_async
     from app.profiles.fb_takeover import _png_to_rgb565_portrait
     from app.settings.button_cycle import remote_path, to_agent_payload
 
@@ -349,7 +349,10 @@ async def sync_button_cycle(
         return rep
 
     try:
-        png_frames = await asyncio.to_thread(render_menu_frames, steps)
+        # Rendering needs SSH to (lazily) fetch the Slate's TTF fonts on
+        # first run. Subsequent calls hit the local cache → ~20ms per
+        # frame.
+        png_frames = await render_menu_frames_async(ssh, steps)
     except Exception as exc:  # noqa: BLE001
         rep.errors.append(f"render menu frames: {exc}")
         return rep
