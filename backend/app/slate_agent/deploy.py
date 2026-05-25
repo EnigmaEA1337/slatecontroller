@@ -27,7 +27,20 @@ REMOTE_PROFILES_DIR = f"{REMOTE_ROOT}/profiles"
 REMOTE_STATE_DIR = f"{REMOTE_ROOT}/state"
 REMOTE_SCREENS_DIR = f"{REMOTE_ROOT}/screens"
 REMOTE_SECRETS_DIR = f"{REMOTE_ROOT}/secrets"
+REMOTE_SCRIPTS_DIR = f"{REMOTE_ROOT}/scripts"
 REMOTE_ADGUARD_SECRET = f"{REMOTE_SECRETS_DIR}/adguard.env"
+REMOTE_RAM_MITIGATION = f"{REMOTE_SCRIPTS_DIR}/ram-mitigation.sh"
+
+# Marker for the cron line we own. crontab is shared with whatever else
+# is on the Slate, so we identify our entry by this tail comment and
+# rewrite only that one line — never overwrite the full file.
+CRON_MARKER = "# slate-ctrl:ram-mitigation"
+# 04:00 every day. Quiet hour (most users asleep), gives AdGuard +
+# tailscaled a clean restart before the day's traffic resumes. The
+# `>/dev/null 2>&1` part keeps cron from mailing root each run.
+CRON_ENTRY = (
+    f"0 4 * * * {REMOTE_RAM_MITIGATION} >>/tmp/slate-ctrl-ram.log 2>&1 {CRON_MARKER}"
+)
 
 # Where the agent files live in the controller's source tree.
 LOCAL_SCRIPTS_DIR = Path(__file__).parent / "scripts"
@@ -72,7 +85,8 @@ async def deploy_agent(
     try:
         await ssh.run(
             f"mkdir -p {REMOTE_HANDLERS_DIR} {REMOTE_PROFILES_DIR} "
-            f"{REMOTE_STATE_DIR} {REMOTE_SCREENS_DIR} /usr/local/bin && "
+            f"{REMOTE_STATE_DIR} {REMOTE_SCREENS_DIR} {REMOTE_SCRIPTS_DIR} "
+            f"/usr/local/bin && "
             f"mkdir -p {REMOTE_SECRETS_DIR} && chmod 700 {REMOTE_SECRETS_DIR}",
             timeout=10,
         )
@@ -122,11 +136,70 @@ async def deploy_agent(
         except (SlateSSHError, ValueError) as exc:
             rep.errors.append(f"push adguard secret: {exc}")
 
+    # 5. RAM mitigation script + crontab entry. Counters the observed
+    # ~30-40 MB/day leak across tailscaled + AdGuardHome by restarting
+    # both at 04:00. Idempotent: rewrites only the line tagged with
+    # CRON_MARKER, leaves any other crontab content untouched.
+    ram_script = LOCAL_SCRIPTS_DIR / "ram-mitigation.sh"
+    if ram_script.is_file():
+        try:
+            payload = ram_script.read_bytes()
+            await ssh.put_bytes(payload, REMOTE_RAM_MITIGATION, mode=0o755)
+            rep.pushed.append(f"{REMOTE_RAM_MITIGATION} ({len(payload)} bytes)")
+        except (SlateSSHError, OSError) as exc:
+            rep.errors.append(f"push ram-mitigation script: {exc}")
+        else:
+            try:
+                await _install_cron_entry(ssh)
+                rep.pushed.append(f"crontab :: {CRON_ENTRY}")
+            except SlateSSHError as exc:
+                rep.errors.append(f"install cron entry: {exc}")
+
     logger.info(
         "slate_agent.deploy",
         ok=rep.ok, pushed=len(rep.pushed), errors=len(rep.errors),
     )
     return rep
+
+
+async def _install_cron_entry(ssh: SlateSSH) -> None:
+    """Idempotently install our cron line in /etc/crontabs/root.
+
+    Strategy : read the existing crontab, drop any line tagged with
+    CRON_MARKER (handles upgrades when we change the schedule), append
+    our current line, write it back, then poke crond so it picks up the
+    change without a full restart.
+
+    busybox crond constraints :
+      - crontab file lives at /etc/crontabs/root (per-user, root only here)
+      - busybox cron needs `/etc/init.d/cron reload` (or signal SIGHUP)
+        to re-read after edits
+      - missing /etc/crontabs/root is normal on a fresh device → we
+        create it ourselves
+    """
+    # Read whatever is there now ; tolerate "no such file".
+    read = await ssh.run(
+        "cat /etc/crontabs/root 2>/dev/null || true",
+        timeout=10,
+    )
+    current_lines = read.stdout.splitlines() if read.exit_status == 0 else []
+    # Drop our previous line(s). Use a substring match on the marker so
+    # we don't depend on the exact CRON_ENTRY string staying stable.
+    kept = [ln for ln in current_lines if CRON_MARKER not in ln]
+    kept.append(CRON_ENTRY)
+    new_content = ("\n".join(kept) + "\n").encode("utf-8")
+    # mkdir + write atomically. crontabs/root must be 0600 (busybox crond
+    # refuses to read world-readable crontabs on some builds).
+    await ssh.run("mkdir -p /etc/crontabs", timeout=5)
+    await ssh.put_bytes(new_content, "/etc/crontabs/root", mode=0o600)
+    # Ensure crond is enabled + running, then poke it. enable+start are
+    # idempotent ; reload prompts re-read of the file.
+    await ssh.run(
+        "/etc/init.d/cron enable 2>/dev/null; "
+        "/etc/init.d/cron start 2>/dev/null; "
+        "/etc/init.d/cron reload 2>/dev/null || true",
+        timeout=10,
+    )
 
 
 async def _write_adguard_secret(

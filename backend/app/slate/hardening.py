@@ -622,6 +622,66 @@ async def _ssh_check_memory(ssh: SlateSSH) -> HardeningCheck:
     )
 
 
+async def _ssh_check_ram_mitigation(ssh: SlateSSH) -> HardeningCheck:
+    """Verify the daily restart cron for AdGuard + tailscaled is installed.
+
+    Counterpart to `_ssh_check_memory` — that one alerts when the leak
+    has already filled RAM. This one verifies the preventive measure is
+    in place. Together they form a "detective + preventive" pair for
+    the same root cause.
+
+    Looks for the `slate-ctrl:ram-mitigation` marker in /etc/crontabs/root,
+    installed by `slate_agent.deploy._install_cron_entry`. Also checks
+    crond is actually running — installing the line is necessary but not
+    sufficient.
+    """
+    try:
+        result = await ssh.run(
+            "grep -c 'slate-ctrl:ram-mitigation' /etc/crontabs/root 2>/dev/null || echo 0; "
+            "pidof crond >/dev/null 2>&1 && echo running || echo stopped",
+            timeout=5,
+        )
+    except SlateSSHError as exc:
+        return HardeningCheck(
+            name="Mitigation RAM (cron restart 24h)",
+            points=0, max_points=5,
+            status="needs_probe", note=f"SSH error: {exc}",
+        )
+    lines = result.stdout.strip().splitlines()
+    has_entry = len(lines) >= 1 and lines[0].strip() != "0"
+    crond_running = len(lines) >= 2 and lines[1].strip() == "running"
+    if has_entry and crond_running:
+        return HardeningCheck(
+            name="Mitigation RAM (cron restart 24h)",
+            points=5, max_points=5,
+            status="ready",
+            note=(
+                "cron 04:00 actif — restart quotidien adguardhome + tailscaled "
+                "contre le leak ~30-40 MB/jour observé"
+            ),
+        )
+    if has_entry and not crond_running:
+        return HardeningCheck(
+            name="Mitigation RAM (cron arrêté)",
+            points=2, max_points=5,
+            status="ready",
+            note=(
+                "entrée crontab présente mais crond arrêté — "
+                "`/etc/init.d/cron start` ou re-deploy l'agent"
+            ),
+        )
+    return HardeningCheck(
+        name="Mitigation RAM (cron restart 24h)",
+        points=0, max_points=5,
+        status="ready",
+        note=(
+            "aucune cron de restart auto — daemons leak ~30-40 MB/jour "
+            "→ OOM en ~3-4 jours. Re-deploy l'agent (Devices > Deploy) "
+            "pour installer."
+        ),
+    )
+
+
 def _controller_admin_password_check() -> HardeningCheck:
     """Verify the controller's own admin password is not default/weak.
 
@@ -1373,6 +1433,7 @@ async def compute_hardening(
         checks.append(await _ssh_check_upnp_off(ssh))
         checks.append(await _ssh_check_memory(ssh))
         checks.append(await _ssh_check_screen_lock(ssh))
+        checks.append(await _ssh_check_ram_mitigation(ssh))
     else:
         checks.append(HardeningCheck(
             name="SSH key-only auth", points=0, max_points=15,
@@ -1388,6 +1449,10 @@ async def compute_hardening(
         ))
         checks.append(HardeningCheck(
             name="PIN écran tactile", points=0, max_points=10,
+            status="needs_probe", note="canal SSH désactivé",
+        ))
+        checks.append(HardeningCheck(
+            name="Mitigation RAM (cron restart 24h)", points=0, max_points=5,
             status="needs_probe", note="canal SSH désactivé",
         ))
 
