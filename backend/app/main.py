@@ -206,54 +206,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         logger.info("devices.seeded_from_env", slug=default_device.slug, host=host)
 
-    creds = await device_store.get_rpc_credentials(default_device.slug)
-    if creds is None:
-        raise RuntimeError(
-            f"default device {default_device.slug!r} has no stored credentials",
-        )
-    rpc_username, rpc_password = creds
-    rpc_url = (
-        f"{default_device.rpc_scheme}://{default_device.host}:"
-        f"{default_device.rpc_port}/rpc"
-        if default_device.rpc_port not in (80, 443)
-        else f"{default_device.rpc_scheme}://{default_device.host}/rpc"
-    )
+    # SSH keypair store needs to exist before the registry builds devices
+    # so the registry can auto-switch to key auth on cold builds.
+    ssh_keypair_store = SSHKeypairStore(session_factory)
+    app.state.ssh_keypair_store = ssh_keypair_store
 
-    # URL resolver: automatic LAN ↔ Tailscale ↔ custom failover. Seeded
-    # from the default device's `admin_urls`. If empty (legacy row), fall
-    # back to the single `rpc_url` derived from `host` above. The resolver
-    # probes port 22 (SSH) on each candidate to decide which is reachable.
-    from app.slate.url_resolver import SlateUrlResolver
+    # Per-device connection registry — lazy cache of (slug → SlateClient,
+    # SlateSSH, URL resolver, AdGuardManager). Replaces the previous
+    # singleton-per-default-device pattern: every route now resolves its
+    # device through the registry. Existing routes get the default device
+    # via the unchanged DI helpers (`get_slate_client` etc.) ; new routes
+    # take an optional `?device=<slug>` query param to target a specific
+    # one. Switching the default device no longer requires a backend
+    # restart — the new default is picked up on the next request.
+    from app.devices.registry import DeviceConnectionsRegistry
 
-    admin_urls = list(default_device.admin_urls or [])
-    if not admin_urls:
-        admin_urls = [rpc_url]
-    app.state.slate_url_resolver = SlateUrlResolver(
-        urls=admin_urls,
-        probe_port=default_device.ssh_port or 22,
-        probe_timeout=2.0,
-        cache_ttl=10.0,
+    device_registry = DeviceConnectionsRegistry(
+        device_store=device_store,
+        ssh_keypair_store=ssh_keypair_store,
+        settings=settings,
     )
-    # Initial probe to populate the active URL — without it, the first
-    # SSH call always uses urls[0] regardless of reachability.
-    await app.state.slate_url_resolver.force_refresh()
+    app.state.device_registry = device_registry
 
-    # Singleton SlateClient + SlateSSH — bound to the default device. Both
-    # consume the URL resolver for transparent LAN ↔ Tailscale ↔ custom
-    # failover on each (re)connect.
-    app.state.slate_client = SlateClient(
-        url=rpc_url,
-        username=rpc_username,
-        password=rpc_password,
-        url_resolver=app.state.slate_url_resolver,
-    )
-    app.state.slate_ssh = SlateSSH(
-        slate_url=rpc_url,  # fallback if resolver fails
-        username=rpc_username,
-        password=rpc_password,
-        port=default_device.ssh_port,
-        url_resolver=app.state.slate_url_resolver,
-    )
+    # Pre-warm the default device so the first request after boot doesn't
+    # pay the cold-build cost (resolver probe + SSH connect, ~200-500ms).
+    # Also surfaces config errors at boot time instead of on first call.
+    default_conn = await device_registry.for_default()
+
+    # Backwards-compatible app.state shortcuts. Most existing routes still
+    # reach for these directly; behind the curtain they're the default
+    # device's bundle. Kept here so the lifespan teardown + a handful of
+    # background tasks (tailscale watchdog) that don't take a slug yet
+    # have a stable handle.
+    app.state.slate_url_resolver = default_conn.url_resolver
+    app.state.slate_client = default_conn.client
+    app.state.slate_ssh = default_conn.ssh
+    app.state.adguard_manager = default_conn.adguard
 
     # Networks catalog (must seed BEFORE wifi — SSIDs reference network slugs).
     network_store = NetworkStore(session_factory)
@@ -277,36 +265,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # time, which produces the proper cyber-theme PNG using the Slate's
     # own TTF fonts.
 
-    # SSH keypair store (per-device). If the default device already has a
-    # deployed keypair, switch its SSH channel to use it so we don't fall
-    # back to password unnecessarily. Per-device routing of multi-device
-    # SSH channels is a future iteration ; today only the default device
-    # is wired into app.state.slate_ssh.
-    ssh_keypair_store = SSHKeypairStore(session_factory)
-    app.state.ssh_keypair_store = ssh_keypair_store
-    try:
-        ssh_status = await ssh_keypair_store.get_status(default_device.slug)
-    except Exception as exc:  # noqa: BLE001 — boot must keep going
-        logger.warning("ssh_keypair.boot_status_failed", error=str(exc))
-        ssh_status = None
-    if ssh_status and ssh_status.generated and ssh_status.deployed_to_slate:
-        private_pem = await ssh_keypair_store.get_private_pem(default_device.slug)
-        if private_pem:
-            await app.state.slate_ssh.use_private_key(private_pem)
-            logger.info(
-                "slate_ssh.using_stored_keypair", device=default_device.slug,
-            )
-
-    # AdGuard manager — pilots /etc/init.d/adguardhome via SSH + talks to the
-    # REST API on :3000 for stats and filters.
-    # We reuse the controller's admin credentials so the user has a single
-    # password to remember (the AdGuard web UI then accepts the same login).
-    app.state.adguard_manager = AdGuardManager(
-        ssh=app.state.slate_ssh,
-        slate_host=app.state.slate_ssh.host,
-        admin_username=settings.admin_username,
-        admin_password=settings.admin_password,
-    )
+    # NOTE: SSH keypair load + AdGuardManager init used to live here.
+    # Both are now handled by `DeviceConnectionsRegistry._build` per
+    # device, so multi-device support comes for free.
 
     # DNS protection: per-network security levels applied via AdGuard Clients API.
     from app.dns.manager import DnsProtectionManager, DnsProtectionStore
@@ -394,9 +355,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state._tailscale_ha_task
         except (Exception, _asyncio.CancelledError):  # noqa: BLE001
             pass
-        await app.state.slate_client.disconnect()
-        await app.state.slate_ssh.close()
-        await app.state.adguard_manager.aclose()
+        # Close every per-device bundle in the registry. This supersedes
+        # the old "close the singleton client+ssh+adguard" trio — each
+        # bundle's aclose() handles them all.
+        await app.state.device_registry.aclose_all()
         await app.state._security_osv_source.aclose()
         await app.state._security_cve2capec.aclose()
         await app.state.exploit_enricher.aclose()

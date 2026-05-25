@@ -26,6 +26,8 @@ from app.devices.models import (
     FactoryResetConfirm,
     FactoryResetReport,
 )
+from app.api.deps import get_device_registry
+from app.devices.registry import DeviceConnectionsRegistry
 from app.devices.store import DeviceStore, DeviceStoreError
 from app.devices.tls import fetch_cert
 from app.settings.ssh_keys import SSHKeypairStore
@@ -175,6 +177,9 @@ async def update_device(
     store: Annotated[DeviceStore, Depends(get_device_store)],
     keypair_store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store_from_app)],
     resolver: Annotated[SlateUrlResolver, Depends(get_slate_url_resolver)],
+    registry: Annotated[
+        DeviceConnectionsRegistry, Depends(get_device_registry),
+    ],
 ) -> DevicePublic:
     updates = {
         "label": body.label,
@@ -211,6 +216,26 @@ async def update_device(
             await resolver.force_refresh()
         except (ValueError, RuntimeError) as exc:
             logger.warning("device.update.resolver_refresh_failed", error=str(exc))
+    # Invalidate the registry cache for this device so the next request
+    # rebuilds with fresh credentials / URLs / port. The resolver hot-swap
+    # above covers admin_urls for the still-cached default device, but the
+    # SlateClient / SlateSSH / AdGuardManager bundle (and any non-default
+    # device's resolver) needs a full rebuild when creds / ports change.
+    #
+    # NB : body.* fields default to None when the client doesn't send them.
+    # Only treat a field as "actually changed" when it was sent AND differs
+    # from what's in the row — otherwise every `notes`-only PATCH would
+    # tear down the cached SSH session for no reason.
+    creds_changed = (
+        body.rpc_username is not None or body.rpc_password is not None
+    )
+    ports_changed = (
+        (body.rpc_port is not None and body.rpc_port != row.rpc_port)
+        or (body.ssh_port is not None and body.ssh_port != row.ssh_port)
+    )
+    urls_changed = body.admin_urls is not None
+    if creds_changed or ports_changed or urls_changed:
+        await registry.invalidate(slug)
     return await _to_public(row=row, store=store, keypair_store=keypair_store)
 
 
@@ -219,6 +244,9 @@ async def delete_device(
     slug: str,
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[DeviceStore, Depends(get_device_store)],
+    registry: Annotated[
+        DeviceConnectionsRegistry, Depends(get_device_registry),
+    ],
 ) -> None:
     row = await store.get_by_slug(slug)
     if row is None:
@@ -231,6 +259,9 @@ async def delete_device(
     deleted = await store.delete(slug)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"device {slug!r} not found")
+    # Drop the cached connections so we don't keep a dangling SSH/HTTP
+    # session for a device that no longer exists.
+    await registry.invalidate(slug)
 
 
 @router.post("/{slug}/probe", response_model=DevicePublic)

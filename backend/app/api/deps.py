@@ -1,10 +1,26 @@
-"""FastAPI dependency injection helpers."""
+"""FastAPI dependency injection helpers.
+
+Per-device runtime objects (SlateClient, SlateSSH, URL resolver,
+AdGuardManager) come from `DeviceConnectionsRegistry` — a lazy
+`slug → bundle` cache. The default-device shortcuts kept below
+(`get_slate_client`, `get_slate_ssh`, …) resolve the default device
+through the registry at request time. Routes that want to target a
+specific device should take an optional `?device=<slug>` query param
+and call `get_device_connections_for_slug` instead.
+"""
 
 from __future__ import annotations
 
-from fastapi import Request
+from typing import Annotated
+
+from fastapi import Depends, HTTPException, Query, Request, status
 
 from app.adguard.manager import AdGuardManager
+from app.devices.registry import (
+    DeviceConnections,
+    DeviceConnectionsRegistry,
+    DeviceRegistryError,
+)
 from app.devices.store import DeviceStore
 from app.dns.manager import DnsProtectionManager
 from app.dns.store import DnsSecurityLevelStore
@@ -23,16 +39,62 @@ from app.vpn.proton_client import ProtonClient
 from app.wifi.store import WifiSsidStore
 
 
-def get_slate_client(request: Request) -> SlateClient:
-    """Return the singleton `SlateClient` bound to the application lifespan."""
-    client: SlateClient = request.app.state.slate_client
-    return client
+def get_device_registry(request: Request) -> DeviceConnectionsRegistry:
+    """Return the per-device connection registry bound to the lifespan."""
+    return request.app.state.device_registry
 
 
-def get_slate_ssh(request: Request) -> SlateSSH:
-    """Return the singleton `SlateSSH` bound to the application lifespan."""
-    ssh: SlateSSH = request.app.state.slate_ssh
-    return ssh
+async def get_device_connections(
+    request: Request,
+    device: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Optional device slug. Omit to use the default device. "
+                "Use this to target a non-default device without "
+                "restarting the controller."
+            ),
+        ),
+    ] = None,
+) -> DeviceConnections:
+    """Resolve a `DeviceConnections` bundle from the optional ?device= query.
+
+    Default = the device with `is_default=True`. Wraps registry errors
+    into a clean HTTP response so callers see 404/503 rather than 500.
+    """
+    registry: DeviceConnectionsRegistry = request.app.state.device_registry
+    try:
+        if device is None:
+            return await registry.for_default()
+        return await registry.for_slug(device)
+    except DeviceRegistryError as exc:
+        # "unknown device" → 404 ; "no device registered" / "no creds" → 503.
+        msg = str(exc)
+        if "unknown device" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=msg,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=msg,
+        ) from exc
+
+
+async def get_slate_client(
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+) -> SlateClient:
+    """Return the `SlateClient` for the requested device (default if omitted).
+
+    Same name + position as the pre-multi-device helper, so every existing
+    `Depends(get_slate_client)` keeps working without changes.
+    """
+    return conn.client
+
+
+async def get_slate_ssh(
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+) -> SlateSSH:
+    """Return the `SlateSSH` channel for the requested device."""
+    return conn.ssh
 
 
 def get_profile_manager(request: Request) -> ProfileManager:
@@ -83,10 +145,11 @@ def get_ssh_keypair_store(request: Request) -> SSHKeypairStore:
     return store
 
 
-def get_adguard_manager(request: Request) -> AdGuardManager:
-    """Return the singleton `AdGuardManager` bound to the application lifespan."""
-    manager: AdGuardManager = request.app.state.adguard_manager
-    return manager
+async def get_adguard_manager(
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+) -> AdGuardManager:
+    """Return the `AdGuardManager` bound to the requested device's SSH channel."""
+    return conn.adguard
 
 
 def get_security_store(request: Request) -> SecurityStore:
@@ -119,7 +182,8 @@ def get_dns_security_level_store(request: Request) -> DnsSecurityLevelStore:
     return store
 
 
-def get_slate_url_resolver(request: Request) -> SlateUrlResolver:
-    """Return the singleton `SlateUrlResolver` bound to the application lifespan."""
-    resolver: SlateUrlResolver = request.app.state.slate_url_resolver
-    return resolver
+async def get_slate_url_resolver(
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+) -> SlateUrlResolver:
+    """Return the URL resolver for the requested device."""
+    return conn.url_resolver
