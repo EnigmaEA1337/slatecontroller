@@ -31,6 +31,9 @@ const ProtonVPN = lazy(() => import("./pages/ProtonVPN"));
 const Tailscale = lazy(() => import("./pages/Tailscale"));
 const AdGuard = lazy(() => import("./pages/AdGuard"));
 const ProtectionDns = lazy(() => import("./pages/protection/Dns"));
+const ProtectionFirewall = lazy(
+  () => import("./pages/protection/Firewall"),
+);
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
 const SettingsSshKey = lazy(() => import("./pages/settings/SshKey"));
 const SettingsConnectivity = lazy(
@@ -70,6 +73,10 @@ export default function App() {
           <Route path="/vpn/tailscale" element={<Tailscale />} />
           <Route path="/protection/adguard" element={<AdGuard />} />
           <Route path="/protection/dns" element={<ProtectionDns />} />
+          <Route
+            path="/protection/firewall"
+            element={<ProtectionFirewall />}
+          />
           <Route path="/settings" element={<SettingsHub />} />
           <Route path="/settings/ssh-key" element={<SettingsSshKey />} />
           <Route path="/settings/connectivity" element={<SettingsConnectivity />} />

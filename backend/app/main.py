@@ -16,6 +16,7 @@ from app.api.routes import agent as agent_routes
 from app.api.routes import auth as auth_routes
 from app.api.routes import devices as device_routes
 from app.api.routes import dns_protection as dns_protection_routes
+from app.api.routes import firewall as firewall_routes
 from app.api.routes import networks as network_routes
 from app.api.routes import profiles as profile_routes
 from app.api.routes import proton as proton_routes
@@ -411,6 +412,7 @@ def create_app() -> FastAPI:
     app.include_router(tailscale_routes.router, prefix="/api")
     app.include_router(agent_routes.router, prefix="/api")
     app.include_router(dns_protection_routes.router, prefix="/api")
+    app.include_router(firewall_routes.router, prefix="/api")
 
     return app
 

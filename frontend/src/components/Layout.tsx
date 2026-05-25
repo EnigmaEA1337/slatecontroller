@@ -68,6 +68,7 @@ const vpnChildren = [
 const protectionChildren = [
   { to: "/protection/adguard", label: "AdGuard" },
   { to: "/protection/dns", label: "DNS" },
+  { to: "/protection/firewall", label: "Firewall" },
 ];
 
 export default function Layout() {
