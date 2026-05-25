@@ -278,7 +278,7 @@ class AdGuardManager:
 
     async def get_dns_config(self) -> dict[str, Any]:
         """Read the full /control/dns_info block. We use it to introspect
-        enable_dnssec, upstream_dns, fallback_dns, cache_size, etc."""
+        dnssec_enabled, upstream_dns, fallback_dns, cache_size, etc."""
         try:
             resp = await self._http.get("/control/dns_info")
             resp.raise_for_status()
@@ -307,7 +307,7 @@ class AdGuardManager:
             current = await self.get_dns_config()
         except AdGuardError:
             raise
-        current["enable_dnssec"] = bool(enabled)
+        current["dnssec_enabled"] = bool(enabled)
         try:
             resp = await self._http.post("/control/dns_config", json=current)
             resp.raise_for_status()

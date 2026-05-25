@@ -246,7 +246,7 @@ async def get_dnssec(
             detail=str(exc),
         ) from exc
     return DnssecStatusResponse(
-        enabled=bool(cfg.get("enable_dnssec", False)),
+        enabled=bool(cfg.get("dnssec_enabled", False)),
         upstream_dns=list(cfg.get("upstream_dns", []) or []),
         fallback_dns=list(cfg.get("fallback_dns", []) or []),
     )
@@ -273,7 +273,7 @@ async def set_dnssec(
             detail=str(exc),
         ) from exc
     return DnssecStatusResponse(
-        enabled=bool(cfg.get("enable_dnssec", False)),
+        enabled=bool(cfg.get("dnssec_enabled", False)),
         upstream_dns=list(cfg.get("upstream_dns", []) or []),
         fallback_dns=list(cfg.get("fallback_dns", []) or []),
     )

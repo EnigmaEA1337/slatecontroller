@@ -692,7 +692,7 @@ async def _adguard_dns_protection_check(
 ) -> list[HardeningCheck]:
     """Two checks bundled together because they share one AdGuard REST round-trip:
 
-    1. **DNSSEC validation** (5 pts) — `enable_dnssec=true` on AdGuard. Without
+    1. **DNSSEC validation** (5 pts) — `dnssec_enabled=true` on AdGuard. Without
        it the controller blindly trusts whatever the upstream resolver returns,
        so a BGP hijack of Quad9 / cache-poisoned upstream slips through.
     2. **HaGeZi DoH/VPN bypass blocklist active** (5 pts) — the catalog ships
@@ -718,7 +718,7 @@ async def _adguard_dns_protection_check(
     dnssec_check: HardeningCheck
     try:
         cfg = await manager.get_dns_config()
-        dnssec_on = bool(cfg.get("enable_dnssec", False))
+        dnssec_on = bool(cfg.get("dnssec_enabled", False))
         dnssec_check = HardeningCheck(
             name="Validation DNSSEC (AdGuard)",
             points=5 if dnssec_on else 0,
