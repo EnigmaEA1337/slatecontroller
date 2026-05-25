@@ -714,13 +714,35 @@ async def activate_profile(
     request: Request,
     store: Annotated[ProfileStore, Depends(get_profile_store)],
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> ActiveProfileResponse:
-    """Mark a profile as active AND push the appliable subsystems to the Slate.
+    """Mark a profile as active AND apply it on the Slate.
 
-    Currently wired: Tailscale subsystem (Phase 2b — Tailscale slice). Other
-    subsystems (Wi-Fi SSIDs, AdGuard, firewall lockdown, VPN switch) are
-    still marker-only and will be progressively wired in.
+    Two paths, picked at runtime based on agent presence :
+
+    **Agent path** (preferred — when `slate-ctrl version` succeeds on the
+    Slate). The controller :
+      1. Syncs the profile JSON + loading screen + wallpapers to the
+         Slate so the agent's local handlers have fresh artifacts.
+      2. Invokes `slate-ctrl apply <name>` over SSH — the agent's 9 shell
+         handlers (dns, wifi, adguard, tailscale, screen, firewall, vpn,
+         tor, wallpaper) apply the profile *locally* on the Slate. Same
+         path the physical button uses ; same path that re-applies the
+         active profile at boot.
+      3. Applies the controller-side HA watchdog overrides (cf
+         `apply_tailscale_ha_only`) — the agent doesn't touch the
+         controller's DB.
+
+    **Fallback path** (agent not deployed). The controller drives each
+    subsystem itself over SSH : status overlay → Tailscale via
+    `TailscaleClient` → screen wallpaper applier. This is the original
+    Phase 2b implementation, kept so the "Activer" button degrades
+    gracefully on freshly-adopted devices before `/api/agent/deploy`
+    has been run.
+
+    Errors at any step don't roll back the active marker; `applied`
+    surfaces which subsystems landed.
     """
     try:
         await store.set_active(name)
@@ -731,39 +753,115 @@ async def activate_profile(
         ) from exc
     stored = await store.get(name)
 
-    # Apply pipeline:
-    #   1. Push "MISE A JOUR depuis Slate Controller" overlay so the user
-    #      sees the change in progress on the physical screen.
-    #   2. Run Tailscale applier (~1-3s of SSH work).
-    #   3. Run screen wallpaper applier — overwrites the overlay with the
-    #      profile's actual wallpaper(s) at the end.
-    # Errors at any step don't roll back the active marker; the report
-    # tells the user which subsystems didn't land.
+    # Path selection: is slate-ctrl installed AND callable?
+    from app.slate_agent.deploy import get_agent_version
+
+    agent_version = await get_agent_version(ssh)
+    applied: dict[str, dict] = {}
+
+    if agent_version is not None:
+        applied = await _activate_via_agent(
+            name=name, stored=stored, request=request, ssh=ssh, wifi=wifi,
+        )
+        logger.info(
+            "profile.activated.via_agent",
+            name=name, agent_version=agent_version,
+            agent_ok=applied.get("agent", {}).get("ok"),
+        )
+    else:
+        applied = await _activate_via_controller(
+            name=name, stored=stored, request=request, ssh=ssh,
+        )
+        logger.info(
+            "profile.activated.via_controller_fallback",
+            name=name,
+        )
+
+    return ActiveProfileResponse(active_name=name, profile=stored.profile, applied=applied)
+
+
+async def _activate_via_agent(
+    *,
+    name: str,
+    stored: StoredProfile,
+    request: Request,
+    ssh: SlateSSH,
+    wifi: WifiSsidStore,
+) -> dict[str, dict]:
+    """Agent-driven activation. See `activate_profile` docstring."""
+    from app.slate_agent.sync import (
+        apply_remote_profile,
+        sync_loading_screens,
+        sync_profile_wallpapers,
+        sync_profiles,
+    )
+    from app.tailscale.applier import apply_tailscale_ha_only
+
+    applied: dict[str, dict] = {}
+    profile = stored.profile
+    wifi_catalog = await wifi.list_all()
+    wallpaper_store = _wallpaper_store(request)
+
+    # 1. Sync the 3 artifact families for this single profile. Same code
+    # the user runs from "Synchroniser le Slate" — we just scope it to
+    # the one profile being activated so the apply works against
+    # up-to-date artifacts. ~1-3s of SSH/SFTP work.
+    json_rep = await sync_profiles(
+        ssh, [profile], wifi_catalog=wifi_catalog,
+        wallpaper_store=wallpaper_store,
+    )
+    screen_rep = await sync_loading_screens(ssh, [profile])
+    wallpaper_rep = await sync_profile_wallpapers(
+        ssh, [profile], wallpaper_store,
+    )
+    applied["sync"] = {
+        "json": json_rep.to_dict(),
+        "screens": screen_rep.to_dict(),
+        "wallpapers": wallpaper_rep.to_dict(),
+    }
+
+    # 2. Hand the actual apply to the agent. Its handlers paint the
+    # loading screen, run each subsystem (dns/wifi/adguard/…) sequentially,
+    # then paint the final wallpaper. Timeout is high (60s) because the
+    # firewall reload alone can take 5-10s.
+    ok, output = await apply_remote_profile(ssh, name)
+    applied["agent"] = {"ok": ok, "output": output}
+
+    # 3. Controller-side bit the agent can't do : HA watchdog config in
+    # our own DB. Returns a TailscaleApplyReport even if profile.tailscale.ha
+    # is None (no-op then).
+    ha_rep = await apply_tailscale_ha_only(
+        profile.tailscale, request.app.state.tailscale_ha_store,
+    )
+    applied["ha_watchdog"] = ha_rep.to_dict()
+
+    return applied
+
+
+async def _activate_via_controller(
+    *,
+    name: str,
+    stored: StoredProfile,
+    request: Request,
+    ssh: SlateSSH,
+) -> dict[str, dict]:
+    """Legacy fallback when the agent isn't deployed. Same flow as the
+    pre-agent activation: overlay → Tailscale via SSH → screen applier."""
     from app.profiles.screen_applier import apply_screen_wallpaper
-    from app.profiles.status_screen import push_status_overlay
+    from app.profiles.slate_message import display_message
     from app.tailscale.applier import apply_tailscale_profile
     from app.tailscale.client import TailscaleClient
 
     applied: dict[str, dict] = {}
-
-    # 1. Status message via the public display_message() helper. Gated by
-    # the Settings → Communication → "show_screen_messages" toggle so the
-    # user can opt out of the visible screen takeover during activations.
     ws = _wallpaper_store(request)
-    from app.db.database import make_session_factory as _msf
+
+    # 1. Status overlay — gated by show_screen_messages.
     from app.settings.slate_comms import SlateCommsStore as _SCS
-    comms_store = _SCS(_msf(request.app.state.db_engine))
+    comms_store = _SCS(make_session_factory(request.app.state.db_engine))
     comms = await comms_store.get()
     import asyncio as _asyncio
     _fb_task: _asyncio.Task | None = None
     if comms.get("show_screen_messages", True):
-        # restart_after=False because step 3 below (screen_applier) will do
-        # the single final restart after writing the new wallpapers — single
-        # restart = no flicker.
-        # 6s hold (was 4s) so the message is comfortable to spot — the user
-        # is typically looking at the browser when clicking Activer and the
-        # first 1-2s are spent SSH-connecting + writing fb.
-        from app.profiles.slate_message import display_message
         _fb_task = _asyncio.create_task(
             display_message(
                 ssh,
@@ -775,7 +873,7 @@ async def activate_profile(
             )
         )
 
-    # 2. Tailscale.
+    # 2. Tailscale via controller-side applier.
     ts_report = await apply_tailscale_profile(
         stored.profile.tailscale,
         TailscaleClient(ssh),
@@ -783,9 +881,7 @@ async def activate_profile(
     )
     applied["tailscale"] = ts_report.to_dict()
 
-    # 3. Wait for the fb takeover to finish (it includes the on-screen hold
-    # + gl_screen restart). Then push the profile's wallpapers so gl_screen
-    # repaints with the right content.
+    # 3. Wait for overlay; push wallpapers.
     if _fb_task is not None:
         try:
             fb_report = await _fb_task
@@ -812,19 +908,7 @@ async def activate_profile(
             "ok": False, "skipped": False, "changes": [],
             "errors": [f"applier crashed: {type(exc).__name__}: {exc}"],
         }
-
-    logger.info(
-        "profile.activated",
-        name=name,
-        applied_to_slate=True,
-        tailscale_ok=ts_report.ok,
-        tailscale_changes=ts_report.changes,
-        tailscale_errors=ts_report.errors,
-        screen_ok=screen_report.ok,
-        screen_changes=screen_report.changes,
-        screen_errors=screen_report.errors,
-    )
-    return ActiveProfileResponse(active_name=name, profile=stored.profile, applied=applied)
+    return applied
 
 
 @router.post("/{name}/plan")

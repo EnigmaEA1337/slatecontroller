@@ -104,6 +104,23 @@ async def apply_tailscale_profile(
     return rep
 
 
+async def apply_tailscale_ha_only(
+    cfg: TailscaleConfig,
+    ha_store: TailscaleHAStore,
+) -> TailscaleApplyReport:
+    """Apply ONLY the controller-side HA watchdog config from a profile.
+
+    Used by the agent activation path : the slate-ctrl tailscale.sh
+    handler owns the on-Slate state (daemon up/down, exit-node, …) but
+    can't touch the controller's HA store DB. This helper bridges the
+    gap. Returns a report just like apply_tailscale_profile but skips
+    every SSH-level operation.
+    """
+    rep = TailscaleApplyReport()
+    await _apply_ha(cfg, ha_store, rep)
+    return rep
+
+
 async def _apply_ha(
     cfg: TailscaleConfig,
     ha_store: TailscaleHAStore,
