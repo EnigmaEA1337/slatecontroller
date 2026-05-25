@@ -389,3 +389,81 @@ async def set_slate_comms(
         show_screen_messages=new_state["show_screen_messages"],
     )
     return new_state
+
+
+# ---- Reset-button profile cycle ----
+# Short press of the reset button (< 3s) cycles through this list on the
+# Slate. The cycle runs 100% locally on the device (slate-ctrl + handlers,
+# no controller round-trip), so it works offline / on the road / when the
+# controller is down. We just store the ordered list here and push it to
+# /etc/slate-controller/cycle.json via the agent sync.
+
+
+class ButtonCycleBody(BaseModel):
+    steps: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of cycle steps. Each item is "
+            '{kind: "profile"|"action", name: str}.\n'
+            'Examples: {"kind":"profile","name":"mission"} or '
+            '{"kind":"action","name":"update"}.\n'
+            "Empty list disables the cycle (button-press becomes a logged"
+            " no-op on the Slate)."
+        ),
+    )
+
+
+def _button_cycle_store(request: Request):
+    from app.db.database import make_session_factory
+    from app.settings.button_cycle import ButtonCycleStore
+    sf = make_session_factory(request.app.state.db_engine)
+    return ButtonCycleStore(sf)
+
+
+@router.get("/button-cycle")
+async def get_button_cycle(
+    request: Request,
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    steps = await _button_cycle_store(request).get()
+    return {"steps": [s.model_dump() for s in steps]}
+
+
+@router.put("/button-cycle")
+async def set_button_cycle(
+    body: ButtonCycleBody,
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Save the cycle list AND push it to the Slate immediately.
+
+    Pushes `cycle.json` to /etc/slate-controller/cycle.json on the Slate
+    so the next button press uses the new list right away — no waiting
+    for the next full /api/agent/sync.
+    """
+    from app.settings.button_cycle import CycleStep
+    from app.slate_agent.sync import sync_button_cycle
+
+    typed = [CycleStep.model_validate(s) for s in body.steps]
+    saved = await _button_cycle_store(request).save(typed)
+    pushed = False
+    push_error: str | None = None
+    try:
+        rep = await sync_button_cycle(ssh, saved)
+        pushed = rep.ok
+        if rep.errors:
+            push_error = "; ".join(rep.errors)
+    except Exception as exc:  # noqa: BLE001 - never break the save on a sync hiccup
+        push_error = f"sync_button_cycle crashed: {exc}"
+    logger.info(
+        "settings.button_cycle.saved",
+        username=user.username, count=len(saved),
+        kinds=[s.kind for s in saved],
+        pushed=pushed, push_error=push_error,
+    )
+    return {
+        "steps": [s.model_dump() for s in saved],
+        "pushed_to_slate": pushed,
+        "push_error": push_error,
+    }

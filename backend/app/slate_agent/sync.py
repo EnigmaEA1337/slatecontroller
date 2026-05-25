@@ -300,6 +300,34 @@ async def sync_profile_wallpapers(
     return rep
 
 
+async def sync_button_cycle(
+    ssh: SlateSSH, steps: list,
+) -> SyncReport:
+    """Push the reset-button cycle list to /etc/slate-controller/cycle.json.
+
+    `steps` is the typed `CycleStep` list from `ButtonCycleStore.get()`.
+    Idempotent — overwrites the file each call. Empty list is still
+    pushed (writes `{"steps": []}`) so the agent has an explicit
+    "cycle disabled" signal rather than reading a stale config from
+    a previous sync.
+    """
+    from app.settings.button_cycle import remote_path, to_agent_payload
+
+    rep = SyncReport()
+    target = remote_path()
+    payload = to_agent_payload(steps)
+    try:
+        await ssh.put_bytes(payload, target, mode=0o644)
+        rep.pushed.append(f"cycle ({len(steps)} steps, {len(payload)}B)")
+    except SlateSSHError as exc:
+        rep.errors.append(f"sync cycle.json: {exc}")
+    logger.info(
+        "slate_agent.sync_button_cycle",
+        ok=rep.ok, steps=len(steps),
+    )
+    return rep
+
+
 async def list_remote_profiles(ssh: SlateSSH) -> list[str]:
     """Return the profile names currently present on the Slate."""
     try:

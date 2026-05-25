@@ -31,6 +31,7 @@ import {
   syncAgentProfiles,
   type AgentApplyResult,
 } from "@/api/agent";
+import ButtonCyclePanel from "@/components/ButtonCyclePanel";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -289,6 +290,11 @@ export default function Agent() {
           </>
         )}
       </section>
+
+      {/* ── Reset-button profile cycle ─────────────────────────────── */}
+      <div className="mt-4">
+        <ButtonCyclePanel />
+      </div>
 
       {/* ── Manual refresh ────────────────────────────────────────── */}
       <div className="mt-4 flex justify-end">

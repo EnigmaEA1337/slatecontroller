@@ -29,10 +29,12 @@ from app.wifi.store import WifiSsidStore
 from app.db.database import make_session_factory
 from app.profiles.wallpapers import WallpaperStore
 from app.slate_agent.deploy import deploy_agent, get_agent_version
+from app.settings.button_cycle import ButtonCycleStore
 from app.slate_agent.sync import (
     apply_remote_profile,
     get_active_remote_profile,
     list_remote_profiles,
+    sync_button_cycle,
     sync_loading_screens,
     sync_profile_wallpapers,
     sync_profiles,
@@ -139,19 +141,32 @@ async def agent_sync(
     wallpapers_report = await sync_profile_wallpapers(
         ssh, profiles, wallpaper_store,
     )
+    # Reset-button profile cycle. Push the configured cycle (or an empty
+    # one) so the agent's cycle-profile.sh always has a fresh
+    # `cycle.json` to read at button-press time.
+    cycle_store = ButtonCycleStore(
+        make_session_factory(request.app.state.db_engine),
+    )
+    cycle_steps = await cycle_store.get()
+    cycle_report = await sync_button_cycle(ssh, cycle_steps)
     logger.info(
         "agent.sync", username=user.username,
         count=len(profiles),
         json_ok=json_report.ok, screens_ok=screens_report.ok,
         wallpapers_ok=wallpapers_report.ok,
+        cycle_ok=cycle_report.ok, cycle_steps=len(cycle_steps),
     )
     return {
         "ok": (
-            json_report.ok and screens_report.ok and wallpapers_report.ok
+            json_report.ok
+            and screens_report.ok
+            and wallpapers_report.ok
+            and cycle_report.ok
         ),
         "profiles": json_report.to_dict(),
         "screens": screens_report.to_dict(),
         "wallpapers": wallpapers_report.to_dict(),
+        "cycle": cycle_report.to_dict(),
     }
 
 

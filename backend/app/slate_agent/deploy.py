@@ -30,6 +30,14 @@ REMOTE_SECRETS_DIR = f"{REMOTE_ROOT}/secrets"
 REMOTE_SCRIPTS_DIR = f"{REMOTE_ROOT}/scripts"
 REMOTE_ADGUARD_SECRET = f"{REMOTE_SECRETS_DIR}/adguard.env"
 REMOTE_RAM_MITIGATION = f"{REMOTE_SCRIPTS_DIR}/ram-mitigation.sh"
+REMOTE_CYCLE_SCRIPT = f"{REMOTE_SCRIPTS_DIR}/cycle-profile.sh"
+REMOTE_CYCLE_ACTION_UPDATE = f"{REMOTE_SCRIPTS_DIR}/cycle-action-update.sh"
+REMOTE_RC_BUTTON_RESET = "/etc/rc.button/reset"
+REMOTE_RC_BUTTON_RESET_BACKUP = "/etc/rc.button/reset.slate-ctrl.backup"
+# Marker embedded as a comment in our managed reset hook — used to
+# detect whether the file on the Slate is already ours so we don't
+# back up our own version on re-deploys.
+RESET_HOOK_MARKER = "managed by slate-controller"
 
 # Marker for the cron line we own. crontab is shared with whatever else
 # is on the Slate, so we identify our entry by this tail comment and
@@ -136,7 +144,38 @@ async def deploy_agent(
         except (SlateSSHError, ValueError) as exc:
             rep.errors.append(f"push adguard secret: {exc}")
 
-    # 5. RAM mitigation script + crontab entry. Counters the observed
+    # 5. Reset-button profile cycle. Three artifacts :
+    #    a. cycle-profile.sh (dispatcher, reads cycle.json)
+    #    b. cycle-action-update.sh (V1 "update from controller" placeholder)
+    #    c. /etc/rc.button/reset replaced with our managed hook that
+    #       preserves OEM behaviors AND adds a < 3s short-press branch
+    # Idempotent : the OEM file is backed up only on first install, our
+    # managed version is detected via its marker comment.
+    for script_name, target_path in (
+        ("cycle-profile.sh", REMOTE_CYCLE_SCRIPT),
+        ("cycle-action-update.sh", REMOTE_CYCLE_ACTION_UPDATE),
+    ):
+        local = LOCAL_SCRIPTS_DIR / script_name
+        if not local.is_file():
+            rep.errors.append(f"missing local script {script_name}")
+            continue
+        try:
+            payload = local.read_bytes()
+            await ssh.put_bytes(payload, target_path, mode=0o755)
+            rep.pushed.append(f"{target_path} ({len(payload)} bytes)")
+        except (SlateSSHError, OSError) as exc:
+            rep.errors.append(f"push {script_name}: {exc}")
+    # The button hook itself. Failure here is non-fatal — the rest of
+    # the agent still works ; only short-press cycling stops working.
+    try:
+        await _install_reset_button_hook(ssh)
+        rep.pushed.append(
+            f"{REMOTE_RC_BUTTON_RESET} (cycle hook, OEM preserved)"
+        )
+    except SlateSSHError as exc:
+        rep.errors.append(f"install reset-button hook: {exc}")
+
+    # 6. RAM mitigation script + crontab entry. Counters the observed
     # ~30-40 MB/day leak across tailscaled + AdGuardHome by restarting
     # both at 04:00. Idempotent: rewrites only the line tagged with
     # CRON_MARKER, leaves any other crontab content untouched.
@@ -160,6 +199,49 @@ async def deploy_agent(
         ok=rep.ok, pushed=len(rep.pushed), errors=len(rep.errors),
     )
     return rep
+
+
+async def _install_reset_button_hook(ssh: SlateSSH) -> None:
+    """Replace /etc/rc.button/reset with our managed hook (preserves OEM).
+
+    First-install : backup the OEM file to `reset.slate-ctrl.backup`
+    so the user can roll back via SSH if our version breaks. Re-deploys :
+    no backup overwrite — our marker comment lets us recognize that the
+    current file IS our managed version.
+    """
+    local = LOCAL_SCRIPTS_DIR / "rc-button-reset.sh"
+    if not local.is_file():
+        raise SlateSSHError(f"missing local rc-button hook at {local}")
+    payload = local.read_bytes()
+    if RESET_HOOK_MARKER not in payload.decode("utf-8", errors="ignore"):
+        raise SlateSSHError(
+            "managed reset hook is missing its marker comment — refusing "
+            "to install (re-deploys would clobber the OEM backup)",
+        )
+
+    # Read the current file ; check whether it's already ours.
+    read = await ssh.run(
+        f"cat {REMOTE_RC_BUTTON_RESET} 2>/dev/null || true", timeout=5,
+    )
+    current = read.stdout or ""
+    already_ours = RESET_HOOK_MARKER in current
+
+    if not already_ours:
+        # First install on this device : back up the OEM file. busybox cp
+        # has no `-n` option, so we do the no-clobber check explicitly:
+        # only copy when the source exists AND the backup doesn't yet.
+        # Without this guard, re-running a partial install would clobber
+        # the OEM backup with our own managed version.
+        await ssh.run(
+            f"[ -f {REMOTE_RC_BUTTON_RESET} ] && "
+            f"[ ! -f {REMOTE_RC_BUTTON_RESET_BACKUP} ] && "
+            f"cp {REMOTE_RC_BUTTON_RESET} {REMOTE_RC_BUTTON_RESET_BACKUP} "
+            f"|| true",
+            timeout=5,
+        )
+
+    # Write our managed version. /etc/rc.button must be executable.
+    await ssh.put_bytes(payload, REMOTE_RC_BUTTON_RESET, mode=0o755)
 
 
 async def _install_cron_entry(ssh: SlateSSH) -> None:
