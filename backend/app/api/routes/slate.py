@@ -395,6 +395,7 @@ async def get_screen_snapshot(
 @router.get("/connectivity")
 async def get_connectivity(
     resolver: Annotated[SlateUrlResolver, Depends(get_slate_url_resolver)],
+    slate: Annotated[SlateClient, Depends(get_slate_client)],
     _user: Annotated[User, Depends(get_current_user)],
     force_refresh: bool = False,
 ) -> dict:
@@ -403,6 +404,10 @@ async def get_connectivity(
     Returns each candidate's reachability + latency + which one is currently
     active. Used by the UI to show a "via LAN / via Tailscale / …" badge
     and to let the admin trigger a manual re-probe with `?force_refresh=1`.
+
+    Also surfaces the SlateClient circuit-breaker state so the UI can show
+    a "API wedge — auto-recover in Ns" pill instead of just "loading…"
+    when pyglinet's session is stuck.
     """
     if force_refresh:
         results = await resolver.force_refresh()
@@ -411,6 +416,7 @@ async def get_connectivity(
         if not results:
             # First call after boot — nothing cached yet.
             results = await resolver.force_refresh()
+    cb = slate.circuit_state()
     return {
         "active_url": resolver.active_url,
         "candidates": [
@@ -422,7 +428,28 @@ async def get_connectivity(
             }
             for r in results
         ],
+        "breaker": {
+            "open": cb.open,
+            "consecutive_failures": cb.consecutive_failures,
+            "open_until_seconds": cb.open_until_seconds,
+        },
     }
+
+
+@router.post("/force-reset", status_code=status.HTTP_204_NO_CONTENT)
+async def force_reset_slate_client(
+    slate: Annotated[SlateClient, Depends(get_slate_client)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> None:
+    """Manual recovery for the pyglinet wedge.
+
+    Drops any cached pyglinet session AND closes the breaker. Next call
+    to /api/slate/status rebuilds from scratch — TCP probe + fresh
+    login. Use when the UI shows "breaker open" but you have reason to
+    believe the Slate is healthy again (e.g. you just rebooted it).
+    """
+    await slate.force_reset()
+    logger.info("slate.client.force_reset.api")
 
 
 # ---------------------------- screen lock ---------------------------- #
