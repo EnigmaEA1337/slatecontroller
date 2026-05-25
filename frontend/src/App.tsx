@@ -23,6 +23,9 @@ const Profiles = lazy(() => import("./pages/Profiles"));
 const ProfileForm = lazy(() => import("./pages/ProfileForm"));
 const Wifi = lazy(() => import("./pages/Wifi"));
 const Networks = lazy(() => import("./pages/Networks"));
+const NetworkInterfaces = lazy(
+  () => import("./pages/networks/Interfaces"),
+);
 const SlateScreen = lazy(() => import("./pages/SlateScreen"));
 const ProtonVPN = lazy(() => import("./pages/ProtonVPN"));
 const Tailscale = lazy(() => import("./pages/Tailscale"));
@@ -58,6 +61,10 @@ export default function App() {
           <Route path="/profiles/:name/edit" element={<ProfileForm />} />
           <Route path="/wifi" element={<Wifi />} />
           <Route path="/networks" element={<Networks />} />
+          <Route
+            path="/networks/interfaces"
+            element={<NetworkInterfaces />}
+          />
           <Route path="/slate-screen" element={<SlateScreen />} />
           <Route path="/vpn/proton" element={<ProtonVPN />} />
           <Route path="/vpn/tailscale" element={<Tailscale />} />

@@ -1,18 +1,18 @@
 import { Suspense, useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  Camera,
+  Cable,
   ChevronDown,
   ChevronRight,
   Cog,
   Gauge,
   LogOut,
+  MonitorSmartphone,
   Network,
   Router,
   Shield,
   ShieldCheck,
   Terminal,
-  Wifi,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getActiveProfile } from "@/api/profiles";
@@ -28,12 +28,26 @@ const topItems = [
   { to: "/", label: "Dashboard", icon: Gauge, end: true },
   { to: "/devices", label: "Devices", icon: Router, end: false },
   { to: "/profiles", label: "Profils", icon: ShieldCheck, end: false },
-  { to: "/wifi", label: "Wi-Fi", icon: Wifi, end: false },
-  { to: "/networks", label: "Réseaux", icon: Network, end: false },
-  { to: "/slate-screen", label: "Slate Screen", icon: Camera, end: false },
+  // Slate Screen renamed to "Remote Control" — same route for now,
+  // becomes a full remote-screen-control surface in a future iteration.
+  { to: "/slate-screen", label: "Remote Control", icon: MonitorSmartphone, end: false },
 ];
 
-const securityChildren = [
+// New "Réseau" expandable group: groups all LAN-side surfaces (physical
+// + logical) so the top-level nav stays tight. Interfaces is a fresh
+// page added in this restructure ; the other two are moves from the
+// top list (their URLs stay /wifi and /networks — no link rewrites).
+const networkChildren = [
+  { to: "/networks/interfaces", label: "Interfaces" },
+  { to: "/networks", label: "Réseaux" },
+  { to: "/wifi", label: "Wi-Fi" },
+];
+
+// "Audit" group — renamed from "Sécurité" so the label matches what
+// the page actually does (hardening + CVE + Tailscale audit are all
+// READ-ONLY postures, not active defenses). URLs stay /security/* to
+// avoid breaking bookmarks.
+const auditChildren = [
   { to: "/security/hardening", label: "Hardening" },
   { to: "/security/vulnerabilities", label: "Vulnérabilités" },
   { to: "/security/tailscale", label: "Tailscale Audit" },
@@ -45,9 +59,6 @@ const settingsChildren = [
   { to: "/settings/communication", label: "Communication" },
   { to: "/settings/agent", label: "Agent local" },
 ];
-
-// bottomItems intentionally empty — Settings is now an expandable group below.
-const bottomItems: { to: string; label: string; icon: typeof Cog; end: boolean }[] = [];
 
 const vpnChildren = [
   { to: "/vpn/proton", label: "Proton VPN" },
@@ -65,6 +76,12 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const isNetworkPath = (p: string) =>
+    p.startsWith("/networks") || p.startsWith("/wifi");
+
+  const [networkOpen, setNetworkOpen] = useState(() =>
+    isNetworkPath(location.pathname),
+  );
   const [vpnOpen, setVpnOpen] = useState(() =>
     location.pathname.startsWith("/vpn"),
   );
@@ -78,6 +95,9 @@ export default function Layout() {
     location.pathname.startsWith("/settings"),
   );
   useEffect(() => {
+    if (isNetworkPath(location.pathname)) {
+      setNetworkOpen(true);
+    }
     if (location.pathname.startsWith("/vpn")) {
       setVpnOpen(true);
     }
@@ -96,6 +116,7 @@ export default function Layout() {
     navigate("/login", { replace: true });
   }
 
+  const networkActive = isNetworkPath(location.pathname);
   const vpnActive = location.pathname.startsWith("/vpn");
   const protectionActive = location.pathname.startsWith("/protection");
   const securityActive = location.pathname.startsWith("/security");
@@ -168,6 +189,54 @@ export default function Layout() {
             </NavLink>
           ))}
 
+          {/* Réseau expandable group — physical interfaces + logical
+              network bridges + Wi-Fi. Grouped here so the top-level
+              nav doesn't get cluttered with 3 LAN-side surfaces. */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setNetworkOpen((v) => !v)}
+              className={cn(
+                "group flex w-full items-center gap-2 border border-transparent px-3 py-2 text-[11px] font-bold uppercase tracking-[0.2em] transition-all",
+                networkActive
+                  ? "cyber-glow border-[color:var(--color-cyber-accent)] bg-[color:var(--color-cyber-accent)]/8"
+                  : "text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-border-strong)] hover:bg-[color:var(--color-cyber-surface)] hover:text-[color:var(--color-cyber-fg)]",
+              )}
+              aria-expanded={networkOpen}
+            >
+              <Cable className="h-3.5 w-3.5" />
+              <span>Réseau</span>
+              {networkOpen ? (
+                <ChevronDown className="ml-auto h-3 w-3" />
+              ) : (
+                <ChevronRight className="ml-auto h-3 w-3" />
+              )}
+            </button>
+
+            {networkOpen && (
+              <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
+                {networkChildren.map((child) => (
+                  <NavLink
+                    key={child.to}
+                    to={child.to}
+                    end={child.to === "/networks"}
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.18em] transition-all",
+                        isActive
+                          ? "cyber-glow"
+                          : "text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)]",
+                      )
+                    }
+                  >
+                    <span className="text-[color:var(--color-cyber-accent)]">▸</span>
+                    {child.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Security expandable group — top-level entry navigates to hub */}
           <div>
             <div
@@ -189,7 +258,7 @@ export default function Layout() {
                 }
               >
                 <SecurityIcon className={cn("h-3.5 w-3.5", reliabilityStyle.text)} />
-                <span>Sécurité</span>
+                <span>Audit</span>
                 {reliability.percent !== null && (
                   <span
                     className={cn(
@@ -205,7 +274,7 @@ export default function Layout() {
                 type="button"
                 onClick={() => setSecurityOpen((v) => !v)}
                 aria-expanded={securityOpen}
-                aria-label={securityOpen ? "Replier sécurité" : "Déplier sécurité"}
+                aria-label={securityOpen ? "Replier audit" : "Déplier audit"}
                 className="flex items-center px-2"
               >
                 {securityOpen ? (
@@ -218,7 +287,7 @@ export default function Layout() {
 
             {securityOpen && (
               <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                {securityChildren.map((child) => (
+                {auditChildren.map((child) => (
                   <NavLink
                     key={child.to}
                     to={child.to}
