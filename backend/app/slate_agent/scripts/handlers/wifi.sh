@@ -49,6 +49,41 @@ _wifi_radio_for_band() {
   esac
 }
 
+# Driver-level ifname prefix per band. The MediaTek mtkwifi Lua
+# driver scans `uci.wifi-iface` sections and looks them up via
+# `option ifname` matching a per-band naming pattern :
+#   2 GHz → ra<N>      (ra0, ra1, …, ra15)
+#   5 GHz → rai<N>     (rai0, rai1, …, rai15)
+#   6 GHz → rax<N>     (rax0, rax1, …, rax15)
+# Without a valid ifname, the section is treated as a config row but
+# never bound to a driver VAP slot — so the SSID never reaches the air.
+_wifi_ifname_prefix_for_band() {
+  case "$1" in
+    2GHz|2g|24g|2.4GHz) echo "ra"  ;;
+    5GHz|5g)            echo "rai" ;;
+    6GHz|6g)            echo "rax" ;;
+    *)                  echo ""    ;;
+  esac
+}
+
+# Find the smallest free ifname index for a band, starting at 4
+# (slots 0-3 are GL.iNet OEM-occupied: lan / guest / MLO / MLO-guest).
+# Echoes the index, or empty string when all 16 driver slots are taken.
+_wifi_alloc_ifname_index() {
+  local prefix="$1"
+  local n
+  for n in 4 5 6 7 8 9 10 11 12 13 14 15; do
+    local target="${prefix}${n}"
+    # If no section already declares this ifname, it's free.
+    if ! uci show wireless 2>/dev/null | grep -q "\.ifname='${target}'\$"; then
+      echo "$n"
+      return 0
+    fi
+  done
+  echo ""
+  return 1
+}
+
 # Security → uci encryption value mapping.
 #   WPA3-SAE        → sae
 #   WPA3-SAE-MIXED  → sae-mixed (WPA2/3 transition)
@@ -87,10 +122,14 @@ _wifi_template_for_band() {
   esac
 }
 
-# Fields we MUST override after the clone — they're either user input
-# (ssid/key/encryption/network/disabled/isolate) or auto-allocated by
-# the driver (ifname/factory_macaddr/macaddr — must not be inherited
-# from the template or we'd collide on broadcast).
+# Fields we MUST override after the clone. We strip them from the
+# template before re-copying so we never carry stale values :
+#   - user input :  ssid / key / encryption / network / disabled / isolate
+#   - per-iface unique : ifname / vifidx (we re-allocate from the free
+#                        pool, see _wifi_alloc_ifname_index)
+#   - driver-allocated : factory_macaddr / macaddr (the kernel picks
+#                        them at hostapd start ; copying the template's
+#                        MAC would collide on the air)
 _WIFI_OVERRIDE_FIELDS="ssid key encryption network disabled isolate ifname factory_macaddr macaddr vifidx"
 
 _wifi_create_section() {
@@ -105,10 +144,11 @@ _wifi_create_section() {
     return 1
   fi
 
-  local device template
+  local device template ifname_prefix
   device=$(_wifi_radio_for_band "$band")
   template=$(_wifi_template_for_band "$band")
-  if [ -z "$device" ] || [ -z "$template" ]; then
+  ifname_prefix=$(_wifi_ifname_prefix_for_band "$band")
+  if [ -z "$device" ] || [ -z "$template" ] || [ -z "$ifname_prefix" ]; then
     echo "wifi: SSID '$name' unknown band '$band' — skip" >&2
     return 1
   fi
@@ -120,6 +160,22 @@ _wifi_create_section() {
     echo "wifi: SSID '$name' radio '$device' missing — skip" >&2
     return 1
   fi
+
+  # Allocate a free ifname index for the band. The MTK driver enumerates
+  # VAP slots by `option ifname` matching its per-band pattern
+  # (ra<N>/rai<N>/rax<N>) — without this, the section is invisible to
+  # the driver and the SSID never broadcasts.
+  local ifname_index
+  ifname_index=$(_wifi_alloc_ifname_index "$ifname_prefix")
+  if [ -z "$ifname_index" ]; then
+    echo "wifi: SSID '$name' no free VAP slot left on $ifname_prefix* (all 16 used) — skip" >&2
+    return 1
+  fi
+  local alloc_ifname="${ifname_prefix}${ifname_index}"
+  # The MTK driver wants vifidx 1-based (rai0 → vifidx=1, rai3 →
+  # vifidx=4). Map the 0-based ifname index accordingly.
+  local alloc_vifidx
+  alloc_vifidx=$(( ifname_index + 1 ))
 
   local encryption
   encryption=$(_wifi_encryption_for_security "$security")
@@ -199,7 +255,13 @@ _wifi_create_section() {
     uci set "wireless.$section.isolate=0"
   fi
 
-  echo "wifi: created SSID '$name' on $device/$network ($section, encryption=$encryption, disabled=$disabled_val, cloned from $template)"
+  # 4. Pin the allocated VAP slot. ifname + vifidx must agree with
+  # the driver's per-band pattern, otherwise the VAP is silently
+  # ignored at hostapd start time.
+  uci set "wireless.$section.ifname=$alloc_ifname"
+  uci set "wireless.$section.vifidx=$alloc_vifidx"
+
+  echo "wifi: created SSID '$name' on $device/$network ($section, ifname=$alloc_ifname vifidx=$alloc_vifidx, encryption=$encryption, disabled=$disabled_val, cloned from $template)"
   return 0
 }
 
