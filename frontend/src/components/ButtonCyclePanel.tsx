@@ -152,10 +152,15 @@ export default function ButtonCyclePanel() {
         </h2>
       </div>
       <p className="mb-4 text-[11px] leading-relaxed text-[color:var(--color-cyber-muted)]">
-        Court appui (&lt; 3 s) sur le reset du Slate → avance d'un slot
-        dans la liste ci-dessous. Le cycle tourne 100 % en local sur le
-        Slate (aucun appel au contrôleur). Comportements OEM préservés :
-        3-7 s = reset réseau, 8 s+ = factory reset.
+        Court appui (&lt; 3 s) sur le reset du Slate → déplace le
+        curseur sur le slot suivant et affiche le menu sur l'écran
+        tactile. Tu peux appuyer plusieurs fois rapidement pour
+        traverser la liste. Quand tu arrêtes d'appuyer, le slot
+        sélectionné est appliqué après 3 s.
+        <br />
+        Tout tourne en local sur le Slate (aucun appel au contrôleur au
+        moment du press). Comportements OEM préservés : 3-7 s = reset
+        réseau, 8 s+ = factory reset.
       </p>
 
       <div className="grid gap-4 lg:grid-cols-2">

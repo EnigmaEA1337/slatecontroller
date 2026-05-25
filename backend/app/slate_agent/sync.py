@@ -12,6 +12,7 @@ JSON tool).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -300,30 +301,90 @@ async def sync_profile_wallpapers(
     return rep
 
 
+REMOTE_MENUS_DIR = "/etc/slate-controller/menus"
+
+
 async def sync_button_cycle(
     ssh: SlateSSH, steps: list,
 ) -> SyncReport:
-    """Push the reset-button cycle list to /etc/slate-controller/cycle.json.
+    """Push the reset-button cycle list + pre-rendered menu frames.
 
-    `steps` is the typed `CycleStep` list from `ButtonCycleStore.get()`.
-    Idempotent — overwrites the file each call. Empty list is still
-    pushed (writes `{"steps": []}`) so the agent has an explicit
-    "cycle disabled" signal rather than reading a stale config from
-    a previous sync.
+    Two artifacts go to the Slate :
+      1. `/etc/slate-controller/cycle.json` — the ordered step list,
+         consumed by `cycle-profile.sh` at button-press time.
+      2. `/etc/slate-controller/menus/cycle_<N>.raw` — one 153 600 B
+         RGB565 frame per cursor position, painted on the panel while
+         the user keeps pressing (select-then-commit UX).
+         Stale frames from a longer previous cycle are pruned so the
+         menus dir mirrors the current cycle exactly.
+
+    Idempotent — overwrites everything each call. Empty `steps` writes
+    `{"steps": []}` and prunes all menu frames so the agent has an
+    explicit "cycle disabled" signal.
     """
+    from app.profiles.cycle_menu_renderer import render_menu_frames
+    from app.profiles.fb_takeover import _png_to_rgb565_portrait
     from app.settings.button_cycle import remote_path, to_agent_payload
 
     rep = SyncReport()
-    target = remote_path()
+
+    # 1. cycle.json
     payload = to_agent_payload(steps)
     try:
-        await ssh.put_bytes(payload, target, mode=0o644)
-        rep.pushed.append(f"cycle ({len(steps)} steps, {len(payload)}B)")
+        await ssh.put_bytes(payload, remote_path(), mode=0o644)
+        rep.pushed.append(f"cycle.json ({len(steps)} steps, {len(payload)}B)")
     except SlateSSHError as exc:
         rep.errors.append(f"sync cycle.json: {exc}")
+        # If we can't even write cycle.json, no point trying frames.
+        return rep
+
+    # 2. menu frames. Render every cursor position, convert to RGB565,
+    # push. The rendering happens here (controller-side, Pillow) so the
+    # agent has nothing to compute at button-press time — `cat raw > fb0`
+    # and it's painted.
+    try:
+        await ssh.run(f"mkdir -p {REMOTE_MENUS_DIR}", timeout=5)
+    except SlateSSHError as exc:
+        rep.errors.append(f"mkdir menus dir: {exc}")
+        return rep
+
+    try:
+        png_frames = await asyncio.to_thread(render_menu_frames, steps)
+    except Exception as exc:  # noqa: BLE001
+        rep.errors.append(f"render menu frames: {exc}")
+        return rep
+
+    for idx, png in enumerate(png_frames):
+        try:
+            raw = await asyncio.to_thread(_png_to_rgb565_portrait, png)
+        except Exception as exc:  # noqa: BLE001
+            rep.errors.append(f"rgb565 frame #{idx}: {exc}")
+            continue
+        target = f"{REMOTE_MENUS_DIR}/cycle_{idx}.raw"
+        try:
+            await ssh.put_bytes(raw, target, mode=0o644)
+            rep.pushed.append(f"cycle_{idx}.raw ({len(raw)}B)")
+        except SlateSSHError as exc:
+            rep.errors.append(f"push frame #{idx}: {exc}")
+
+    # 3. Prune stale frames from previous syncs. If the cycle used to
+    # have 6 steps and now has 3, frames 3-5 are stale and would
+    # mislead the agent if cycle.json is briefly inconsistent.
+    try:
+        await ssh.run(
+            f"for f in {REMOTE_MENUS_DIR}/cycle_*.raw; do "
+            f"  idx=$(basename \"$f\" .raw | sed s/cycle_//); "
+            f"  case \"$idx\" in ''|*[!0-9]*) continue ;; esac; "
+            f"  [ \"$idx\" -ge {len(steps)} ] && rm -f \"$f\"; "
+            f"done 2>/dev/null || true",
+            timeout=10,
+        )
+    except SlateSSHError as exc:
+        rep.errors.append(f"prune stale menu frames: {exc}")
+
     logger.info(
         "slate_agent.sync_button_cycle",
-        ok=rep.ok, steps=len(steps),
+        ok=rep.ok, steps=len(steps), frames=len(png_frames),
     )
     return rep
 
