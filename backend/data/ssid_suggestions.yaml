@@ -1,0 +1,159 @@
+# Cyberpunk SSID name suggestions, organized by usage category.
+# Edit freely to add/remove names — the backend reloads on startup.
+#
+# Categories don't have to match Profile names; they describe the *intended
+# usage tier* of an SSID (daily/guest/work/kids/sensitive). The UI surfaces
+# all categories so you can mix freely.
+
+categories:
+  parents:
+    label: "Parents"
+    description: "Réseau principal, accès complet au LAN, daily driver."
+    icon: users
+    options:
+      - { name: "NEXUS-7",          universe: blade_runner }
+      - { name: "ZION_GATEWAY",     universe: matrix }
+      - { name: "HOMESTEAD_ARASAKA", universe: cyberpunk_2077 }
+      - { name: "DECKER_HQ",        universe: neuromancer }
+      - { name: "GHOST_SHELL",      universe: ghost_in_the_shell }
+      - { name: "WETWARE_PRIME",    universe: generic_cyber }
+      - { name: "NEURAL_LINK_01",   universe: generic_cyber }
+      - { name: "MAINFRAME_GAP",    universe: generic_cyber }
+      - { name: "ARASAKA_TOWER",    universe: cyberpunk_2077 }
+      - { name: "SECTION_9_HOME",   universe: ghost_in_the_shell }
+      - { name: "MAINFRAME_PRIME",  universe: generic_cyber }
+
+  amis:
+    label: "Amis"
+    description: "Réseau invités, internet only, isolation du LAN."
+    icon: user-plus
+    options:
+      - { name: "CHROME_LOUNGE",    universe: generic_cyber }
+      - { name: "AFTERLIFE_VIP",    universe: cyberpunk_2077 }
+      - { name: "NIGHT_CITY_GUEST", universe: cyberpunk_2077 }
+      - { name: "WIRED_CAFE",       universe: serial_experiments_lain }
+      - { name: "ICEBREAKER_OPEN",  universe: neuromancer }
+      - { name: "OFFGRID_VISITOR",  universe: generic_cyber }
+      - { name: "NEON_DISTRICT",    universe: generic_cyber }
+      - { name: "GRID_OUTSIDER",    universe: generic_cyber }
+      - { name: "CHIBA_CITY",       universe: neuromancer }
+      - { name: "NEW_PORT_CITY",    universe: ghost_in_the_shell }
+      - { name: "OPERATOR_OPEN",    universe: matrix }
+      - { name: "OPEN_GRID",        universe: generic_cyber }
+
+  pro:
+    label: "Pro"
+    description: "VPN corporate forcé, hardening actif."
+    icon: briefcase
+    options:
+      - { name: "BLACK_ICE",       universe: neuromancer }
+      - { name: "TYRELL_CORP",     universe: blade_runner }
+      - { name: "CORPO_SECURE",    universe: cyberpunk_2077 }
+      - { name: "WINTERMUTE",      universe: neuromancer }
+      - { name: "DAEMON_PROC",     universe: generic_cyber }
+      - { name: "PROXY_GHOST",     universe: generic_cyber }
+      - { name: "WRAITH_PROTOCOL", universe: generic_cyber }
+      - { name: "SHADOWRUN_NET",   universe: shadowrun }
+      - { name: "THERMOPTIC_CAMO", universe: ghost_in_the_shell }
+      - { name: "AGENT_SECURE",    universe: matrix }
+      - { name: "SECURE_DECK",     universe: neuromancer }
+
+  enfants:
+    label: "Enfants"
+    description: "Filtrage strict, safe-search forcé, horaires limités."
+    icon: baby
+    options:
+      - { name: "JOHNNY_MNEMONIC",  universe: cyberpunk_film }
+      - { name: "TRON_LEGACY",      universe: tron }
+      - { name: "PIXELPUNK_JR",     universe: generic_cyber }
+      - { name: "CYBERKID_NET",     universe: generic_cyber }
+      - { name: "NEON_GENESIS",     universe: evangelion }
+      - { name: "ROBO_PLAYGROUND",  universe: generic_cyber }
+      - { name: "DIGITAL_SANDBOX",  universe: generic_cyber }
+      - { name: "MINI_MATRIX",      universe: matrix }
+      - { name: "KIROSHI_OPTICS",   universe: cyberpunk_2077 }
+      - { name: "TACHIKOMA_NET",    universe: ghost_in_the_shell }
+      - { name: "BLUE_PILL_JR",     universe: matrix }
+      - { name: "TRON_PLAYGROUND",  universe: tron }
+      - { name: "SANDBOX_NET",      universe: generic_cyber }
+
+  mission:
+    label: "Mission"
+    description: "Le plus sensible. Tor + multi-VPN, kill switch, lockdown."
+    icon: shield
+    options:
+      - { name: "VOID_RUNNER",     universe: generic_cyber }
+      - { name: "NETRUNNER_X",     universe: cyberpunk_2077 }
+      - { name: "STEALTH_CHROME",  universe: generic_cyber }
+      - { name: "PHANTOM_SHELL",   universe: generic_cyber }
+      - { name: "SHADOW_PROTOCOL", universe: generic_cyber }
+      - { name: "GHOST_PROTOCOL",  universe: mission_impossible }
+      - { name: "OBLIVION_NODE",   universe: generic_cyber }
+      - { name: "NULL_TRACE",      universe: generic_cyber }
+      - { name: "GRID_SHADOW",     universe: generic_cyber }
+      - { name: "DAEMON_KAGE",     universe: generic_cyber }
+      - { name: "LAUGHING_MAN",    universe: ghost_in_the_shell }
+      - { name: "RED_PILL_OPS",    universe: matrix }
+
+# Universe combos = a coherent set of 5 names that "go together".
+# These are descriptive, not auto-applied — the UI shows them as a reference.
+universe_combos:
+  - id: cyberpunk_2077
+    label: "Night City"
+    description: "Univers Cyberpunk 2077"
+    ssids:
+      parents: ARASAKA_TOWER
+      amis: AFTERLIFE_VIP
+      pro: BLACK_ICE
+      enfants: KIROSHI_OPTICS
+      mission: NETRUNNER_X
+
+  - id: neuromancer
+    label: "Sprawl"
+    description: "Hommage à la trilogie de William Gibson"
+    ssids:
+      parents: DECKER_HQ
+      amis: CHIBA_CITY
+      pro: WINTERMUTE
+      enfants: SANDBOX_NET
+      mission: BLACK_ICE
+
+  - id: matrix
+    label: "The Matrix"
+    description: "Univers Matrix"
+    ssids:
+      parents: ZION_GATEWAY
+      amis: OPERATOR_OPEN
+      pro: AGENT_SECURE
+      enfants: BLUE_PILL_JR
+      mission: RED_PILL_OPS
+
+  - id: ghost_in_the_shell
+    label: "Section 9"
+    description: "Univers Ghost in the Shell"
+    ssids:
+      parents: SECTION_9_HOME
+      amis: NEW_PORT_CITY
+      pro: THERMOPTIC_CAMO
+      enfants: TACHIKOMA_NET
+      mission: LAUGHING_MAN
+
+  - id: generic_cyber
+    label: "Sobre & Stylé"
+    description: "Mix générique discret"
+    ssids:
+      parents: NEXUS-7
+      amis: CHROME_LOUNGE
+      pro: BLACK_ICE
+      enfants: TRON_PLAYGROUND
+      mission: VOID_RUNNER
+
+  - id: functional
+    label: "Functional Cyber"
+    description: "Noms fonctionnels avec touche cyber"
+    ssids:
+      parents: MAINFRAME_PRIME
+      amis: OPEN_GRID
+      pro: SECURE_DECK
+      enfants: SANDBOX_NET
+      mission: VOID_RUNNER

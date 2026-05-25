@@ -1,0 +1,32 @@
+name: home
+description: Profil maison - pas de VPN forcé, tous les SSID actifs, AdGuard standard.
+icon: home
+color: '#f59e0b'
+vpn:
+  type: none
+  kill_switch: false
+tor:
+  enabled: false
+tailscale:
+  enabled: true
+adguard:
+  enabled: true
+  lists:
+  - oisd-big
+ssids:
+- slug: neuralcore
+  enabled: true
+- slug: grid
+  enabled: true
+- slug: chromelounge
+  enabled: true
+- slug: blackice
+  enabled: false
+- slug: shadowrun
+  enabled: false
+firewall:
+  lockdown: false
+  geoip_whitelist: []
+logging:
+  level: INFO
+  forward_to_siem: true

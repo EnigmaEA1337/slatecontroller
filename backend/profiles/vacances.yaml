@@ -1,0 +1,33 @@
+name: vacances
+description: Profil vacances - VPN grand public, AdGuard léger, SSID famille actifs.
+icon: palmtree
+color: '#22c55e'
+vpn:
+  type: wireguard
+  client: protonvpn-fr
+  kill_switch: false
+tor:
+  enabled: false
+tailscale:
+  enabled: true
+adguard:
+  enabled: true
+  lists:
+  - oisd-small
+ssids:
+- slug: neuralcore
+  enabled: true
+- slug: grid
+  enabled: true
+- slug: chromelounge
+  enabled: true
+- slug: blackice
+  enabled: false
+- slug: shadowrun
+  enabled: false
+firewall:
+  lockdown: false
+  geoip_whitelist: []
+logging:
+  level: INFO
+  forward_to_siem: false

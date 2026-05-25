@@ -1,0 +1,39 @@
+name: lockdown
+description: Profil panic - tout coupé sauf Tailscale admin. Bascule manuelle uniquement.
+icon: shield-alert
+color: '#ef4444'
+vpn:
+  type: wireguard
+  client: mullvad-hardened
+  kill_switch: true
+tor:
+  enabled: false
+tailscale:
+  enabled: true
+  admin_only: true
+adguard:
+  enabled: true
+  lists:
+  - hagezi-pro-plus
+  - hagezi-tif
+  - oisd-big
+ssids:
+- slug: neuralcore
+  enabled: false
+- slug: grid
+  enabled: false
+- slug: chromelounge
+  enabled: false
+- slug: blackice
+  enabled: false
+- slug: shadowrun
+  enabled: false
+firewall:
+  lockdown: true
+  geoip_whitelist:
+  - FR
+  block_telemetry: true
+  block_all_outbound: true
+logging:
+  level: DEBUG
+  forward_to_siem: true

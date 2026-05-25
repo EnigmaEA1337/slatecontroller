@@ -1,0 +1,211 @@
+#!/bin/sh
+# slate-ctrl — local profile applier for the Slate 7 Pro.
+#
+# Reads a JSON profile from /etc/slate-controller/profiles/<name>.json and
+# applies each subsystem block via the corresponding handler in
+# /etc/slate-controller/handlers/<subsystem>.sh.
+#
+# Designed to be self-sufficient: the slate-controller backend can be
+# offline (or completely uninstalled) and `slate-ctrl apply <name>`
+# still works as long as the local files are present. That's the whole
+# point — the physical button + boot-time reapply can both invoke this
+# without depending on the network.
+#
+# Subcommands:
+#   slate-ctrl apply <name>     Apply the named profile.
+#   slate-ctrl status            Print the currently-active profile name.
+#   slate-ctrl list              List available profile names.
+#   slate-ctrl version           Print agent version.
+#
+# Exit codes:
+#   0  success (or no-op)
+#   1  invocation error (bad arg)
+#   2  profile not found
+#   3  apply error (one or more handlers reported errors)
+
+set -u
+
+ROOT="/etc/slate-controller"
+PROFILES_DIR="$ROOT/profiles"
+HANDLERS_DIR="$ROOT/handlers"
+STATE_DIR="$ROOT/state"
+LOG_FILE="$ROOT/log"
+LOCK_FILE="$ROOT/.apply.lock"
+VERSION="0.1.0"
+
+log() {
+  # Plain stdout + append to log file. Caller can `tail -f $LOG_FILE`.
+  local ts
+  ts=$(date '+%Y-%m-%dT%H:%M:%S')
+  printf '%s slate-ctrl %s\n' "$ts" "$*"
+  printf '%s %s\n' "$ts" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+cmd_version() {
+  echo "slate-ctrl $VERSION"
+}
+
+cmd_list() {
+  if [ ! -d "$PROFILES_DIR" ]; then
+    return 0
+  fi
+  ls "$PROFILES_DIR" 2>/dev/null | sed -n 's/\.json$//p'
+}
+
+cmd_status() {
+  if [ -f "$STATE_DIR/active" ]; then
+    cat "$STATE_DIR/active"
+  fi
+}
+
+# Run a handler if it declares the function for the given subsystem.
+# The handler is expected to expose `<subsystem>_apply` that takes the JSON
+# blob (passed via stdin) — we slice the block out beforehand via jsonfilter.
+run_handler() {
+  local subsystem="$1"
+  local profile_path="$2"
+  local handler_path="$HANDLERS_DIR/$subsystem.sh"
+
+  if [ ! -f "$handler_path" ]; then
+    return 0   # nothing to do for missing handlers
+  fi
+
+  # Extract the per-subsystem block from the profile JSON. Empty string =
+  # block absent → skip silently.
+  local block
+  block=$(jsonfilter -i "$profile_path" -e "@.${subsystem}" 2>/dev/null || true)
+  if [ -z "$block" ] || [ "$block" = "null" ]; then
+    return 0
+  fi
+
+  log "applying $subsystem"
+  # shellcheck disable=SC1090
+  . "$handler_path"
+  if ! type "${subsystem}_apply" >/dev/null 2>&1; then
+    log "WARN: handler $handler_path missing ${subsystem}_apply function"
+    return 0
+  fi
+  echo "$block" | "${subsystem}_apply"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: $subsystem handler exited $rc"
+    return $rc
+  fi
+  log "$subsystem applied OK"
+  return 0
+}
+
+cmd_apply() {
+  local name="$1"
+  local profile_path="$PROFILES_DIR/$name.json"
+
+  if [ ! -f "$profile_path" ]; then
+    log "ERROR: profile '$name' not found at $profile_path"
+    return 2
+  fi
+
+  mkdir -p "$STATE_DIR"
+  # Serialize concurrent applies — the physical button + a controller
+  # SSH call can race. Busybox flock only supports -s/-x/-u/-n (no -w),
+  # so we retry-loop the non-blocking lock ourselves, up to ~30s.
+  exec 9>"$LOCK_FILE"
+  local tries=0
+  while ! flock -n -x 9 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 60 ]; then
+      log "ERROR: another apply is in progress (timeout waiting for lock)"
+      return 3
+    fi
+    sleep 0.5 2>/dev/null || sleep 1
+  done
+
+  log "apply START profile=$name"
+
+  # Export profile context for handlers that don't read JSON (like `screen`
+  # which uses the name to look up its pre-rendered RGB565 raw).
+  export SLATE_CTRL_PROFILE_NAME="$name"
+
+  local rc=0
+
+  # Phase 1: visual feedback FIRST. The screen handler shows the
+  # "loading profile X" message via fb takeover and runs the takeover
+  # in the background — so the rest of the apply chain proceeds in
+  # parallel with the visible message. Unconditional: no JSON block
+  # needed, the handler picks up the profile name from the env var.
+  if [ -f "$HANDLERS_DIR/screen.sh" ]; then
+    log "applying screen (unconditional)"
+    # shellcheck disable=SC1090
+    . "$HANDLERS_DIR/screen.sh"
+    if type screen_apply >/dev/null 2>&1; then
+      # Empty stdin — handler uses env var, not JSON.
+      echo "" | screen_apply || rc=3
+    fi
+  fi
+
+  # Phase 2: JSON-block-driven handlers. Each one runs only if the
+  # profile JSON has a matching top-level key. Order matters: connectivity
+  # first (firewall/wifi/vpn/tor/adguard/tailscale), then visuals
+  # (wallpaper). New handlers can be added by dropping a <subsystem>.sh
+  # file in $HANDLERS_DIR — no edit to slate-ctrl needed.
+  #
+  # `dns` removed from the loop: DNS protection is no longer a per-profile
+  # concern. It's per-network now, configured on the Networks page and
+  # applied by the controller via AdGuard Clients API. The legacy dns.sh
+  # handler is kept in the repo but never invoked by this dispatcher.
+  for subsystem in firewall wifi vpn tor adguard tailscale wallpaper; do
+    if ! run_handler "$subsystem" "$profile_path"; then
+      rc=3
+    fi
+  done
+
+  # Persist active state even on partial failure — that's the truth of
+  # what was attempted. Operators can diagnose from $LOG_FILE.
+  echo "$name" > "$STATE_DIR/active"
+  log "apply DONE profile=$name rc=$rc"
+  return $rc
+}
+
+main() {
+  local sub="${1:-}"
+  case "$sub" in
+    apply)
+      if [ -z "${2:-}" ]; then
+        echo "Usage: slate-ctrl apply <profile-name>" >&2
+        return 1
+      fi
+      cmd_apply "$2"
+      ;;
+    status)
+      cmd_status
+      ;;
+    list)
+      cmd_list
+      ;;
+    version|--version|-v)
+      cmd_version
+      ;;
+    ""|help|--help|-h)
+      cat <<EOF
+Usage: slate-ctrl <command> [args]
+
+Commands:
+  apply <name>   Apply the named profile
+  status         Print the active profile name
+  list           List available profiles
+  version        Print agent version
+
+Files:
+  $PROFILES_DIR/<name>.json
+  $HANDLERS_DIR/<subsystem>.sh
+  $STATE_DIR/active
+  $LOG_FILE
+EOF
+      ;;
+    *)
+      echo "Unknown command: $sub (try 'slate-ctrl help')" >&2
+      return 1
+      ;;
+  esac
+}
+
+main "$@"

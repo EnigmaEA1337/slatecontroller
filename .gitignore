@@ -1,0 +1,98 @@
+# ---- Secrets / env ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+build/
+dist/
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# venv
+venv/
+.venv/
+env/
+ENV/
+
+# ---- Node / Frontend ----
+node_modules/
+.pnp
+.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.eslintcache
+.parcel-cache
+.next/
+.nuxt/
+.turbo/
+
+# Vite / build outputs
+dist/
+dist-ssr/
+build/
+*.local
+
+# ---- IDE ----
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Claude Code local state ----
+.claude/
+
+# ---- Docker / runtime data ----
+data/*
+!data/.gitkeep
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Traefik runtime
+traefik/acme.json
+
+# ---- Project specific ----
+# WireGuard / OpenVPN configs (privacy)
+*.conf.private
+vpn-configs/
+
+# Backups
+backups/
+*.backup
+*.bak

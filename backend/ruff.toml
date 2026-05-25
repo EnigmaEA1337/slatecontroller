@@ -1,0 +1,28 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+    "ASYNC", # async best practices
+    "BLE",  # blind except
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]  # asserts allowed in tests
+
+[format]
+quote-style = "double"
+indent-style = "space"

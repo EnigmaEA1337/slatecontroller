@@ -1,0 +1,36 @@
+name: mission
+description: Profil mission client - VPN corporate, kill switch strict, GeoIP whitelist.
+icon: briefcase
+color: '#3b82f6'
+vpn:
+  type: wireguard
+  client: corporate-paris
+  kill_switch: true
+tor:
+  enabled: false
+tailscale:
+  enabled: true
+adguard:
+  enabled: true
+  lists:
+  - hagezi-tif
+  - oisd-big
+ssids:
+- slug: blackice
+  enabled: true
+- slug: shadowrun
+  enabled: true
+- slug: neuralcore
+  enabled: false
+- slug: grid
+  enabled: false
+- slug: chromelounge
+  enabled: false
+firewall:
+  lockdown: true
+  geoip_whitelist:
+  - FR
+  - CH
+logging:
+  level: INFO
+  forward_to_siem: true

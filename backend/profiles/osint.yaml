@@ -1,0 +1,38 @@
+name: osint
+description: Profil OSINT - Tor + VPN en chaîne, DNS over Tor, AdGuard agressif, pas
+  de SSID exposé.
+icon: search
+color: '#a855f7'
+vpn:
+  type: wireguard
+  client: mullvad-randomized
+  kill_switch: true
+tor:
+  enabled: true
+  bridge: false
+tailscale:
+  enabled: false
+adguard:
+  enabled: true
+  lists:
+  - hagezi-pro-plus
+  - hagezi-tif
+  - oisd-big
+ssids:
+- slug: shadowrun
+  enabled: true
+- slug: neuralcore
+  enabled: false
+- slug: grid
+  enabled: false
+- slug: chromelounge
+  enabled: false
+- slug: blackice
+  enabled: false
+firewall:
+  lockdown: true
+  geoip_whitelist: []
+  block_telemetry: true
+logging:
+  level: WARNING
+  forward_to_siem: false

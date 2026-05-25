@@ -1,0 +1,44 @@
+# Dev compose - hot reload, pas de Traefik, ports exposés en local
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: slate-backend-dev
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/profiles:/app/profiles
+      - ./backend/tests:/app/tests
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
+      - ./data/db:/app/data/db
+      - ./data/logs:/app/data/logs
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - slate-net
+
+  frontend:
+    image: node:20-alpine
+    container_name: slate-frontend-dev
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      # No VITE_API_URL → baseURL is relative → Vite proxies /api to the
+      # backend container. Works from localhost, LAN, Tailscale, etc.
+      - VITE_BACKEND_URL=http://backend:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    networks:
+      - slate-net
+
+networks:
+  slate-net:
+    driver: bridge
