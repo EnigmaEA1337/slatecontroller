@@ -8,8 +8,10 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
-from app.api.deps import get_wifi_store
+from app.api.deps import get_slate_ssh, get_wifi_store
 from app.auth import User, get_current_user
+from app.slate.ssh import SlateSSH
+from app.wifi.discovery import discover_wireless, slugify_ssid_name
 from app.wifi.models import WifiSsidCreate, WifiSsidPublic, WifiSsidWrite
 from app.wifi.qr import build_wifi_qr_string, render_qr_png
 from app.wifi.store import (
@@ -44,6 +46,84 @@ async def list_suggestions(
     Sourced from `backend/data/ssid_suggestions.yaml`. Cached per process.
     """
     return get_suggestions_library()
+
+
+class DiscoverReport(BaseModel):
+    """Outcome of a Slate→catalog import. Per-SSID status so the UI can
+    show a clear "imported / already known / failed" line for each."""
+
+    found_on_slate: int
+    imported: list[WifiSsidPublic]
+    skipped_slugs: list[str]   # slug already existed — left untouched
+    errors: list[str]
+
+
+@router.post("/discover-from-slate", response_model=DiscoverReport)
+async def discover_from_slate(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    store: Annotated[WifiSsidStore, Depends(get_wifi_store)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> DiscoverReport:
+    """Probe `uci show wireless` on the Slate and import every broadcast
+    SSID into the controller's catalog.
+
+    Idempotent — entries whose slug already exists are NOT clobbered
+    (the user may have customised the broadcast name, password, network
+    binding, etc. ; we don't want to silently revert their edits).
+    """
+    try:
+        discovered = await discover_wireless(ssh)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"discovery failed: {exc}",
+        ) from exc
+
+    imported: list[WifiSsidPublic] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for d in discovered:
+        slug = slugify_ssid_name(d.ssid_name)
+        try:
+            await store.get(slug)
+            skipped.append(slug)
+            continue
+        except WifiSsidNotFoundError:
+            pass
+        try:
+            created = await store.create(
+                WifiSsidCreate(
+                    slug=slug,
+                    ssid_name=d.ssid_name,
+                    band=d.band,
+                    security=d.security,
+                    # password : we can't read it from the Slate without
+                    # extra UCI digging (and even then it'd be plaintext in
+                    # uci show — privacy concern). Imported entries start
+                    # password-less and the user enters it once in the UI.
+                    password=None,
+                    network_slug=d.network,
+                    notes=f"imported from Slate (iface={d.iface})",
+                )
+            )
+            imported.append(created)
+        except WifiSsidDuplicateError:
+            # Race with another call — treat like skip.
+            skipped.append(slug)
+        except WifiSsidError as exc:
+            errors.append(f"{slug}: {exc}")
+
+    logger.info(
+        "wifi.discover_from_slate",
+        found=len(discovered),
+        imported=len(imported), skipped=len(skipped), errors=len(errors),
+    )
+    return DiscoverReport(
+        found_on_slate=len(discovered),
+        imported=imported,
+        skipped_slugs=skipped,
+        errors=errors,
+    )
 
 
 @router.get("", response_model=list[WifiSsidPublic])
