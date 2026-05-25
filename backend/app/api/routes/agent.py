@@ -34,6 +34,7 @@ from app.slate_agent.sync import (
     apply_remote_profile,
     get_active_remote_profile,
     list_remote_profiles,
+    refresh_button_cycle_active,
     sync_button_cycle,
     sync_loading_screens,
     sync_profile_wallpapers,
@@ -148,7 +149,13 @@ async def agent_sync(
         make_session_factory(request.app.state.db_engine),
     )
     cycle_steps = await cycle_store.get()
-    cycle_report = await sync_button_cycle(ssh, cycle_steps)
+    try:
+        active_name = await store.get_active_name()
+    except Exception:  # noqa: BLE001 — best effort
+        active_name = None
+    cycle_report = await sync_button_cycle(
+        ssh, cycle_steps, active_name=active_name,
+    )
     logger.info(
         "agent.sync", username=user.username,
         count=len(profiles),
@@ -173,6 +180,7 @@ async def agent_sync(
 @router.post("/apply/{name}")
 async def agent_apply(
     name: str,
+    request: Request,
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     store: Annotated[ProfileStore, Depends(get_profile_store)],
     user: Annotated[User, Depends(get_current_user)],
@@ -200,4 +208,20 @@ async def agent_apply(
     logger.info(
         "agent.apply", username=user.username, name=name, ok=ok,
     )
+    # If the new active is part of the configured cycle, regenerate
+    # menu frames so the on-Slate menu shows the ACTIVE badge on the
+    # right row. Best-effort — a sync failure here doesn't fail the
+    # apply.
+    if ok:
+        try:
+            cycle_store = ButtonCycleStore(
+                make_session_factory(request.app.state.db_engine),
+            )
+            cycle_steps = await cycle_store.get()
+            await refresh_button_cycle_active(ssh, cycle_steps, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "agent.apply.cycle_refresh_failed",
+                name=name, error=str(exc),
+            )
     return {"ok": ok, "name": name, "output": output}

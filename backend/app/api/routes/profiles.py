@@ -777,6 +777,24 @@ async def activate_profile(
             name=name,
         )
 
+    # If the new active is part of the configured cycle, regenerate
+    # menu frames so the on-Slate menu shows the ACTIVE badge on the
+    # right row. Best-effort — failures here never fail the activation.
+    try:
+        from app.settings.button_cycle import ButtonCycleStore
+        from app.slate_agent.sync import refresh_button_cycle_active
+
+        cycle_store = ButtonCycleStore(
+            make_session_factory(request.app.state.db_engine),
+        )
+        cycle_steps = await cycle_store.get()
+        await refresh_button_cycle_active(ssh, cycle_steps, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "profile.activated.cycle_refresh_failed",
+            name=name, error=str(exc),
+        )
+
     return ActiveProfileResponse(active_name=name, profile=stored.profile, applied=applied)
 
 

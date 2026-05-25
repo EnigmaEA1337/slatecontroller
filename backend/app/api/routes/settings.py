@@ -447,10 +447,19 @@ async def set_button_cycle(
 
     typed = [CycleStep.model_validate(s) for s in body.steps]
     saved = await _button_cycle_store(request).save(typed)
+    # Look up the currently active profile so the rendered frames carry
+    # an "ACTIVE" badge on the matching row. Falls back to None if the
+    # profile store isn't ready or there's no active profile yet.
+    from app.api.deps import get_profile_store
+    try:
+        store = get_profile_store(request)
+        active_name = await store.get_active_name()
+    except Exception:  # noqa: BLE001
+        active_name = None
     pushed = False
     push_error: str | None = None
     try:
-        rep = await sync_button_cycle(ssh, saved)
+        rep = await sync_button_cycle(ssh, saved, active_name=active_name)
         pushed = rep.ok
         if rep.errors:
             push_error = "; ".join(rep.errors)

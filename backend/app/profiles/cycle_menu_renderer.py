@@ -58,13 +58,26 @@ _HEADER_BG = (12, 12, 22)
 
 
 async def render_menu_frames_async(
-    ssh: SlateSSH, steps: list[CycleStep],
+    ssh: SlateSSH,
+    steps: list[CycleStep],
+    *,
+    active_name: str | None = None,
 ) -> list[bytes]:
-    """Render one PNG per cursor position. Async because the TTF fonts
-    are fetched from the Slate via SSH on first use (cached locally
-    after that — see `font_cache.fetch_font`)."""
+    """Render one PNG per cursor position.
+
+    `active_name`, when provided, makes profile rows whose `name` matches
+    render an extra "ACTIVE" pill so the user can tell at a glance which
+    slot is already loaded (and therefore would short-circuit on commit
+    if selected again). Pass None to render without that hint.
+
+    Async because the TTF fonts are fetched from the Slate via SSH on
+    first use (cached locally — see `font_cache.fetch_font`).
+    """
     fonts = await _load_fonts(ssh)
-    return [_render_one(steps, i, fonts) for i in range(len(steps))]
+    return [
+        _render_one(steps, i, fonts, active_name=active_name)
+        for i in range(len(steps))
+    ]
 
 
 # ---------------------------- internals ---------------------------- #
@@ -103,7 +116,11 @@ async def _load_fonts(ssh: SlateSSH) -> _Fonts:
 
 
 def _render_one(
-    steps: list[CycleStep], cursor: int, fonts: _Fonts,
+    steps: list[CycleStep],
+    cursor: int,
+    fonts: _Fonts,
+    *,
+    active_name: str | None = None,
 ) -> bytes:
     img = Image.new("RGB", (SCREEN_W, SCREEN_H), BG)
     d = ImageDraw.Draw(img)
@@ -129,8 +146,16 @@ def _render_one(
     y = _TITLE_H + 6
     for i in range(first, last):
         step = steps[i]
-        is_active = (i == cursor)
-        _draw_row(d, fonts, y=y, idx=i, step=step, active=is_active)
+        is_cursor = (i == cursor)
+        is_active = (
+            active_name is not None
+            and step.kind == "profile"
+            and step.name == active_name
+        )
+        _draw_row(
+            d, fonts, y=y, idx=i, step=step,
+            cursor=is_cursor, active=is_active,
+        )
         y += _ROW_H
 
     _draw_footer(
@@ -194,15 +219,23 @@ def _draw_row(
     y: int,
     idx: int,
     step: CycleStep,
+    cursor: bool,
     active: bool,
 ) -> None:
+    """Draw one row.
+
+    `cursor` = this slot is currently highlighted (user is about to
+    commit it). `active` = this profile is currently loaded on the
+    Slate (informational badge, shown even when cursor is elsewhere).
+    The two are independent and both can be true for the same row.
+    """
     margin = 10
     box_top = y
     box_bot = y + _ROW_H - 4
 
-    if active:
-        # Accent strip + tinted fill + accent outline. No bullet — the
-        # whole row IS the selection indicator.
+    if cursor:
+        # Accent strip + tinted fill + accent outline. The whole row IS
+        # the selection indicator.
         d.rectangle(
             [(margin, box_top), (SCREEN_W - margin, box_bot)],
             fill=_SELECTED_FILL,
@@ -217,8 +250,6 @@ def _draw_row(
         kind_color = DEFAULT_ACCENT
         font = fonts.row_bold
     else:
-        # Subtle divider under each non-active row — keeps the list
-        # scannable without competing visually with the selection.
         d.rectangle(
             [(margin, box_top), (SCREEN_W - margin, box_bot)],
             fill=_ROW_BG, outline=None,
@@ -236,17 +267,37 @@ def _draw_row(
     pill = f"{idx + 1:02d}"
     d.text((margin + 12, box_top + 6), pill, fill=kind_color, font=fonts.small_mono)
 
-    # Kind hint and step name.
+    # Step name.
     label = step.name
     name_x = margin + 38
     d.text((name_x, box_top + 5), label, fill=text_color, font=font)
 
-    # Tag on the right ("ACTION" / "PROFILE") so the user can tell at
-    # a glance what each slot does.
+    # Tag stack on the right. ACTIVE pill (when applicable) sits left
+    # of the kind tag — drawn first so we can position the kind tag
+    # next to it. Both colors stay subdued unless the row is also the
+    # cursor (then green ACTIVE pops against the accent fill).
+    right_edge = SCREEN_W - margin - 8
+    if active:
+        active_text = "ACTIVE"
+        active_w = d.textbbox((0, 0), active_text, font=fonts.small)[2] + 8
+        active_box_left = right_edge - active_w
+        active_box_top = box_top + 6
+        active_box_bot = box_top + 6 + 12
+        # Filled green chip — emerald reads as "ok / current state".
+        d.rectangle(
+            [(active_box_left, active_box_top), (right_edge, active_box_bot)],
+            fill=(7, 35, 22), outline=(94, 232, 168), width=1,
+        )
+        d.text(
+            (active_box_left + 4, active_box_top + 0),
+            active_text, fill=(94, 232, 168), font=fonts.small,
+        )
+        right_edge = active_box_left - 6
+
     tag = "ACTION" if step.kind == "action" else "PROFILE"
     tag_w = d.textbbox((0, 0), tag, font=fonts.small)[2]
     d.text(
-        (SCREEN_W - margin - tag_w - 8, box_top + 8),
+        (right_edge - tag_w, box_top + 8),
         tag, fill=kind_color, font=fonts.small,
     )
 

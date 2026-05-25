@@ -306,8 +306,15 @@ REMOTE_MENUS_DIR = "/etc/slate-controller/menus"
 
 async def sync_button_cycle(
     ssh: SlateSSH, steps: list,
+    *,
+    active_name: str | None = None,
 ) -> SyncReport:
     """Push the reset-button cycle list + pre-rendered menu frames.
+
+    `active_name` is folded into the frames so the row matching the
+    currently-loaded profile gets an "ACTIVE" pill. Pass None to skip
+    the badge (initial sync where we don't know yet, or external
+    callers that don't care).
 
     Two artifacts go to the Slate :
       1. `/etc/slate-controller/cycle.json` — the ordered step list,
@@ -352,7 +359,9 @@ async def sync_button_cycle(
         # Rendering needs SSH to (lazily) fetch the Slate's TTF fonts on
         # first run. Subsequent calls hit the local cache → ~20ms per
         # frame.
-        png_frames = await render_menu_frames_async(ssh, steps)
+        png_frames = await render_menu_frames_async(
+            ssh, steps, active_name=active_name,
+        )
     except Exception as exc:  # noqa: BLE001
         rep.errors.append(f"render menu frames: {exc}")
         return rep
@@ -390,6 +399,35 @@ async def sync_button_cycle(
         ok=rep.ok, steps=len(steps), frames=len(png_frames),
     )
     return rep
+
+
+async def refresh_button_cycle_active(
+    ssh: SlateSSH,
+    cycle_steps: list,
+    active_name: str | None,
+) -> SyncReport | None:
+    """Re-render + push menu frames if the cycle has at least one
+    matching profile slot. Caller is responsible for reading the
+    current cycle config and active name.
+
+    Returns the sync report on success, or None when nothing needed
+    re-rendering (empty cycle, or active doesn't appear in any slot).
+    The latter optimization saves a full 4×150KB SSH push when the
+    user activates a profile that's not in their cycle.
+    """
+    if not cycle_steps:
+        return None
+    if active_name is None:
+        # Without an active to highlight, the badge layer wouldn't
+        # change. Skip — callers can still call sync_button_cycle
+        # directly when they want the un-badged version.
+        return None
+    matches = any(
+        s.kind == "profile" and s.name == active_name for s in cycle_steps
+    )
+    if not matches:
+        return None
+    return await sync_button_cycle(ssh, cycle_steps, active_name=active_name)
 
 
 async def list_remote_profiles(ssh: SlateSSH) -> list[str]:

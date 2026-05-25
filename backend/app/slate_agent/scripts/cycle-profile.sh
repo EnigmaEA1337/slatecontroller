@@ -21,6 +21,7 @@ CYCLE_FILE="$ROOT/cycle.json"
 STATE_DIR="$ROOT/state"
 CURSOR_FILE="$STATE_DIR/cycle_cursor"
 COMMIT_PID_FILE="$STATE_DIR/cycle_commit_pid"
+PAINT_PID_FILE="$STATE_DIR/cycle_paint_pid"
 MENUS_DIR="$ROOT/menus"
 SCRIPTS_DIR="$ROOT/scripts"
 LOG_TAG="slate-ctrl-cycle"
@@ -129,32 +130,44 @@ preview_kind=$(jsonfilter -i "$CYCLE_FILE" -e "@.steps[$next].kind" 2>/dev/null)
 preview_name=$(jsonfilter -i "$CYCLE_FILE" -e "@.steps[$next].name" 2>/dev/null)
 log "cursor → $next ($preview_kind '$preview_name'); committing in ${COMMIT_DELAY}s"
 
+# Kill the previous paint loop (if any) BEFORE starting a new one. The
+# old design spawned a fresh 2s paint loop on every press without
+# stopping the previous one — so two presses in 0.5s left two loops
+# fighting over /dev/fb0, and the screen lagged ~1-2s before showing
+# the new cursor's frame. We now keep exactly one painter alive at a
+# time, swapped instantly when the user presses again.
+if [ -f "$PAINT_PID_FILE" ]; then
+  pp=$(cat "$PAINT_PID_FILE" 2>/dev/null)
+  if [ -n "$pp" ] && kill -0 "$pp" 2>/dev/null; then
+    kill "$pp" 2>/dev/null
+  fi
+  rm -f "$PAINT_PID_FILE"
+fi
+
 # Paint the menu frame for this cursor position. The controller
-# pre-renders one frame per cursor and pushes it during sync. If the
-# expected frame is missing, fall back to silent log + still schedule
-# commit — the cycle still works, the user just doesn't see the menu.
+# pre-renders one frame per cursor and pushes it at sync time.
 frame="$MENUS_DIR/cycle_$next.raw"
 if [ -f "$frame" ]; then
-  # Use the same fb takeover loop the loading screens use : kill
-  # gl_screen briefly + write our raw, then let gl_screen come back.
-  # We don't hold here — the commit timer below will let the user keep
-  # pressing for COMMIT_DELAY seconds. After commit, slate-ctrl apply
-  # will paint the loading screen and finally the new wallpaper.
+  # Stop gl_screen the first time we start cycling — the loop below
+  # keeps killing it every 120ms to defeat procd respawn. The commit
+  # timer (further down) handles `/etc/init.d/gl_screen start` again
+  # so the panel returns to normal once the user is done cycling.
+  /etc/init.d/gl_screen stop >/dev/null 2>&1
+  killall -9 gl_screen >/dev/null 2>&1
+
+  # Infinite paint loop — runs until killed by the next press OR by
+  # the commit timer. Writing the same raw to /dev/fb0 every ~120ms
+  # is cheap (153 KB, contiguous write) and keeps procd from sneaking
+  # gl_screen back in front of us.
   (
-    /etc/init.d/gl_screen stop >/dev/null 2>&1
-    killall -9 gl_screen >/dev/null 2>&1
-    # Brief paint loop : ~1.5s of frames so the user sees it stick
-    # against any procd respawn race. Then we exit and let the next
-    # press (or the commit) handle the next paint.
-    end=$(( $(date +%s) + 2 ))
-    while [ "$(date +%s)" -lt "$end" ]; do
+    while true; do
       cat "$frame" > /dev/fb0 2>/dev/null
-      usleep 120000
       killall -9 gl_screen >/dev/null 2>&1
+      usleep 120000
     done
-    /etc/init.d/gl_screen start >/dev/null 2>&1
   ) &
-  log "menu frame painted ($frame)"
+  echo $! > "$PAINT_PID_FILE"
+  log "menu frame painted ($frame, pid=$!)"
 else
   log "no pre-rendered frame for cursor=$next ($frame missing)"
 fi
@@ -188,6 +201,17 @@ fi
   fi
 
   logger -t "$LOG_TAG" "committing step #$fire : $kind '$name'"
+  # Tear down the menu paint loop so the panel is free for the apply
+  # path (slate-ctrl apply paints its own loading screen + wallpaper).
+  if [ -f "$PAINT_PID_FILE" ]; then
+    pp=$(cat "$PAINT_PID_FILE" 2>/dev/null)
+    [ -n "$pp" ] && kill "$pp" 2>/dev/null
+    rm -f "$PAINT_PID_FILE"
+  fi
+  # If no profile is going to be applied (action step OR already-active
+  # short-circuit), restart gl_screen so the panel doesn't stay stuck
+  # on the last menu frame. The slate-ctrl apply path handles its own
+  # gl_screen restart at the end of its handler chain.
   case "$kind" in
     profile)
       # No-op if the target profile is already active. Skipping the
@@ -216,6 +240,20 @@ fi
       logger -t "$LOG_TAG" "unknown kind '$kind' — skipped"
       ;;
   esac
+
+  # If no slate-ctrl apply will run (already-active OR action), the
+  # panel would stay on our last menu frame forever — kick gl_screen
+  # back so the user sees their normal home view. (Grouped to avoid
+  # POSIX sh left-to-right && / || precedence trap.)
+  noop=0
+  if [ "$kind" = "action" ]; then
+    noop=1
+  elif [ "$kind" = "profile" ] && [ "$cur" = "$name" ]; then
+    noop=1
+  fi
+  if [ "$noop" = "1" ]; then
+    /etc/init.d/gl_screen start >/dev/null 2>&1
+  fi
 
   # Back to idle so the next press starts at slot 0 again.
   echo -1 > "$CURSOR_FILE"
