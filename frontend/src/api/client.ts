@@ -1,5 +1,6 @@
 import axios, { AxiosError } from "axios";
 import { clearToken, getToken } from "@/lib/auth-storage";
+import { getActiveDevice } from "@/lib/device-context";
 
 // Relative by default so requests go to the same origin that served the UI.
 // Vite dev (vite.config.ts) proxies `/api` to the backend; production behind
@@ -19,6 +20,31 @@ api.interceptors.request.use((config) => {
   const token = getToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Attach `?device=<slug>` for the routes that target a specific device,
+// when the user has selected one in the DevicePicker. Routes that are
+// inherently device-scoped by URL path (e.g. `/api/devices/<slug>/...`)
+// don't need this and we skip them to avoid double-scoping confusion.
+// Auth + devices-list are global — they should never get the query
+// param. The backend treats `?device=` as optional anyway, so a stray
+// one is harmless, but cleaner to keep requests minimal.
+const NO_DEVICE_PARAM_PREFIXES = [
+  "/api/auth/",
+  "/api/devices", // covers /api/devices and /api/devices/<slug>/...
+];
+
+function shouldAttachDeviceParam(url: string | undefined): boolean {
+  if (!url) return false;
+  return !NO_DEVICE_PARAM_PREFIXES.some((p) => url.startsWith(p));
+}
+
+api.interceptors.request.use((config) => {
+  const slug = getActiveDevice();
+  if (slug && shouldAttachDeviceParam(config.url)) {
+    config.params = { ...(config.params ?? {}), device: slug };
   }
   return config;
 });

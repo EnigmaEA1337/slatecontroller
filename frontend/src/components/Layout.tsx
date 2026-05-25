@@ -18,6 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getActiveProfile } from "@/api/profiles";
 import { useCurrentUser, useLogout } from "@/hooks/useAuth";
 import { reliabilityShieldStyle } from "@/components/ReliabilityShield";
+import DevicePicker from "@/components/DevicePicker";
 import SlateConnectivityBadge from "@/components/SlateConnectivityBadge";
 import { useSecurityReliability } from "@/hooks/useSecurityReliability";
 import { useWallpaperBlobUrl } from "@/hooks/useWallpaper";
@@ -387,6 +388,11 @@ export default function Layout() {
         </nav>
 
         <div className="mt-auto space-y-2 border-t border-[color:var(--color-cyber-border)] pt-4">
+          {/* Device selector — auto-hides for single-device setups, shows
+              a dropdown once a 2nd device is adopted. Switching the
+              selected device adds `?device=<slug>` to every backend
+              request via the axios interceptor. */}
+          <DevicePicker />
           {/* Live badge — quel chemin réseau le contrôleur utilise pour
               joindre le Slate (bascule auto LAN ↔ Tailscale ↔ custom). */}
           <SlateConnectivityBadge />
