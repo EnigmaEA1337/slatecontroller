@@ -72,6 +72,27 @@ _wifi_slug_to_env() {
   echo "$1" | tr 'a-z-' 'A-Z_' | sed 's/[^A-Z0-9_]/_/g'
 }
 
+# Template wifi-iface name for cloning per band. The MediaTek mtkwifi
+# Lua driver requires ~60 fields (ht_*, vht_*, eml_*, mumimo*, etc.).
+# Setting just the basic openwrt fields leaves the driver indexing a
+# nil value and `wifi reload` crashes in /lib/wifi/mtwifi.lua. We
+# therefore clone an existing working section then override the
+# user-facing fields (ssid/key/encryption/disabled/network/isolate).
+_wifi_template_for_band() {
+  case "$1" in
+    2GHz|2g|24g|2.4GHz) echo "ra0" ;;
+    5GHz|5g)            echo "rai0" ;;
+    6GHz|6g)            echo "rax0" ;;
+    *)                  echo "" ;;
+  esac
+}
+
+# Fields we MUST override after the clone — they're either user input
+# (ssid/key/encryption/network/disabled/isolate) or auto-allocated by
+# the driver (ifname/factory_macaddr/macaddr — must not be inherited
+# from the template or we'd collide on broadcast).
+_WIFI_OVERRIDE_FIELDS="ssid key encryption network disabled isolate ifname factory_macaddr macaddr vifidx"
+
 _wifi_create_section() {
   # $1 slug  $2 name  $3 band  $4 security  $5 network  $6 client_isolation  $7 enabled
   local slug="$1" name="$2" band="$3" security="$4" network="$5"
@@ -79,16 +100,24 @@ _wifi_create_section() {
   local section="SC_WL_$(_wifi_slug_to_env "$slug")"
 
   # MLO needs one wifi-iface per radio glued together — not yet handled.
-  # Refuse cleanly so the user knows what to do.
   if [ "$band" = "MLO" ]; then
     echo "wifi: SSID '$name' band=MLO not supported by CREATE yet — set band to 2GHz/5GHz/6GHz in the catalog" >&2
     return 1
   fi
 
-  local device
+  local device template
   device=$(_wifi_radio_for_band "$band")
-  if [ -z "$device" ]; then
+  template=$(_wifi_template_for_band "$band")
+  if [ -z "$device" ] || [ -z "$template" ]; then
     echo "wifi: SSID '$name' unknown band '$band' — skip" >&2
+    return 1
+  fi
+  if ! uci -q get "wireless.$template" >/dev/null 2>&1; then
+    echo "wifi: SSID '$name' template wireless.$template missing on this firmware — skip" >&2
+    return 1
+  fi
+  if ! uci -q get "wireless.$device" >/dev/null 2>&1; then
+    echo "wifi: SSID '$name' radio '$device' missing — skip" >&2
     return 1
   fi
 
@@ -99,31 +128,18 @@ _wifi_create_section() {
     return 1
   fi
 
-  # Source PSKs from the secrets file. Missing file = no PSKs available
-  # (handler then refuses to create any non-open SSID).
   local secrets_file="/etc/slate-controller/secrets/wifi.env"
   [ -f "$secrets_file" ] && . "$secrets_file"
-
   local env_name psk
   env_name=$(_wifi_slug_to_env "$slug")
   eval "psk=\${WIFI_${env_name}_PSK:-}"
-
   if [ "$encryption" != "none" ] && [ -z "$psk" ]; then
     echo "wifi: SSID '$name' needs a PSK but WIFI_${env_name}_PSK is unset in $secrets_file — re-run /api/agent/deploy after setting it in the WiFi catalog" >&2
     return 1
   fi
 
-  # Verify the target network actually exists in UCI — otherwise the
-  # wifi-iface won't bind anywhere.
   if ! uci -q get "network.$network" >/dev/null 2>&1; then
     echo "wifi: SSID '$name' target network 'network.$network' missing — skip" >&2
-    return 1
-  fi
-
-  # Verify the radio device exists too (some firmware variants ship
-  # with fewer radios on disabled hw).
-  if ! uci -q get "wireless.$device" >/dev/null 2>&1; then
-    echo "wifi: SSID '$name' radio '$device' missing — skip" >&2
     return 1
   fi
 
@@ -134,9 +150,39 @@ _wifi_create_section() {
     disabled_val=1
   fi
 
-  # Upsert. Re-running with the same params is a no-op (idempotent).
-  uci -q get "wireless.$section" >/dev/null 2>&1 \
-    || uci set "wireless.$section=wifi-iface"
+  # If we already had a section under this name, drop it first so we
+  # don't inherit stale fields from a partial previous run.
+  uci -q delete "wireless.$section" 2>/dev/null
+
+  # 1. Create the section.
+  uci set "wireless.$section=wifi-iface"
+
+  # 2. Clone every option from the template — except the ones we'll
+  # override below or that must be device-unique. `uci show wireless.X`
+  # emits `wireless.X.option='value'` lines; we parse field by field.
+  uci show "wireless.$template" 2>/dev/null | while read -r line; do
+    # Extract option name + value. Skip the section type line.
+    local opt_path opt_name opt_value
+    opt_path="${line%%=*}"
+    opt_value="${line#*=}"
+    # Strip leading "wireless.<template>." → option name only.
+    opt_name="${opt_path#wireless.${template}.}"
+    [ "$opt_path" = "wireless.$template" ] && continue  # the =wifi-iface line
+    [ "$opt_name" = "$opt_path" ] && continue           # path didn't match
+    # Drop surrounding quotes (uci show emits 'value').
+    opt_value="${opt_value#\'}"
+    opt_value="${opt_value%\'}"
+    # Skip fields we will explicitly set, or that should be unique per iface.
+    local skip
+    skip=0
+    for skipfield in $_WIFI_OVERRIDE_FIELDS; do
+      [ "$opt_name" = "$skipfield" ] && { skip=1; break; }
+    done
+    [ "$skip" = "1" ] && continue
+    uci set "wireless.$section.$opt_name=$opt_value"
+  done
+
+  # 3. Now apply our overrides on top.
   uci set "wireless.$section.device=$device"
   uci set "wireless.$section.network=$network"
   uci set "wireless.$section.mode=ap"
@@ -146,14 +192,14 @@ _wifi_create_section() {
     uci set "wireless.$section.key=$psk"
   fi
   uci set "wireless.$section.disabled=$disabled_val"
-  # client_isolation = block client↔client traffic on the same AP.
-  # OpenWrt uses `option isolate '1'` for this on ap mode ifaces.
   if [ "$isolate" = "true" ]; then
     uci set "wireless.$section.isolate=1"
   else
     uci -q delete "wireless.$section.isolate" 2>/dev/null
+    uci set "wireless.$section.isolate=0"
   fi
-  echo "wifi: created SSID '$name' on $device/$network ($section, encryption=$encryption, disabled=$disabled_val)"
+
+  echo "wifi: created SSID '$name' on $device/$network ($section, encryption=$encryption, disabled=$disabled_val, cloned from $template)"
   return 0
 }
 
