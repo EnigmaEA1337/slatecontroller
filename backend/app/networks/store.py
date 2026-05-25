@@ -49,6 +49,33 @@ def _to_public(row: NetworkRow) -> NetworkPublic:
     )
 
 
+async def _prune_peer_reference(
+    session: AsyncSession, dropped_slug: str,
+) -> int:
+    """Remove `dropped_slug` from every other network's
+    `reachable_networks` list. Returns the number of rows touched.
+
+    Standalone helper rather than inline-in-delete so it can be reused
+    (e.g. by a future rename operation that would call drop+create or
+    add a row-watcher) and unit-tested without instantiating the full
+    store. Kept module-private — the only legitimate caller today is
+    `NetworkStore.delete`.
+    """
+    peers = (
+        (await session.execute(select(NetworkRow)
+                               .where(NetworkRow.slug != dropped_slug)))
+        .scalars()
+        .all()
+    )
+    touched = 0
+    for peer in peers:
+        current = peer.reachable_networks or []
+        if dropped_slug in current:
+            peer.reachable_networks = [s for s in current if s != dropped_slug]
+            touched += 1
+    return touched
+
+
 def _copy_write_fields(row: NetworkRow, body: NetworkWrite) -> None:
     """Mirror every NetworkWrite field onto the ORM row. Used by both
     create + update so the two stay in sync as the schema grows."""
@@ -116,12 +143,18 @@ class NetworkStore:
 
     async def delete(self, slug: str) -> None:
         """Delete a network. No builtin guard — every network is now
-        user-managed (cf module docstring)."""
+        user-managed (cf module docstring).
+
+        Auto-prunes any peer's `reachable_networks` that referenced this
+        slug, via `_prune_peer_reference`, so we don't leave orphan
+        strings dangling in the JSON column.
+        """
         async with self._sf() as session:
             row = await session.scalar(
                 select(NetworkRow).where(NetworkRow.slug == slug)
             )
             if row is None:
                 raise NetworkNotFoundError(slug)
+            await _prune_peer_reference(session, slug)
             await session.execute(delete(NetworkRow).where(NetworkRow.slug == slug))
             await session.commit()
