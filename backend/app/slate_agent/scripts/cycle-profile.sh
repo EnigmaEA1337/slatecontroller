@@ -49,6 +49,55 @@ fi
 
 mkdir -p "$STATE_DIR" "$MENUS_DIR"
 
+# ── Screen-lock gate ─────────────────────────────────────────────
+# If the user has set up a PIN on the touchscreen (ENABLE_PASSCODE=1),
+# we refuse the cycle whenever the display is OFF or dimmed — that's
+# the panel's "auto-locked / sleeping" state. The OEM reset behaviors
+# (reset_network at 3-7s, factory_reset at 8s+) still fire from the
+# parent /etc/rc.button/reset, so the button isn't dead — only the
+# short-press cycle is gated.
+#
+# Heuristic, not perfect : the panel being awake (bl_power=0 + max
+# brightness) could mean either "user just touched to wake, on PIN
+# entry" or "PIN already entered, on home screen". GL.iNet doesn't
+# expose the running lock state via ubus or any state file we found
+# (probed live in this session). The narrow attack window — user must
+# be physically present, with PIN-entry on screen, within AUTO_LOCK_TIME
+# of waking — and the PIN still gating every config change in the web
+# UI, makes this trade-off acceptable for V1.
+GL_CONFIG=/tmp/gl_screen/active_config
+BL_POWER_FILE=/sys/class/backlight/backlight/bl_power
+BL_BRIGHTNESS_FILE=/sys/class/backlight/backlight/actual_brightness
+BL_MAX_FILE=/sys/class/backlight/backlight/max_brightness
+
+if [ -f "$GL_CONFIG" ]; then
+  enabled=$(awk '/^ENABLE_PASSCODE/ {print $2; exit}' "$GL_CONFIG" 2>/dev/null)
+  if [ "$enabled" = "1" ]; then
+    bl_power=$(cat "$BL_POWER_FILE" 2>/dev/null)
+    brightness=$(cat "$BL_BRIGHTNESS_FILE" 2>/dev/null)
+    max_brightness=$(cat "$BL_MAX_FILE" 2>/dev/null)
+    case "$bl_power" in ''|*[!0-9]*) bl_power=0 ;; esac
+    case "$brightness" in ''|*[!0-9]*) brightness=0 ;; esac
+    case "$max_brightness" in ''|*[!0-9]*) max_brightness=120 ;; esac
+    # 50% of max is our "awake" threshold. Below that the panel is
+    # transitioning towards lock or already off.
+    threshold=$(( max_brightness / 2 ))
+    if [ "$bl_power" != "0" ] || [ "$brightness" -lt "$threshold" ]; then
+      log "screen locked (bl_power=$bl_power brightness=$brightness/$max_brightness) — short-press ignored"
+      # Force cursor back to idle so the next press (post-unlock)
+      # starts cleanly at slot 0. Also drop any pending commit timer
+      # that might have been scheduled before the screen went to sleep.
+      echo -1 > "$CURSOR_FILE"
+      if [ -f "$COMMIT_PID_FILE" ]; then
+        stale=$(cat "$COMMIT_PID_FILE" 2>/dev/null)
+        [ -n "$stale" ] && kill "$stale" 2>/dev/null
+        rm -f "$COMMIT_PID_FILE"
+      fi
+      exit 0
+    fi
+  fi
+fi
+
 # Cancel any pending commit timer. Re-pressing the button restarts the
 # countdown — that's the whole point of the select-then-commit design.
 if [ -f "$COMMIT_PID_FILE" ]; then
