@@ -70,14 +70,20 @@ async def agent_status(
 @router.post("/deploy")
 async def agent_deploy(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    """Push slate-ctrl + handlers + AdGuard creds to the Slate. Idempotent.
+    """Push slate-ctrl + handlers + AdGuard creds + Wi-Fi PSKs to the Slate. Idempotent.
 
     The AdGuard secret is only pushed if the controller has non-placeholder
     credentials (i.e. someone has overridden ADMIN_PASSWORD in .env). If
     the defaults are still in place, the secret push is skipped — re-run
     /api/agent/deploy after changing the env vars.
+
+    Wi-Fi PSKs are read from the WifiSsidStore for every SSID that has
+    one set. Pushed as wifi.env (chmod 600). The wifi.sh handler sources
+    this file when it has to CREATE a wifi-iface that's missing on the
+    Slate (e.g. first-time deploy of a profile-defined SSID).
     """
     settings = get_settings()
 
@@ -91,11 +97,35 @@ async def agent_deploy(
     ):
         adguard_creds = (settings.admin_username, settings.admin_password)
 
-    report = await deploy_agent(ssh, adguard_credentials=adguard_creds)
+    # Collect every SSID with a stored PSK. Failures decoding any
+    # individual PSK don't fail the whole deploy ; the slug just
+    # doesn't end up in wifi.env (handler will refuse to CREATE that
+    # SSID with a clear log line).
+    wifi_psks: dict[str, str] = {}
+    try:
+        for entry in await wifi.list_all():
+            if not entry.has_password:
+                continue
+            try:
+                wifi_psks[entry.slug] = await wifi.get_password(entry.slug)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "agent.deploy.wifi_psk_skip",
+                    slug=entry.slug, error=str(exc),
+                )
+    except Exception as exc:  # noqa: BLE001 — never fail the deploy
+        logger.warning("agent.deploy.wifi_list_failed", error=str(exc))
+
+    report = await deploy_agent(
+        ssh,
+        adguard_credentials=adguard_creds,
+        wifi_passwords=wifi_psks or None,
+    )
     logger.info(
         "agent.deploy",
         username=user.username, ok=report.ok, errors=len(report.errors),
         adguard_secret_pushed=adguard_creds is not None,
+        wifi_psks_pushed=len(wifi_psks),
     )
     return report.to_dict()
 

@@ -29,6 +29,7 @@ REMOTE_SCREENS_DIR = f"{REMOTE_ROOT}/screens"
 REMOTE_SECRETS_DIR = f"{REMOTE_ROOT}/secrets"
 REMOTE_SCRIPTS_DIR = f"{REMOTE_ROOT}/scripts"
 REMOTE_ADGUARD_SECRET = f"{REMOTE_SECRETS_DIR}/adguard.env"
+REMOTE_WIFI_SECRET = f"{REMOTE_SECRETS_DIR}/wifi.env"
 REMOTE_RAM_MITIGATION = f"{REMOTE_SCRIPTS_DIR}/ram-mitigation.sh"
 REMOTE_CYCLE_SCRIPT = f"{REMOTE_SCRIPTS_DIR}/cycle-profile.sh"
 REMOTE_CYCLE_ACTION_UPDATE = f"{REMOTE_SCRIPTS_DIR}/cycle-action-update.sh"
@@ -73,6 +74,7 @@ async def deploy_agent(
     ssh: SlateSSH,
     *,
     adguard_credentials: tuple[str, str] | None = None,
+    wifi_passwords: dict[str, str] | None = None,
 ) -> DeployReport:
     """Push slate-ctrl + all handlers to the Slate.
 
@@ -81,6 +83,10 @@ async def deploy_agent(
       2. push slate-ctrl → /usr/local/bin/slate-ctrl (chmod 755)
       3. push each scripts/handlers/*.sh → /etc/slate-controller/handlers/
       4. if adguard_credentials → push secrets/adguard.env (chmod 600)
+      5. if wifi_passwords → push secrets/wifi.env (chmod 600)
+         keyed by SSID slug (sanitized to [A-Z0-9_]) → ``WIFI_<SLUG>_PSK``
+         shell-source-able env file. Used by wifi.sh when CREATE'ing
+         a wifi-iface that's missing on the Slate.
 
     Profiles and state dirs are created but not populated here — see
     `sync.sync_profiles()` for the JSON push.
@@ -143,6 +149,18 @@ async def deploy_agent(
             rep.pushed.append(f"{REMOTE_ADGUARD_SECRET} (0600)")
         except (SlateSSHError, ValueError) as exc:
             rep.errors.append(f"push adguard secret: {exc}")
+
+    # 4b. Push Wi-Fi PSKs if any. Same security profile as the AdGuard
+    # secret: mode 0600 inside a 0700 secrets/ directory, root only.
+    # The wifi.sh handler sources this when CREATE'ing a new wifi-iface.
+    if wifi_passwords:
+        try:
+            await _write_wifi_secrets(ssh, wifi_passwords)
+            rep.pushed.append(
+                f"{REMOTE_WIFI_SECRET} (0600, {len(wifi_passwords)} PSK)",
+            )
+        except (SlateSSHError, ValueError) as exc:
+            rep.errors.append(f"push wifi secrets: {exc}")
 
     # 5. Reset-button profile cycle. Three artifacts :
     #    a. cycle-profile.sh (dispatcher, reads cycle.json)
@@ -319,6 +337,62 @@ async def _write_adguard_secret(
         f"ADGUARD_PASSWORD='{safe_pass}'\n"
     ).encode("utf-8")
     await ssh.put_bytes(content, REMOTE_ADGUARD_SECRET, mode=0o600)
+
+
+_SLUG_TO_ENV_RE = None  # filled at import time to keep the call site clean
+
+
+def _slug_to_env(slug: str) -> str:
+    """Sanitize an SSID slug for use as a shell variable name.
+
+    Maps anything outside [A-Z0-9_] to `_`. Slug `wg-CH-ZA-1` →
+    `WG_CH_ZA_1`. Used to build the wifi.env keys (`WIFI_<SLUG>_PSK`).
+    """
+    out: list[str] = []
+    for ch in slug.strip().upper():
+        out.append(ch if (ch.isalnum() or ch == "_") else "_")
+    name = "".join(out).strip("_")
+    return name or "X"
+
+
+async def _write_wifi_secrets(
+    ssh: SlateSSH, passwords: dict[str, str],
+) -> None:
+    """Push the Wi-Fi PSKs to /etc/slate-controller/secrets/wifi.env.
+
+    Shell-source-able format::
+
+        WIFI_NEURALCORE_PSK='...'
+        WIFI_BLACKICE_PSK='...'
+
+    `passwords` is `{slug: psk}`. Slugs are sanitized so `slate-fr` →
+    `WIFI_SLATE_FR_PSK`. Empty PSKs are skipped silently (caller has
+    already filtered to "has_password" SSIDs typically).
+
+    Validates : refuse newlines + literal ``$()``/`` ``` `` patterns that
+    could break shell sourcing. Quotes are POSIX-escaped via the
+    `'\\''` idiom (close, escape, reopen).
+    """
+    lines = [
+        "# Managed by slate-controller. Sourced by handlers/wifi.sh on CREATE.",
+        "# Do not edit by hand — re-run /api/agent/deploy to refresh.",
+    ]
+    written = 0
+    for slug, psk in sorted(passwords.items()):
+        if not psk:
+            continue
+        if "\n" in psk or "\r" in psk:
+            raise ValueError(f"PSK for {slug!r} contains a newline")
+        env_name = _slug_to_env(slug)
+        safe = psk.replace("'", "'\\''")
+        lines.append(f"WIFI_{env_name}_PSK='{safe}'")
+        written += 1
+    if written == 0:
+        # Caller asked us to push but nothing was usable — still write
+        # an empty file so wifi.sh has something to source.
+        lines.append("# (no PSKs configured)")
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    await ssh.put_bytes(content, REMOTE_WIFI_SECRET, mode=0o600)
 
 
 async def get_agent_version(ssh: SlateSSH) -> str | None:
