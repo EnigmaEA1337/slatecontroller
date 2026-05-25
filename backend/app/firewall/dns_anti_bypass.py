@@ -31,13 +31,20 @@ from dataclasses import dataclass
 import structlog
 
 from app.exceptions import SlateError
+from app.firewall.rule_names import LEGACY_NAMES, make_name
 from app.slate.ssh import SlateSSH, SlateSSHError
 
 logger = structlog.get_logger(__name__)
 
-# Nom UCI de notre règle custom (préfixe slate_ctrl_ pour reconnaissance
-# rapide à l'audit + collision-free avec les règles GL.iNet existantes).
-CUSTOM_RULE_NAME = "slate_ctrl_block_dot_lan"
+# Nom UCI de notre règle custom — convention `SC_FR_<INTENT>_<DETAIL>`
+# centralisée dans `app/firewall/rule_names.py`. Intent AB = anti-bypass.
+CUSTOM_RULE_NAME = make_name("AB", "DOT853_LAN")
+# Pre-2026-05-25 the rule was named `slate_ctrl_block_dot_lan`. We delete
+# that section on every enable/disable so users who had it before our
+# rename don't end up with two near-duplicate rules in their firewall.
+LEGACY_CUSTOM_RULE_NAMES = [
+    old for old, new in LEGACY_NAMES.items() if new == CUSTOM_RULE_NAME
+]
 
 # Règles GL.iNet préinstallées qu'on active (toutes zones LAN-side qui peuvent
 # router vers le WAN). Les ovpnserver/wgserver vivent dans la même config
@@ -148,11 +155,16 @@ async def enable(ssh: SlateSSH) -> AntiBypassStatus:
     # `uci -q get` first to detect existence; on absent, we create the
     # section via the typed `uci add firewall rule` form (no fragile
     # @rule[N] reference handling).
+    legacy_purge = " ; ".join(
+        f"uci -q delete firewall.{old} 2>/dev/null"
+        for old in LEGACY_CUSTOM_RULE_NAMES
+    ) or "true"
     create_or_update_custom = f"""
+    {legacy_purge}
     if ! uci -q get firewall.{CUSTOM_RULE_NAME} >/dev/null 2>&1; then
       uci set firewall.{CUSTOM_RULE_NAME}=rule
     fi
-    uci set firewall.{CUSTOM_RULE_NAME}.name='slate-ctrl: block client DoT (TCP/853) LAN->WAN'
+    uci set firewall.{CUSTOM_RULE_NAME}.name='{CUSTOM_RULE_NAME}'
     uci set firewall.{CUSTOM_RULE_NAME}.src='lan'
     uci set firewall.{CUSTOM_RULE_NAME}.dest='wan'
     uci set firewall.{CUSTOM_RULE_NAME}.proto='tcp'

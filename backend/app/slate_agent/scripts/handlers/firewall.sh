@@ -6,6 +6,29 @@
 # country whitelist, ipset advanced rules) — those are logged as skipped
 # instead of silently failing.
 #
+# Naming convention for any UCI section we create here :
+#   SC_FR_<INTENT>_<DETAIL>
+#       SC      Slate Controller
+#       FR      Firewall (we'll later add SC_DNS_*, SC_VPN_* etc.)
+#       INTENT  AB (anti-bypass), KS (kill-switch), LD (lockdown), GEO,
+#               BLK (generic block), RDR (redirect)
+#       DETAIL  short uppercase suffix (port, country, IP family…)
+#   UCI section id ≤ 32 chars, [A-Z0-9_] only. Use this same string for
+#   both the section id AND `option name` (single source of truth — the
+#   user sees the same identifier in LuCI as in `uci show firewall`).
+#
+#   Wrapper helper (use this when adding new rule code below) :
+#     _sc_rule_upsert <name> <option> <value> [<option> <value>...]
+#   It handles the create-if-missing + set + set-name idempotently.
+#
+#   Examples of the convention :
+#     SC_FR_AB_DOT853_LAN   anti-bypass : block client DoT (TCP/853) LAN→WAN
+#     SC_FR_KS_WAN_DROP     kill-switch : drop LAN→WAN when VPN down
+#     SC_FR_GEO_ALLOW_FR    geoip : only allow inbound from FR
+#   Cleanup helpers (mirror of `legacy_purge` in dns_anti_bypass.py) :
+#     uci show firewall | grep -oE '^firewall\.SC_FR_[^=]+' | sort -u \
+#       | while read sec; do uci delete "$sec"; done; uci commit firewall
+#
 # Profile JSON shape (firewall block):
 #   {
 #     "lockdown":           bool,  // strict default-deny + leak rules on
@@ -25,6 +48,32 @@
 #   - block_telemetry : telemetry domains live in AdGuard's filter lists
 #     (HaGeZi tracker, etc.) — not the firewall's responsibility. Skipped
 #     with note to the operator.
+
+# Idempotent upsert of a managed UCI firewall rule. Use this whenever
+# the handler grows to *create* (not just toggle) a rule. Both the UCI
+# section id and `option name` are set to `$1` so the rule is grep-able
+# from any side (LuCI, `uci show`, log lines).
+#
+# Usage :
+#   _sc_rule_upsert SC_FR_AB_DOT853_LAN \
+#       src lan dest wan proto tcp dest_port 853 target REJECT enabled 1
+_sc_rule_upsert() {
+  local name="$1"; shift
+  case "$name" in
+    SC_FR_*) ;;
+    *)
+      echo "_sc_rule_upsert: refusing non-SC_FR_ name '$name'" >&2
+      return 1
+      ;;
+  esac
+  uci -q get "firewall.$name" >/dev/null 2>&1 \
+    || uci set "firewall.$name=rule"
+  uci set "firewall.$name.name=$name"
+  while [ "$#" -ge 2 ]; do
+    uci set "firewall.$name.$1=$2"
+    shift 2
+  done
+}
 
 firewall_apply() {
   local payload
