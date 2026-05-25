@@ -16,12 +16,17 @@ class NetworkPublic(BaseModel):
     subnet_cidr: str
     gateway_ip: str
     dhcp_enabled: bool
-    isolated_from_lan: bool
     vlan_tag: int | None
-    is_builtin: bool
     notes: str
     ipv6_enabled: bool
     ipv6_subnet_cidr: str
+
+    # 3-level isolation model. See db/models.py NetworkRow for the rationale.
+    intra_bridge_isolation: bool
+    reach_internet: bool
+    reachable_networks: list[str]
+    admin_access: bool
+
     created_at: datetime
     updated_at: datetime
 
@@ -38,7 +43,6 @@ class NetworkWrite(BaseModel):
     subnet_cidr: str = Field(min_length=9, max_length=32)
     gateway_ip: str = Field(default="", max_length=40)
     dhcp_enabled: bool = True
-    isolated_from_lan: bool = False
     vlan_tag: int | None = Field(default=None, ge=1, le=4094)
     notes: str = Field(default="", max_length=256)
     ipv6_enabled: bool = Field(
@@ -50,6 +54,39 @@ class NetworkWrite(BaseModel):
         description=(
             "Static IPv6 prefix (e.g. 'fd00:abcd:1234::/64'). Leave empty to use "
             "SLAAC + Prefix Delegation from the WAN."
+        ),
+    )
+
+    # ── isolation ───────────────────────────────────────────────
+    intra_bridge_isolation: bool = Field(
+        default=False,
+        description=(
+            "L2: ports of the same bridge are cloisonnés from each other. "
+            "Rare ; most setups achieve isolation through separate bridges."
+        ),
+    )
+    reach_internet: bool = Field(
+        default=True,
+        description=(
+            "L3: clients of this network can route to the wan zone. "
+            "Set False for purely-local segments (e.g. lab without internet)."
+        ),
+    )
+    reachable_networks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "L3: explicit list of OTHER network slugs this one can route "
+            "to besides wan. Empty = isolated from every other subnet. "
+            "Example: ['lan'] = can reach main LAN, no other."
+        ),
+    )
+    admin_access: bool = Field(
+        default=True,
+        description=(
+            "Zone input policy : whether clients can reach the Slate "
+            "itself (DHCP, DNS, admin UI). False = clients can't even "
+            "ping their gateway — strongly discouraged unless you really "
+            "know why."
         ),
     )
 

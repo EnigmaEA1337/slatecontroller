@@ -1,10 +1,12 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Lock,
+  Globe,
   Network as NetworkIcon,
   Pencil,
   Plus,
+  Shield,
+  ShieldOff,
   Trash2,
   X,
 } from "lucide-react";
@@ -22,9 +24,13 @@ import { errorMessage } from "@/lib/error-utils";
 
 function NetworkForm({
   initial,
+  allNetworks,
   onClose,
 }: {
   initial?: NetworkPublic;
+  /** Used to render the "reachable_networks" checkbox grid — every
+   *  network EXCEPT the one being edited shows up as a togglable peer. */
+  allNetworks: NetworkPublic[];
   onClose: () => void;
 }) {
   const isEdit = Boolean(initial);
@@ -34,13 +40,36 @@ function NetworkForm({
   const [subnet, setSubnet] = useState(initial?.subnet_cidr ?? "192.168.20.0/24");
   const [gateway, setGateway] = useState(initial?.gateway_ip ?? "192.168.20.1");
   const [dhcp, setDhcp] = useState(initial?.dhcp_enabled ?? true);
-  const [isolated, setIsolated] = useState(initial?.isolated_from_lan ?? false);
   const [vlanTag, setVlanTag] = useState<string>(
     initial?.vlan_tag ? String(initial.vlan_tag) : "",
   );
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [ipv6Enabled, setIpv6Enabled] = useState(initial?.ipv6_enabled ?? false);
   const [ipv6Subnet, setIpv6Subnet] = useState(initial?.ipv6_subnet_cidr ?? "");
+
+  // ── 3-level isolation state ────────────────────────────────────
+  const [intraBridge, setIntraBridge] = useState(
+    initial?.intra_bridge_isolation ?? false,
+  );
+  const [reachInternet, setReachInternet] = useState(
+    initial?.reach_internet ?? true,
+  );
+  const [reachable, setReachable] = useState<Set<string>>(
+    new Set(initial?.reachable_networks ?? []),
+  );
+  const [adminAccess, setAdminAccess] = useState(
+    initial?.admin_access ?? true,
+  );
+
+  // Peers candidate to "reachable_networks" : every other network in
+  // the catalog. We exclude the current one (no self-routing).
+  const peers = useMemo(
+    () =>
+      allNetworks
+        .filter((n) => n.slug !== (initial?.slug ?? slug))
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    [allNetworks, initial, slug],
+  );
 
   const queryClient = useQueryClient();
 
@@ -52,11 +81,14 @@ function NetworkForm({
         subnet_cidr: subnet,
         gateway_ip: gateway,
         dhcp_enabled: dhcp,
-        isolated_from_lan: isolated,
         vlan_tag: vlanTag ? Number(vlanTag) : null,
         notes,
         ipv6_enabled: ipv6Enabled,
         ipv6_subnet_cidr: ipv6Subnet,
+        intra_bridge_isolation: intraBridge,
+        reach_internet: reachInternet,
+        reachable_networks: Array.from(reachable),
+        admin_access: adminAccess,
       };
       return isEdit
         ? updateNetwork(initial!.slug, body)
@@ -90,13 +122,6 @@ function NetworkForm({
           <X className="h-4 w-4" />
         </button>
       </div>
-
-      {isEdit && initial?.is_builtin && (
-        <div className="cyber-chip cyber-chip-warn flex items-center gap-2 px-3 py-2 text-xs">
-          <Lock className="h-3 w-3" />
-          built-in network · subnet/dhcp éditables, slug verrouillé
-        </div>
-      )}
 
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
@@ -180,15 +205,122 @@ function NetworkForm({
           />
           dhcp enabled
         </label>
-        <label className="flex items-center gap-2 text-xs uppercase tracking-[0.15em] text-[color:var(--color-cyber-fg)]">
-          <input
-            type="checkbox"
-            checked={isolated}
-            onChange={(e) => setIsolated(e.target.checked)}
-            className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
-          />
-          isolé du LAN principal
-        </label>
+      </div>
+
+      {/* ── ISOLATION ────────────────────────────────────────────────
+          3-dimension model. Each section maps to a separate underlying
+          mechanism — confusing them together cost us a bug session, so
+          we keep the UI explicit. */}
+      <div className="border border-[color:var(--color-cyber-border-strong)] bg-[color:var(--color-cyber-bg-2)]/40 p-4">
+        <div className="cyber-label mb-3 flex items-center gap-2">
+          <Shield className="h-3 w-3" />
+          isolation · 3 niveaux
+        </div>
+
+        {/* L2 — intra-bridge ports */}
+        <div className="mb-4">
+          <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
+            L2 · entre ports du même bridge
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={intraBridge}
+              onChange={(e) => setIntraBridge(e.target.checked)}
+              className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              cloisonner les ports du bridge
+              <span className="ml-2 text-[10px] text-[color:var(--color-cyber-dim)]">
+                (rare — généralement on préfère bridges séparés)
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {/* L3 — internet + peer networks */}
+        <div className="mb-4">
+          <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
+            L3 · accès vers autres zones
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={reachInternet}
+              onChange={(e) => setReachInternet(e.target.checked)}
+              className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <Globe className="h-3 w-3" />
+            <span>
+              accès internet (WAN)
+              <span className="ml-2 text-[10px] text-[color:var(--color-cyber-dim)]">
+                (sortie vers le net via le routeur)
+              </span>
+            </span>
+          </label>
+
+          {peers.length > 0 && (
+            <>
+              <div className="mt-3 mb-1.5 text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)]">
+                réseaux atteignables depuis {slug || "ce réseau"} :
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 ml-6">
+                {peers.map((p) => (
+                  <label
+                    key={p.slug}
+                    className="flex items-center gap-2 text-[11px]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={reachable.has(p.slug)}
+                      onChange={(e) => {
+                        const next = new Set(reachable);
+                        if (e.target.checked) next.add(p.slug);
+                        else next.delete(p.slug);
+                        setReachable(next);
+                      }}
+                      className="h-3.5 w-3.5 accent-[color:var(--color-cyber-accent)]"
+                    />
+                    <span className="font-mono text-[color:var(--color-cyber-fg)]">
+                      {p.slug}
+                    </span>
+                    <span className="text-[9px] text-[color:var(--color-cyber-dim)]">
+                      {p.subnet_cidr}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-2 ml-6 text-[10px] text-[color:var(--color-cyber-dim)]">
+                {reachable.size === 0
+                  ? "▸ aucun → isolé de tous les autres subnets (sauf internet si coché)"
+                  : `▸ peut router vers ${reachable.size} autre(s) réseau(x)`}
+              </p>
+            </>
+          )}
+        </div>
+
+        {/* Admin / management plane */}
+        <div>
+          <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
+            administration
+          </div>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={adminAccess}
+              onChange={(e) => setAdminAccess(e.target.checked)}
+              className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              clients peuvent joindre le Slate (DHCP, DNS, UI admin)
+              {!adminAccess && (
+                <span className="ml-2 text-[10px] text-red-300">
+                  ⚠ sans ça, pas de DHCP — les clients n'auront pas d'IP
+                </span>
+              )}
+            </span>
+          </label>
+        </div>
       </div>
 
       {/* IPv6 section */}
@@ -283,14 +415,31 @@ function NetworkCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-2">
             <h3 className="cyber-display cyber-glow text-base">{network.slug}</h3>
-            {network.is_builtin && (
-              <span className="cyber-chip cyber-chip-warn">built-in</span>
-            )}
             {network.vlan_tag != null && (
               <span className="cyber-chip">vlan {network.vlan_tag}</span>
             )}
-            {network.isolated_from_lan && (
-              <span className="cyber-chip cyber-chip-warn">isolé</span>
+            {!network.reach_internet && (
+              <span className="cyber-chip cyber-chip-warn" title="Pas de sortie WAN">
+                <ShieldOff className="mr-1 inline h-2.5 w-2.5" />
+                no internet
+              </span>
+            )}
+            {network.reach_internet &&
+              network.reachable_networks.length === 0 && (
+                <span
+                  className="cyber-chip cyber-chip-warn"
+                  title="Pas de route vers les autres subnets"
+                >
+                  isolé L3
+                </span>
+              )}
+            {network.intra_bridge_isolation && (
+              <span className="cyber-chip cyber-chip-warn">L2 cloisonné</span>
+            )}
+            {!network.admin_access && (
+              <span className="cyber-chip cyber-chip-on" title="Pas d'accès au Slate">
+                no admin
+              </span>
             )}
             {!network.dhcp_enabled && (
               <span className="cyber-chip">no DHCP</span>
@@ -342,19 +491,17 @@ function NetworkCard({
           >
             <Pencil className="h-3.5 w-3.5" />
           </button>
-          {!network.is_builtin && (
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm(`Supprimer le réseau "${network.slug}" ?`))
-                  del.mutate();
-              }}
-              disabled={del.isPending}
-              className="border border-transparent p-2 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-40"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (confirm(`Supprimer le réseau "${network.slug}" ?`))
+                del.mutate();
+            }}
+            disabled={del.isPending}
+            className="border border-transparent p-2 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-40"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
 
@@ -419,10 +566,17 @@ export default function Networks() {
       </header>
 
       {creating && <section className="mb-6">
-        <NetworkForm onClose={closeForm} />
+        <NetworkForm
+          allNetworks={networks.data ?? []}
+          onClose={closeForm}
+        />
       </section>}
       {editing && <section className="mb-6">
-        <NetworkForm initial={editing} onClose={closeForm} />
+        <NetworkForm
+          initial={editing}
+          allNetworks={networks.data ?? []}
+          onClose={closeForm}
+        />
       </section>}
 
       <NetworkDiagPanel />

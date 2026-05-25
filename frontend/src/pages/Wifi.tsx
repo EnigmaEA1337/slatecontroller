@@ -190,7 +190,9 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
             {networks.map((n) => (
               <option key={n.slug} value={n.slug}>
                 {n.slug} · {n.subnet_cidr}
-                {n.isolated_from_lan ? " · isolé" : ""}
+                {n.reachable_networks.length === 0 && n.reach_internet
+                  ? " · isolé L3"
+                  : ""}
               </option>
             ))}
           </select>
@@ -347,8 +349,12 @@ function WifiCard({
               <>
                 <span>·</span>
                 <span className="font-mono">{network.subnet_cidr}</span>
-                {network.isolated_from_lan && (
-                  <span className="cyber-glow-amber">· isolé du LAN</span>
+                {network.reachable_networks.length === 0 &&
+                  network.reach_internet && (
+                    <span className="cyber-glow-amber">· isolé L3</span>
+                  )}
+                {!network.reach_internet && (
+                  <span className="cyber-glow-amber">· no internet</span>
                 )}
               </>
             )}

@@ -201,7 +201,9 @@ export default function DnsPage() {
                 networkSlug={net.slug}
                 networkName={net.display_name}
                 networkCidr={net.subnet_cidr}
-                isolated={net.isolated_from_lan}
+                isolated={
+                  net.reachable_networks.length === 0 && net.reach_internet
+                }
                 protection={protectionByNetwork.get(net.slug)}
                 onConfigure={() => setConfiguringNet(net.slug)}
               />

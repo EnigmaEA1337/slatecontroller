@@ -12,7 +12,6 @@ from app.auth import User, get_current_user
 from app.networks.diag import collect_diag
 from app.networks.models import NetworkCreate, NetworkPublic, NetworkWrite
 from app.networks.store import (
-    NetworkBuiltinError,
     NetworkDuplicateError,
     NetworkError,
     NetworkNotFoundError,
@@ -119,10 +118,5 @@ async def delete_network(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Network {slug!r} not found",
-        ) from exc
-    except NetworkBuiltinError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
         ) from exc
     logger.info("network.deleted", slug=slug)

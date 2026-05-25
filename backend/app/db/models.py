@@ -140,11 +140,28 @@ class AppSecretRow(Base):
 
 
 class NetworkRow(Base):
-    """A network/bridge definition (subnet + DHCP + LAN isolation).
+    """A network/bridge definition (subnet + DHCP + zone isolation).
 
-    Each Wi-Fi SSID references one network by `slug`. By default we ship 3
-    networks (lan, guest, iot) mirroring the Slate's stock bridges; the user
-    can add custom VLAN-tagged networks for finer segmentation.
+    Each Wi-Fi SSID references one network by `slug`. Fresh installs ship
+    with an EMPTY catalog — the user creates networks as they need. There
+    is no "builtin" concept anymore : every row is user-managed and
+    deletable (no `is_builtin` guard).
+
+    Isolation is modeled in 3 independent dimensions (see migration
+    a8b3c2d10e44 for the design rationale) :
+
+    - ``intra_bridge_isolation``  L2 : ports of the same bridge cloisonnés
+                                   (rare ; bridge `port_isolation`)
+    - ``reach_internet``          L3 : forwarding to wan zone (default ON)
+    - ``reachable_networks``      L3 : list of OTHER network slugs this
+                                   one can route to (besides wan)
+    - ``admin_access``            zone.input policy : whether clients can
+                                   reach the Slate itself (DHCP / DNS /
+                                   admin UI) — default ON.
+
+    These are declarative ; the actual UCI ``config zone`` / ``config
+    forwarding`` sections are produced by the firewall handler at apply
+    time (out of scope of this row).
     """
 
     __tablename__ = "networks"
@@ -157,13 +174,19 @@ class NetworkRow(Base):
     subnet_cidr: Mapped[str] = mapped_column(String(32), nullable=False)
     gateway_ip: Mapped[str] = mapped_column(String(40), default="")
     dhcp_enabled: Mapped[bool] = mapped_column(default=True)
-    isolated_from_lan: Mapped[bool] = mapped_column(default=False)
     vlan_tag: Mapped[int | None] = mapped_column(nullable=True)
-    is_builtin: Mapped[bool] = mapped_column(default=False)
     notes: Mapped[str] = mapped_column(String(256), default="")
     # IPv6: subnet empty means "auto" (SLAAC + Prefix Delegation from WAN).
     ipv6_enabled: Mapped[bool] = mapped_column(default=False)
     ipv6_subnet_cidr: Mapped[str] = mapped_column(String(64), default="")
+
+    # ── isolation 3-level model ──────────────────────────────────────
+    intra_bridge_isolation: Mapped[bool] = mapped_column(default=False)
+    reach_internet: Mapped[bool] = mapped_column(default=True)
+    # JSON array of network slugs this one is allowed to reach besides
+    # wan. Empty = isolated from all other subnets.
+    reachable_networks: Mapped[list[str]] = mapped_column(JSON, default=list)
+    admin_access: Mapped[bool] = mapped_column(default=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

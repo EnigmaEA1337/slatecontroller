@@ -41,72 +41,11 @@ from app.vpn.proton_client import ProtonClient
 from app.wifi.models import WifiSsidCreate
 from app.wifi.store import WifiSsidStore
 
-# Built-in networks — mirror the Slate's stock bridges. Editable but not deletable.
-DEFAULT_NETWORKS: list[NetworkCreate] = [
-    # 5 zones, slug = SSID name = network name (1:1 mapping for clarity).
-    # Random RFC1918 offsets (option C, no common base) to minimise conflict
-    # risk in hotel/coworking environments.
-    NetworkCreate(
-        slug="neuralcore",
-        display_name="NeuralCore (LAN principal perso)",
-        bridge_name="br-neuralcore",
-        subnet_cidr="10.137.42.0/24",
-        gateway_ip="10.137.42.1",
-        dhcp_enabled=True,
-        isolated_from_lan=False,
-        ipv6_enabled=True,
-        ipv6_subnet_cidr="fd5a:6c14:e23b:8::/64",
-        notes="Zone trusted: NAS, imprimante, AirPlay, smart home perso.",
-    ),
-    NetworkCreate(
-        slug="grid",
-        display_name="Grid (kids)",
-        bridge_name="br-grid",
-        subnet_cidr="10.91.18.0/24",
-        gateway_ip="10.91.18.1",
-        dhcp_enabled=True,
-        isolated_from_lan=True,
-        ipv6_enabled=True,
-        ipv6_subnet_cidr="fd5a:6c14:e23b:9::/64",
-        notes="Zone enfants. REJECT vers neuralcore/blackice. AdGuard strict.",
-    ),
-    NetworkCreate(
-        slug="blackice",
-        display_name="BlackIce (mission corporate)",
-        bridge_name="br-blackice",
-        subnet_cidr="10.204.5.0/24",
-        gateway_ip="10.204.5.1",
-        dhcp_enabled=True,
-        isolated_from_lan=True,
-        ipv6_enabled=True,
-        ipv6_subnet_cidr="fd5a:6c14:e23b:10::/64",
-        notes="Zone mission corporate. VPN forcé, REJECT vers neuralcore.",
-    ),
-    NetworkCreate(
-        slug="chromelounge",
-        display_name="ChromeLounge (invités)",
-        bridge_name="br-chromelounge",
-        subnet_cidr="10.66.211.0/24",
-        gateway_ip="10.66.211.1",
-        dhcp_enabled=True,
-        isolated_from_lan=True,
-        ipv6_enabled=True,
-        ipv6_subnet_cidr="fd5a:6c14:e23b:20::/64",
-        notes="Zone untrusted invités. Client iso ON, REJECT vers tout LAN.",
-    ),
-    NetworkCreate(
-        slug="shadowrun",
-        display_name="Shadowrun (burner OSINT)",
-        bridge_name="br-shadowrun",
-        subnet_cidr="10.183.7.0/24",
-        gateway_ip="10.183.7.1",
-        dhcp_enabled=True,
-        isolated_from_lan=True,
-        ipv6_enabled=True,
-        ipv6_subnet_cidr="fd5a:6c14:e23b:21::/64",
-        notes="Zone burner OSINT, séparée L2 de chromelounge (pas de bridge partagé).",
-    ),
-]
+# No default networks anymore. A fresh controller install starts with
+# an EMPTY network catalog — the user creates networks as they need
+# via the Networks page (Settings → Network → Add). The 5 cyberpunk
+# seeds that used to live here were demo content that pre-populated
+# every install, which was confusing on real deployments.
 
 # Default Wi-Fi catalog. Slug == network slug == broadcast theme (1:1).
 DEFAULT_WIFI_SSIDS: list[WifiSsidCreate] = [
@@ -244,10 +183,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.slate_ssh = default_conn.ssh
     app.state.adguard_manager = default_conn.adguard
 
-    # Networks catalog (must seed BEFORE wifi — SSIDs reference network slugs).
+    # Networks catalog. No seeding — the user creates networks
+    # explicitly via the UI. Existing rows from previous installs
+    # stay untouched ; the migration drops the is_builtin column so
+    # they're all user-managed now.
     network_store = NetworkStore(session_factory)
     app.state.network_store = network_store
-    await network_store.seed_builtins(DEFAULT_NETWORKS)
 
     # Wi-Fi catalog (seed defaults — profiles reference these slugs).
     wifi_store = WifiSsidStore(session_factory)
