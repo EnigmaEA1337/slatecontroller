@@ -5,10 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# 2.4/5/6 GHz are the discrete radios. MLO bundles them for Wi-Fi 7 clients.
-WifiBand = Literal["2GHz", "5GHz", "6GHz", "MLO"]
+# Discrete radios. "2" is shorthand for 2.4 GHz — we drop the "GHz"
+# suffix from the wire format because we store bands as a list and
+# compact tokens make the JSON terser. MLO (Wi-Fi 7 Multi-Link) is
+# expressed via the separate ``mlo`` boolean, not a band value, so a
+# Wi-Fi-7 SSID still declares which bands it groups.
+WifiBand = Literal["2", "5", "6"]
 WifiSecurity = Literal["WPA3-SAE", "WPA3-PSK", "WPA2-PSK", "WPA2-WPA3-Mixed", "open"]
 
 
@@ -17,10 +21,12 @@ class WifiSsidPublic(BaseModel):
 
     slug: str
     ssid_name: str
-    band: WifiBand
+    bands: list[WifiBand]
+    mlo: bool
     security: WifiSecurity
-    network_slug: str
+    # NB: no network_slug — SSID is pure L2, network binding is per-profile.
     client_isolation: bool
+    hidden: bool
     notes: str
     has_password: bool
     created_at: datetime
@@ -38,20 +44,54 @@ class WifiSsidWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ssid_name: str = Field(min_length=1, max_length=32)
-    band: WifiBand = "5GHz"
+    bands: list[WifiBand] = Field(
+        default_factory=lambda: ["5"],
+        min_length=1,
+        description=(
+            "Bands this SSID is broadcast on. The agent creates one "
+            "wifi-iface per band, all sharing ssid + key. Order is "
+            "irrelevant ; duplicates are stripped."
+        ),
+    )
+    mlo: bool = Field(
+        default=False,
+        description=(
+            "Wi-Fi 7 Multi-Link Operation. When True, the agent bundles "
+            "the bands under a single MLD instead of N independent "
+            "VAPs ; only Wi-Fi 7 clients see the speedup."
+        ),
+    )
     security: WifiSecurity = "WPA3-SAE"
     password: str | None = Field(default=None, max_length=128)
-    network_slug: str = Field(
-        default="lan",
-        min_length=1,
-        max_length=64,
-        description="References Network.slug (which bridge/subnet the SSID lives on).",
-    )
     client_isolation: bool = Field(
         default=False,
         description="If True, clients within this SSID cannot talk to each other.",
     )
+    hidden: bool = Field(
+        default=False,
+        description=(
+            "If True, the AP omits the SSID from beacon frames "
+            "(UCI `hidden=1`). Not a security control — clients still "
+            "leak the name in probe requests. Mostly cosmetic."
+        ),
+    )
     notes: str = Field(default="", max_length=256)
+
+    @field_validator("bands")
+    @classmethod
+    def _dedupe_bands(cls, value: list[str]) -> list[str]:
+        # Preserve the canonical order ["2", "5", "6"] so the wire shape
+        # is deterministic ; drop duplicates the user may have sent.
+        order = {"2": 0, "5": 1, "6": 2}
+        seen: set[str] = set()
+        out: list[str] = []
+        for b in value:
+            if b in seen:
+                continue
+            seen.add(b)
+            out.append(b)
+        out.sort(key=lambda b: order.get(b, 99))
+        return out  # type: ignore[return-value]
 
 
 class WifiSsidCreate(WifiSsidWrite):

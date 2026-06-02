@@ -30,6 +30,7 @@ import {
   probeDevice,
   setDefaultDevice,
 } from "@/api/devices";
+import { ClickableHost, ClickableHostList } from "@/components/ClickableHost";
 import EditAdminUrlsModal from "@/components/EditAdminUrlsModal";
 import FactoryResetModal from "@/components/FactoryResetModal";
 import ScreenLockWidget from "@/components/ScreenLockWidget";
@@ -253,8 +254,12 @@ function AdoptModal({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-      <div className="cyber-card cyber-card-accent w-full max-w-2xl p-6">
-        <header className="mb-4 flex items-center justify-between">
+      {/* max-h-[90vh] + flex-col + overflow contained on the inner body
+          so the modal stays inside the viewport even when the report
+          balloons to 7+ tasks. Header + footer stay sticky-ish thanks
+          to the flex shrink-0 + the scrollable middle. */}
+      <div className="cyber-card cyber-card-accent flex max-h-[90vh] w-full max-w-2xl flex-col p-6">
+        <header className="mb-4 flex shrink-0 items-center justify-between">
           <div>
             <h2 className="cyber-display cyber-glow text-lg">
               ADOPT · {device.slug}
@@ -272,7 +277,13 @@ function AdoptModal({
           </button>
         </header>
 
-        <div className="cyber-hatch mb-4 h-px w-full" />
+        <div className="cyber-hatch mb-4 h-px w-full shrink-0" />
+
+        {/* Scrollable body — wraps both the form and the post-run report
+            so a tall task list (7+ items, each with multiline messages)
+            never pushes the close button off-screen. Negative right
+            margin gives the scrollbar some breathing room. */}
+        <div className="-mr-2 flex-1 overflow-y-auto pr-2">
 
         {!run.data && (
           <>
@@ -438,6 +449,8 @@ function AdoptModal({
             </div>
           </div>
         )}
+
+        </div>{/* /scrollable body */}
       </div>
     </div>
   );
@@ -528,15 +541,22 @@ const DeviceCard = memo(function DeviceCard({
             <span className="sm:col-span-2">
               admin URLs{" "}
               <span className="cyber-glow-soft font-mono">
-                {device.admin_urls.length > 0
-                  ? device.admin_urls.join(" / ")
-                  : "(fallback host)"}
+                {device.admin_urls.length > 0 ? (
+                  <ClickableHostList
+                    items={device.admin_urls}
+                    separator=" / "
+                  />
+                ) : (
+                  "(fallback host)"
+                )}
               </span>
             </span>
             <span>
               rpc{" "}
               <span className="cyber-glow-soft font-mono">
-                {device.rpc_scheme}://{device.host}:{device.rpc_port}
+                <ClickableHost
+                  value={`${device.rpc_scheme}://${device.host}:${device.rpc_port}`}
+                />
               </span>
             </span>
             <span>

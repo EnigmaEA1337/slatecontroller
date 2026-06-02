@@ -147,21 +147,36 @@ class NetworkRow(Base):
     is no "builtin" concept anymore : every row is user-managed and
     deletable (no `is_builtin` guard).
 
-    Isolation is modeled in 3 independent dimensions (see migration
-    a8b3c2d10e44 for the design rationale) :
+    Isolation is modeled in independent dimensions (see migrations
+    a8b3c2d10e44 + b2c4d68e90f1 for the design rationale) :
 
     - ``intra_bridge_isolation``  L2 : ports of the same bridge cloisonnés
                                    (rare ; bridge `port_isolation`)
     - ``reach_internet``          L3 : forwarding to wan zone (default ON)
     - ``reachable_networks``      L3 : list of OTHER network slugs this
                                    one can route to (besides wan)
-    - ``admin_access``            zone.input policy : whether clients can
-                                   reach the Slate itself (DHCP / DNS /
-                                   admin UI) — default ON.
+
+    The old single ``admin_access`` flag was split into three because
+    "the Slate" is actually several services with very different exposure
+    profiles. A guest network typically wants DHCP+DNS but absolutely
+    no LuCI and no SSH ; an admin LAN wants all three. Lumping them
+    cost us a misconfig where guests had LuCI access for a week.
+
+    - ``services_access``         input policy for essential services :
+                                   DHCP, DNS local (dnsmasq), ICMP.
+                                   Default ON ; turning OFF makes the
+                                   network unusable for most clients.
+    - ``admin_ui_access``         input policy for LuCI + GL.iNet web UI
+                                   (TCP 80 / 443). Default OFF — only
+                                   trusted networks should reach the
+                                   admin UI.
+    - ``ssh_access``              input policy for SSH / dropbear
+                                   (TCP 22). Default OFF — explicit opt-in
+                                   per network.
 
     These are declarative ; the actual UCI ``config zone`` / ``config
-    forwarding`` sections are produced by the firewall handler at apply
-    time (out of scope of this row).
+    forwarding`` / per-service ``config rule`` sections are produced by
+    the firewall handler at apply time (out of scope of this row).
     """
 
     __tablename__ = "networks"
@@ -186,7 +201,41 @@ class NetworkRow(Base):
     # JSON array of network slugs this one is allowed to reach besides
     # wan. Empty = isolated from all other subnets.
     reachable_networks: Mapped[list[str]] = mapped_column(JSON, default=list)
-    admin_access: Mapped[bool] = mapped_column(default=True)
+    # Admin / management plane, split per service. See class docstring.
+    services_access: Mapped[bool] = mapped_column(default=True)
+    admin_ui_access: Mapped[bool] = mapped_column(default=False)
+    ssh_access: Mapped[bool] = mapped_column(default=False)
+    # Tailscale subnet routing. When True, the Slate advertises this
+    # network's CIDR(s) as a subnet route on the tailnet, so peers can
+    # reach hosts inside this subnet via 100.x.y.z. The agent generates
+    # `tailscale up --advertise-routes=...` from every network that has
+    # this flag set (and only those — networks the user explicitly
+    # cloisonne stay invisible to remote tailnet peers).
+    expose_to_tailnet: Mapped[bool] = mapped_column(default=False)
+
+    # ── Per-network Tor routing ──────────────────────────────────────
+    # ``tor_route_mode``  off / transparent / socks_only
+    #   - off          : Tor is not involved for this network. Default.
+    #   - transparent  : all WAN-bound traffic from this bridge is NATed
+    #                    to Tor's TransPort. Clients see normal internet
+    #                    but every connection exits via a Tor circuit.
+    #                    Latency is high (250-800 ms) and throughput
+    #                    capped (~1-3 Mbps) — only sensible for OSINT
+    #                    / research networks.
+    #   - socks_only   : the Tor daemon's SOCKS5 port is reachable on the
+    #                    gateway IP (e.g. <gw>:9050) but no transparent
+    #                    redirect is installed. Clients opt in per app.
+    # ``tor_dns_over_tor``    when transparent, also redirect this
+    #                          network's DNS to Tor's DNSPort. Avoids DNS
+    #                          leaks to the upstream resolver. Ignored
+    #                          when mode != transparent.
+    # ``tor_kill_switch``     when transparent, if the Tor daemon is down
+    #                          DROP the network's WAN egress (fail-closed)
+    #                          so a tor crash doesn't silently leak the
+    #                          real IP. Default off (fail-open).
+    tor_route_mode: Mapped[str] = mapped_column(String(16), default="off")
+    tor_dns_over_tor: Mapped[bool] = mapped_column(default=False)
+    tor_kill_switch: Mapped[bool] = mapped_column(default=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -196,6 +245,61 @@ class NetworkRow(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class TorSettingsRow(Base):
+    """Global Tor daemon settings (singleton — id always 1).
+
+    Per-network routing toggles live on :class:`NetworkRow`. This row holds
+    the cross-cutting bits :
+
+    - ``daemon_enabled``   master switch. When False, tor.sh stops the
+                           daemon regardless of per-network requests
+                           (also drops kill-switched networks to "no
+                           Tor → no WAN" = fail-closed, by design).
+    - ``use_bridges``      enables the ``UseBridges`` torrc directive.
+                           Per-bridge lines come from :class:`TorBridgeRow`.
+    """
+
+    __tablename__ = "tor_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    daemon_enabled: Mapped[bool] = mapped_column(default=False)
+    use_bridges: Mapped[bool] = mapped_column(default=False)
+    # ISO-3166-1 alpha-2 lowercase ("ch", "de", "se") — empty = no
+    # constraint, Tor picks the exit freely. When set, the handler emits
+    # ``ExitNodes {xx}`` + ``StrictNodes 1`` so circuits that can't
+    # satisfy the constraint fail rather than silently exiting elsewhere.
+    exit_country_code: Mapped[str] = mapped_column(String(2), default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class TorBridgeRow(Base):
+    """A single Tor bridge entry the user pasted in the UI.
+
+    ``bridge_line`` is the raw value the user would otherwise put after
+    ``Bridge`` in torrc — we don't parse it, just write it through. The
+    handler appends one ``Bridge <line>`` per enabled row when bridges are
+    in use globally.
+    """
+
+    __tablename__ = "tor_bridges"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # obfs4 / webtunnel / snowflake / vanilla — informational; the line
+    # itself already encodes the transport.
+    kind: Mapped[str] = mapped_column(String(16), default="obfs4")
+    bridge_line: Mapped[str] = mapped_column(String(512), nullable=False)
+    note: Mapped[str] = mapped_column(String(128), default="")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -284,7 +388,24 @@ class DeviceSecretRow(Base):
 
 
 class WifiSsidRow(Base):
-    """A Wi-Fi SSID definition. Belongs to one network and has a stored PSK."""
+    """A Wi-Fi SSID definition. Belongs to one network and has a stored PSK.
+
+    An SSID is a pure layer-2 access definition (broadcast name, bands,
+    security, PSK, client isolation). It is NOT bound to a network here —
+    that mapping (SSID → bridge/subnet) lives on the profile, because the
+    same SSID can route to different networks depending on the active
+    profile, exactly like a physical switch port.
+
+    An SSID may broadcast on several bands simultaneously (same name +
+    PSK on 2.4 GHz and 5 GHz, for example). Bands are stored as a JSON
+    list of tokens ``"2"`` / ``"5"`` / ``"6"``. The agent handler creates
+    one ``wifi-iface`` section per band, all sharing the same ssid + key.
+
+    ``mlo`` (Wi-Fi 7 Multi-Link Operation) is a separate flag : when
+    True the agent builds a single MLD-bundled iface instead of N
+    independent VAPs — clients capable of Wi-Fi 7 then aggregate the
+    links. MLO requires at least two bands in ``bands``.
+    """
 
     __tablename__ = "wifi_ssids"
     __table_args__ = (UniqueConstraint("slug", name="uq_wifi_ssids_slug"),)
@@ -292,11 +413,24 @@ class WifiSsidRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     ssid_name: Mapped[str] = mapped_column(String(32), nullable=False)
-    band: Mapped[str] = mapped_column(String(8), nullable=False)
+    # JSON array of band tokens : "2" (2.4 GHz), "5", "6". Always at
+    # least one element. Empty list is invalid (enforced by Pydantic).
+    bands: Mapped[list[str]] = mapped_column(JSON, default=list)
+    mlo: Mapped[bool] = mapped_column(default=False)
     security: Mapped[str] = mapped_column(String(16), nullable=False)
     password_encrypted: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
-    network_slug: Mapped[str] = mapped_column(String(64), nullable=False, default="lan")
+    # NB: no network_slug here. An SSID is a pure L2 access definition
+    # (name / bands / security / PSK / isolation). Which L3 network it
+    # binds to is a per-PROFILE decision (the `network_slug` on each
+    # profile's ssids[] ref), same as a physical switch port — the
+    # binding is contextual.
     client_isolation: Mapped[bool] = mapped_column(default=False)
+    # Hidden SSID : the AP doesn't include the SSID in beacon frames.
+    # NOT a real security control — clients still beacon the name in
+    # probe requests and the BSSID is always visible. Mostly cosmetic /
+    # casual-listing avoidance ; kept here because it's a standard UCI
+    # option users expect to see in the UI.
+    hidden: Mapped[bool] = mapped_column(default=False)
     notes: Mapped[str] = mapped_column(String(256), default="")
 
     created_at: Mapped[datetime] = mapped_column(

@@ -36,6 +36,25 @@ docker compose -f docker-compose.dev.yml up --build
 docker compose up -d --build
 ```
 
+### 5. HTTPS via Tailscale (recommandé)
+
+Le compose lance un **sidecar `slate-tailscale`** qui donne au controller sa propre identité dans ton tailnet et termine HTTPS avec un cert Let's Encrypt automatique. Pas besoin de Traefik, pas de port forwarding, pas de cron de renouvellement.
+
+```bash
+# 1. Sur https://login.tailscale.com/admin/settings/keys
+#    → "Generate auth key" → reusable=no, ephemeral=no, optionnellement
+#    tag:controller. Copier la clé.
+# 2. Dans .env, remplir TS_AUTHKEY=tskey-auth-... et TS_HOSTNAME=slate-controller
+# 3. Activer HTTPS dans https://login.tailscale.com/admin/dns (bouton "Enable HTTPS" en bas) — une seule fois pour tout ton tailnet
+# 4. Démarrer :
+docker compose -f docker-compose.dev.yml up -d
+# 5. Une fois le sidecar lancé (~10s), accès :
+#    - Tailnet (HTTPS) : https://slate-controller.<ton-tailnet>.ts.net
+#    - LAN HTTP : http://<ip-du-host>:5173 (frontend) / http://<ip-du-host>:8000 (backend)
+```
+
+L'auth key est consommée au premier boot et le node est enregistré dans `./data/tailscale/`. Tu peux ensuite blanker `TS_AUTHKEY=` dans `.env` (l'état persiste). Pour renommer le controller : change `TS_HOSTNAME` + `docker compose up -d slate-tailscale`.
+
 ## Développement local (hors Docker)
 
 ### Backend

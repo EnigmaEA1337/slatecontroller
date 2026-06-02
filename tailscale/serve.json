@@ -1,0 +1,14 @@
+{
+  "_comment": "Tailscale Serve declarative config. Loaded by tailscaled at boot when TS_SERVE_CONFIG is set. ${TS_CERT_DOMAIN} is auto-substituted to the sidecar's tailnet hostname (e.g. slate-controller.taild2bce8.ts.net), so this file is portable across deployments — no env interpolation required outside Tailscale. NOTE: the proxy target URL must include the path prefix to preserve, otherwise Tailscale strips the matched handler prefix before forwarding (e.g. `/api/auth/me` becomes `/auth/me` if the target is just `http://...:8000`).",
+  "TCP": {
+    "443": { "HTTPS": true }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/api/": { "Proxy": "http://127.0.0.1:8000/api/" },
+        "/":     { "Proxy": "http://127.0.0.1:5173" }
+      }
+    }
+  }
+}

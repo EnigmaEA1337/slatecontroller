@@ -85,8 +85,18 @@ run_handler() {
     log "WARN: handler $handler_path missing ${subsystem}_apply function"
     return 0
   fi
-  echo "$block" | "${subsystem}_apply"
+  # Capture stdout so we can detect the wifi handler's "REBOOT required"
+  # signal (radio changes only take effect after a full reboot — the MTK
+  # driver won't bring up repurposed VAPs via `wifi up`/`wifi reload`).
+  # stderr still flows straight up to the caller. NEEDS_REBOOT is a global
+  # set in cmd_apply's scope.
+  local out
+  out=$(echo "$block" | "${subsystem}_apply")
   local rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  case "$out" in
+    *"REBOOT required"*) NEEDS_REBOOT=1 ;;
+  esac
   if [ "$rc" -ne 0 ]; then
     log "ERROR: $subsystem handler exited $rc"
     return $rc
@@ -126,6 +136,9 @@ cmd_apply() {
   export SLATE_CTRL_PROFILE_NAME="$name"
 
   local rc=0
+  # Set to 1 by run_handler when a handler (wifi.sh) signals "REBOOT
+  # required". Global so the called run_handler can flip it.
+  NEEDS_REBOOT=0
 
   # Phase 1: visual feedback FIRST. The screen handler shows the
   # "loading profile X" message via fb takeover and runs the takeover
@@ -152,7 +165,12 @@ cmd_apply() {
   # concern. It's per-network now, configured on the Networks page and
   # applied by the controller via AdGuard Clients API. The legacy dns.sh
   # handler is kept in the repo but never invoked by this dispatcher.
-  for subsystem in firewall wifi vpn tor adguard tailscale wallpaper; do
+  # Order : `network` FIRST so bridges + zones exist before wifi.sh
+  # tries to attach SSIDs to them, and before firewall.sh tweaks zone
+  # policies. Then firewall (default-deny + lockdown), then wifi (now
+  # with target bridges ready), then VPN/Tor/AdGuard/Tailscale (which
+  # may reference the new zones in their own rules), then wallpaper.
+  for subsystem in network firewall wifi vpn tor adguard tailscale wallpaper; do
     if ! run_handler "$subsystem" "$profile_path"; then
       rc=3
     fi
@@ -162,6 +180,69 @@ cmd_apply() {
   # what was attempted. Operators can diagnose from $LOG_FILE.
   echo "$name" > "$STATE_DIR/active"
   log "apply DONE profile=$name rc=$rc"
+
+  # Radio changes (wifi.sh) only take effect after a full reboot. We defer
+  # it ~8s so this command returns its full output to the caller (and the
+  # controller can finish its own post-apply SSH work) before the box goes
+  # down. The detached subshell survives the SSH channel closing (busybox
+  # ash doesn't SIGHUP background jobs of a non-interactive shell, and
+  # nohup/setsid aren't present on this firmware). The controller sees the
+  # sentinel below and polls for recovery.
+  if [ "${NEEDS_REBOOT:-0}" = "1" ]; then
+    log "apply requires REBOOT (radio changes) — scheduling in 8s"
+    echo "slate-ctrl: REBOOT SCHEDULED — radio changes apply after reboot"
+    ( sleep 8; reboot ) >/dev/null 2>&1 </dev/null &
+  fi
+
+  return $rc
+}
+
+# cmd_apply_only — run ONE handler against the currently-active profile.
+# Lighter than a full `apply <profile>` : skips the lock + radio reboot
+# path, just sources the handler and pipes it the relevant JSON slice.
+# Designed for the controller's per-area Save+Apply flow ; the assumption
+# is that the controller has just synced the active profile JSON.
+cmd_apply_only() {
+  local subsystem="$1"
+  if [ -z "$subsystem" ]; then
+    echo "Usage: slate-ctrl apply-only <subsystem>" >&2
+    return 1
+  fi
+  local handler_path="$HANDLERS_DIR/$subsystem.sh"
+  if [ ! -f "$handler_path" ]; then
+    echo "slate-ctrl: no handler $handler_path" >&2
+    return 2
+  fi
+  local active_name
+  if [ ! -f "$STATE_DIR/active" ]; then
+    echo "slate-ctrl: no active profile (state/active missing)" >&2
+    return 2
+  fi
+  active_name=$(cat "$STATE_DIR/active")
+  local profile_path="$PROFILES_DIR/${active_name}.json"
+  if [ ! -f "$profile_path" ]; then
+    echo "slate-ctrl: active profile json missing : $profile_path" >&2
+    return 2
+  fi
+  # Export the env var so handlers that need the full JSON (tor.sh) can
+  # locate it, exactly like cmd_apply does.
+  export SLATE_CTRL_PROFILE_NAME="$active_name"
+  local block
+  block=$(jsonfilter -i "$profile_path" -e "@.${subsystem}" 2>/dev/null || true)
+  if [ -z "$block" ] || [ "$block" = "null" ]; then
+    echo "slate-ctrl: profile has no @.${subsystem} block — skipping" >&2
+    return 0
+  fi
+  log "apply-only $subsystem (active=$active_name)"
+  # shellcheck disable=SC1090
+  . "$handler_path"
+  if ! type "${subsystem}_apply" >/dev/null 2>&1; then
+    echo "slate-ctrl: handler $handler_path missing ${subsystem}_apply()" >&2
+    return 2
+  fi
+  echo "$block" | "${subsystem}_apply"
+  local rc=$?
+  log "apply-only $subsystem rc=$rc"
   return $rc
 }
 
@@ -174,6 +255,9 @@ main() {
         return 1
       fi
       cmd_apply "$2"
+      ;;
+    apply-only)
+      cmd_apply_only "${2:-}"
       ;;
     status)
       cmd_status

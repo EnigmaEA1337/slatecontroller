@@ -137,6 +137,12 @@ class SlateSSH:
             "port": self._port,
             "username": self._username,
             "known_hosts": None,  # LAN router, no realistic MITM
+            # TCP-level keepalive: asyncssh sends SSH-layer pings every 30s
+            # and tears the conn after 3 missed → stale connections after a
+            # router reboot are detected within ~90s instead of relying on
+            # the kernel's default 2h TCP timeout. See Bug E (2026-06-02).
+            "keepalive_interval": 30,
+            "keepalive_count_max": 3,
         }
         if self._private_key_pem is not None:
             private_key = asyncssh.import_private_key(self._private_key_pem)
@@ -145,22 +151,48 @@ class SlateSSH:
         else:
             connect_kwargs["password"] = self._password
             connect_kwargs["client_keys"] = None  # force password auth, never try local keys
-        try:
-            self._conn = await asyncio.wait_for(
-                asyncssh.connect(self._host, **connect_kwargs),
-                timeout=self._timeout,
-            )
-        except (TimeoutError, asyncssh.Error, OSError) as exc:
-            logger.warning("slate_ssh.connect_failed", host=self._host, error=str(exc))
-            # Tell the resolver that this URL just failed — next active()
-            # call will re-probe instead of trusting the cache.
-            if self._resolver is not None:
-                # Reconstruct the matching URL from the host to mark it.
-                for candidate in self._resolver.candidates:
-                    if _extract_host(candidate) == self._host:
-                        await self._resolver.mark_failed(candidate)
-                        break
-            raise SlateSSHError(f"SSH connect to {self._host} failed: {exc}") from exc
+
+        # Short retry with backoff: post-reboot, the Slate may accept TCP on
+        # :22 before dropbear's auth subsystem is fully ready (asyncssh sees
+        # a transient ConnectionLost / DisconnectError with empty message).
+        # Two retries at 0.5s/1.5s cover the typical ~2s readiness window
+        # without significantly slowing the legitimate "Slate truly down"
+        # case (caller still sees an error within ~5s).
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                self._conn = await asyncio.wait_for(
+                    asyncssh.connect(self._host, **connect_kwargs),
+                    timeout=self._timeout,
+                )
+                break
+            except (TimeoutError, asyncssh.Error, OSError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+                # Final attempt failed — log with type + repr so the next
+                # time we hit Bug-E-style empty error, we know what raised.
+                logger.warning(
+                    "slate_ssh.connect_failed",
+                    host=self._host,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    error_repr=repr(exc),
+                )
+                # Tell the resolver that this URL just failed — next active()
+                # call will re-probe instead of trusting the cache.
+                if self._resolver is not None:
+                    for candidate in self._resolver.candidates:
+                        if _extract_host(candidate) == self._host:
+                            await self._resolver.mark_failed(candidate)
+                            break
+                raise SlateSSHError(
+                    f"SSH connect to {self._host} failed: {exc!r}"
+                ) from exc
+        # Defensive: loop should either set _conn or raise. assert helps
+        # mypy + catches future logic changes.
+        assert self._conn is not None, f"loop exited without conn (last={last_exc!r})"
         logger.info("slate_ssh.connected", host=self._host, auth_mode=self.auth_mode)
         return self._conn
 
@@ -186,13 +218,16 @@ class SlateSSH:
             conn = await self._ensure_connected()
         try:
             result = await asyncio.wait_for(conn.run(command, check=False), timeout=t)
-        except (TimeoutError, asyncssh.Error) as exc:
+        except (TimeoutError, asyncssh.Error, OSError, ConnectionError) as exc:
             # Drop the (likely-broken) connection so the next call reconnects.
-            # Re-acquire the lock for the drop to avoid racing with other
-            # in-flight tasks that may also be reconnecting concurrently.
+            # OSError / BrokenPipeError can slip through asyncssh when the
+            # remote tears the conn (router reboot). Re-acquire the lock for
+            # the drop to avoid racing with other in-flight reconnects.
             async with self._lock:
                 await self._drop_locked()
-            raise SlateSSHError(f"SSH run {command!r} failed: {exc}") from exc
+            raise SlateSSHError(
+                f"SSH run {command!r} failed: {exc!r}"
+            ) from exc
 
         stdout = result.stdout if isinstance(result.stdout, str) else (result.stdout.decode() if result.stdout else "")
         stderr = result.stderr if isinstance(result.stderr, str) else (result.stderr.decode() if result.stderr else "")
@@ -244,10 +279,10 @@ class SlateSSH:
                 raise SlateSSHError(
                     f"upload {remote_path!r}: chmod/mv exit={r2.exit_status}"
                 )
-        except (asyncssh.Error, OSError) as exc:
+        except (asyncssh.Error, OSError, ConnectionError) as exc:
             async with self._lock:
                 await self._drop_locked()
-            raise SlateSSHError(f"put_bytes {remote_path!r}: {exc}") from exc
+            raise SlateSSHError(f"put_bytes {remote_path!r}: {exc!r}") from exc
 
     async def run_binary(
         self, command: str, *, timeout: float | None = None
@@ -264,10 +299,10 @@ class SlateSSH:
             r = await asyncio.wait_for(
                 conn.run(command, encoding=None, check=False), timeout=t,
             )
-        except (TimeoutError, asyncssh.Error) as exc:
+        except (TimeoutError, asyncssh.Error, OSError, ConnectionError) as exc:
             async with self._lock:
                 await self._drop_locked()
-            raise SlateSSHError(f"run_binary {command!r}: {exc}") from exc
+            raise SlateSSHError(f"run_binary {command!r}: {exc!r}") from exc
         if r.exit_status != 0:
             raise SlateSSHError(
                 f"run_binary {command!r}: exit={r.exit_status}"
@@ -292,10 +327,10 @@ class SlateSSH:
         cmd = f"cat > {shlex.quote(remote_path)}"
         try:
             r = await conn.run(cmd, input=payload, encoding=None, check=False)
-        except (asyncssh.Error, OSError) as exc:
+        except (asyncssh.Error, OSError, ConnectionError) as exc:
             async with self._lock:
                 await self._drop_locked()
-            raise SlateSSHError(f"put_bytes_raw {remote_path!r}: {exc}") from exc
+            raise SlateSSHError(f"put_bytes_raw {remote_path!r}: {exc!r}") from exc
         if r.exit_status != 0:
             raise SlateSSHError(
                 f"put_bytes_raw {remote_path!r}: exit={r.exit_status}"

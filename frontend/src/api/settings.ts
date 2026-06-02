@@ -78,3 +78,26 @@ export async function updateSlateComms(
   const { data } = await api.post<SlateComms>("/api/settings/slate-comms", patch);
   return data;
 }
+
+// ---- Tailnet admin IPs (drives Profile.tailscale.admin_only firewall) ----
+
+export interface TailnetAdminConfig {
+  admin_ips: string[];
+}
+
+export async function getTailnetAdminIps(): Promise<TailnetAdminConfig> {
+  const { data } = await api.get<TailnetAdminConfig>(
+    "/api/settings/tailnet-admin-ips",
+  );
+  return data;
+}
+
+export async function updateTailnetAdminIps(
+  admin_ips: string[],
+): Promise<TailnetAdminConfig> {
+  const { data } = await api.put<TailnetAdminConfig>(
+    "/api/settings/tailnet-admin-ips",
+    { admin_ips },
+  );
+  return data;
+}

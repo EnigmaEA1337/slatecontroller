@@ -214,10 +214,66 @@ async def audit(
                 "status": f.status, "severity": f.severity,
                 "evidence": f.evidence,
                 "recommendation": f.recommendation,
+                "fix_available": f.fix_available,
             }
             for f in report.findings
         ],
     }
+
+
+@router.post("/audit/fix")
+async def fix_audit_finding(
+    finding_id: str,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Apply the controller's auto-fix for a specific Tailscale audit
+    finding. Only a small set of finding ids are auto-fixable (see
+    ``TAILSCALE_FIXABLE_IDS`` in the audit module) — the rest require
+    admin-console actions (ACL edits, device approval, MagicDNS toggle).
+    """
+    from app.tailscale.audit import TAILSCALE_FIXABLE_IDS
+    from app.tailscale.client import TailscaleClient
+
+    if finding_id not in TAILSCALE_FIXABLE_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Pas de fix automatique pour « {finding_id} » — voir la note "
+                "de remediation pour l'action requise."
+            ),
+        )
+
+    client = TailscaleClient(ssh)
+    ok = False
+    message = ""
+
+    if finding_id in {"daemon_running", "uci_enable"}:
+        # Both fixes converge on the same action : ensure UCI says enable
+        # AND the procd service is up. Idempotent.
+        try:
+            r = await ssh.run(
+                "uci -q set tailscale.@tailscale[0].enabled=1 && "
+                "uci commit tailscale && "
+                "/etc/init.d/tailscale enable >/dev/null 2>&1; "
+                "/etc/init.d/tailscale start 2>&1 && echo OK",
+                timeout=20,
+            )
+            ok = r.exit_status == 0 and "OK" in (r.stdout or "")
+            message = (r.stdout or "")[-300:] or "Daemon démarré"
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            message = f"SSH error: {exc}"
+    elif finding_id == "shields_up":
+        # tailscale set --shields-up=true via the existing client helper.
+        ok, errors = await client.apply_overrides(shields_up=True)
+        message = "shields_up activé" if ok else "; ".join(errors)
+
+    logger.info(
+        "tailscale.audit.fix",
+        username=user.username, finding=finding_id, ok=ok,
+    )
+    return {"ok": ok, "finding_id": finding_id, "message": message}
 
 
 class HAConfigPatch(BaseModel):

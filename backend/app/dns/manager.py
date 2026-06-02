@@ -261,6 +261,16 @@ class DnsProtectionManager:
             provider=provider,
         )
 
+        # 0. Self-heal : AdGuard's --glinet build returns 403 on every
+        # /control/* call when its `users:` block is empty (typical after
+        # a factory reset). Provision the admin creds once before touching
+        # clients so the operator doesn't have to. No-op when already
+        # provisioned. bootstrap_admin assumes the daemon is running —
+        # the adoption task is what enables it ; here we only fix auth.
+        if not await self._adguard.is_admin_provisioned():
+            logger.info("dns_protection.adguard_bootstrap_needed", network=network_slug)
+            await self._adguard.bootstrap_admin()
+
         # 1. Apply on AdGuard side (add or update). We must know if a client
         # with this name already exists; the API distinguishes add vs update.
         await self._apply_adguard_client(client_name=client_name, payload=payload)
@@ -451,35 +461,85 @@ class DnsProtectionManager:
         try:
             resp = await self._adguard._http.post(path, json=body)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Include the response body — AdGuard puts the actual cause
+            # in plain-text there (e.g. "another client uses the same
+            # subnet"), and without it the error is opaque on the UI.
+            body_text = (exc.response.text or "").strip()
+            detail = body_text or str(exc)
+            raise AdGuardError(
+                f"AdGuard POST {path} failed ({exc.response.status_code}): {detail}",
+            ) from exc
         except httpx.HTTPError as exc:
             raise AdGuardError(f"AdGuard POST {path} failed: {exc}") from exc
 
-    async def _client_exists(self, client_name: str) -> bool:
+    async def _find_managed_client(
+        self, *, name: str, cidr: str,
+    ) -> str | None:
+        """Locate an existing AdGuard client we own that matches `name` OR
+        carries `cidr` in its ids. Returns the *current* AdGuard name of
+        that client so the caller can route an update at it.
+
+        Why both criteria :
+          - name match → standard idempotent re-apply
+          - CIDR match → handles rename (display_name edited, controller
+            DB blown away, etc.) where the name diverged but the subnet
+            still uniquely identifies our row. Without this we'd POST
+            /add against a CIDR that's still taken and AdGuard would
+            400 with "another client uses the same subnet".
+
+        Only clients prefixed with our marker (``CLIENT_NAME_PREFIX``)
+        are considered managed — we never touch operator-added clients,
+        even if their CIDR happens to overlap.
+        """
         data = await self._adguard_get("/control/clients")
         for c in data.get("clients") or []:
-            if c.get("name") == client_name:
-                return True
-        return False
+            current_name = c.get("name") or ""
+            if not current_name.startswith(CLIENT_NAME_PREFIX):
+                # Not ours — leave it alone, even on CIDR collision. The
+                # operator added that client deliberately ; the
+                # set_protection caller will surface AdGuard's 400 to
+                # the user with a clear message.
+                continue
+            if current_name == name:
+                return current_name
+            ids = c.get("ids") or []
+            if cidr in ids:
+                return current_name
+        return None
 
     async def _apply_adguard_client(
         self, *, client_name: str, payload: dict[str, Any]
     ) -> None:
-        """Add or update a persistent client. Idempotent."""
-        if await self._client_exists(client_name):
-            # update payload shape: {name: <existing>, data: <new fields>}
+        """Add or update a persistent client. Idempotent across renames.
+
+        Resolution order :
+          1. If a managed client already exists with this name OR this
+             CIDR, do an ``update`` targeting that name (the payload may
+             carry a new name — AdGuard accepts the rename in-place).
+          2. Otherwise ``add``.
+        """
+        cidr = (payload.get("ids") or [None])[0]
+        existing = await self._find_managed_client(name=client_name, cidr=cidr)
+        if existing is not None:
             await self._adguard_post(
                 "/control/clients/update",
-                {"name": client_name, "data": payload},
+                {"name": existing, "data": payload},
             )
         else:
             await self._adguard_post("/control/clients/add", payload)
 
     async def _delete_adguard_client(self, client_name: str) -> None:
-        if not await self._client_exists(client_name):
-            return
-        await self._adguard_post(
-            "/control/clients/delete", {"name": client_name}
-        )
+        # Lookup by name only here — delete by stored name is the
+        # canonical path and we don't want to delete a different CIDR's
+        # client because of a stale lookup.
+        data = await self._adguard_get("/control/clients")
+        for c in data.get("clients") or []:
+            if c.get("name") == client_name:
+                await self._adguard_post(
+                    "/control/clients/delete", {"name": client_name}
+                )
+                return
 
 
 # `list_levels()` removed — the API route now reads from `DnsSecurityLevelStore`

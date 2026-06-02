@@ -9,11 +9,6 @@ export interface VPNConfig {
   kill_switch: boolean;
 }
 
-export interface TorConfig {
-  enabled: boolean;
-  bridge: boolean;
-}
-
 export type WallpaperKind = "home" | "lock";
 export type FitMode = "contain" | "cover" | "stretch";
 
@@ -54,14 +49,13 @@ export interface TailscaleConfig {
   ha: TailscaleHAOverride | null;
 }
 
-export interface AdGuardConfig {
-  enabled: boolean;
-  lists: string[];
-}
-
 export interface ProfileSSIDRef {
   slug: string;
   enabled: boolean;
+  // L2→L3 binding : which network (bridge/subnet) this SSID routes to
+  // when this profile is active. Same SSID can map to different networks
+  // across profiles. Defaults to "lan".
+  network_slug: string;
 }
 
 export interface FirewallConfig {
@@ -82,11 +76,14 @@ export interface Profile {
   icon: string | null;
   color: string | null;
   vpn: VPNConfig;
-  tor: TorConfig;
   tailscale: TailscaleConfig;
-  adguard: AdGuardConfig;
-  ssids: ProfileSSIDRef[];
+  // adguard: removed — filtering / blocklists are driven per-network
+  //   by the DNS protection manager (Networks page).
   // dns: removed — DNS protection is per-network now (Networks page).
+  // tor: removed — daemon switch + bridges + exit_country are global
+  //   (TorSettings, Réseau → Tor) ; routing is per-network
+  //   (NetworkPublic.tor_route_mode).
+  ssids: ProfileSSIDRef[];
   firewall: FirewallConfig;
   logging: LoggingConfig;
 }

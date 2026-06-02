@@ -6,7 +6,7 @@ is consumed by the UI so the user can review what an activation actually
 entails before we flip on real execution in a follow-up phase.
 
 Each subsystem returns a small list of `PlanStep`. Steps carry:
-  - the target subsystem (vpn / dns / firewall / wifi / adguard / tor / tailscale)
+  - the target subsystem (vpn / dns / firewall / wifi / tor / tailscale)
   - the kind of action (rpc / uci / service)
   - target values (what we'd push)
   - readiness (ready / needs_probe / skipped / blocker)
@@ -93,10 +93,11 @@ class ProfileApplier:
     async def plan(self, profile: Profile) -> ActivationPlan:
         steps: list[PlanStep] = []
         steps.extend(await self._plan_vpn(profile))
-        # DNS protection is no longer profile-driven — see Networks page.
+        # DNS protection + AdGuard filtering are no longer profile-driven —
+        # see Networks page (per-network DNS protections drive AdGuard
+        # persistent clients).
         steps.extend(self._plan_firewall(profile))
         steps.extend(await self._plan_wifi(profile))
-        steps.extend(self._plan_adguard(profile))
         steps.extend(self._plan_tor(profile))
         steps.extend(self._plan_tailscale(profile))
         steps.extend(self._plan_logging(profile))
@@ -269,21 +270,27 @@ class ProfileApplier:
                 )
                 continue
             verb = "Activer" if ref.enabled else "Désactiver"
+            band_label = (
+                "MLO " + "/".join(ssid.bands) if ssid.mlo
+                else "/".join(f"{b}GHz" for b in ssid.bands)
+            )
             steps.append(
                 PlanStep(
                     subsystem="wifi",
                     action_kind="uci",
-                    summary=f"{verb} SSID '{ssid.ssid_name}' ({ssid.band} · {ssid.security})",
+                    summary=f"{verb} SSID '{ssid.ssid_name}' ({band_label} · {ssid.security})",
                     note=(
-                        f"uci set wireless.<iface>.disabled={'0' if ref.enabled else '1'}, "
-                        f"puis `wifi reload`. Bridge: {ssid.network_slug}. "
+                        f"uci set wireless.<iface>.disabled={'0' if ref.enabled else '1'} "
+                        f"sur toutes les ifaces matchant '{ssid.ssid_name}', "
+                        f"puis `wifi reload`. Bridge: {ref.network_slug}. "
                         f"Client-iso: {ssid.client_isolation}."
                     ),
                     target_values={
                         "slug": ssid.slug,
                         "ssid_name": ssid.ssid_name,
-                        "band": ssid.band,
-                        "network": ssid.network_slug,
+                        "bands": list(ssid.bands),
+                        "mlo": ssid.mlo,
+                        "network": ref.network_slug,
                         "enabled": ref.enabled,
                     },
                     readiness="needs_probe",
@@ -300,73 +307,14 @@ class ProfileApplier:
             ]
         return steps
 
-    def _plan_adguard(self, profile: Profile) -> list[PlanStep]:
-        ag = profile.adguard
-        if not ag.enabled:
-            return [
-                PlanStep(
-                    subsystem="adguard",
-                    action_kind="service",
-                    summary="AdGuard: arrêter le service",
-                    note="service adguardhome stop",
-                    readiness="ready",
-                )
-            ]
-        steps = [
-            PlanStep(
-                subsystem="adguard",
-                action_kind="service",
-                summary="AdGuard: démarrer le service",
-                note="service adguardhome start (RPC `adguardhome.get_config` confirmé OK).",
-                readiness="ready",
-            )
-        ]
-        if ag.lists:
-            steps.append(
-                PlanStep(
-                    subsystem="adguard",
-                    action_kind="rpc",
-                    summary=f"Pousser les blocklists: {', '.join(ag.lists)}",
-                    note="RPC adguardhome.set_filters (à valider).",
-                    target_values={"lists": ag.lists},
-                    readiness="needs_probe",
-                )
-            )
-        return steps
-
-    def _plan_tor(self, profile: Profile) -> list[PlanStep]:
-        tor = profile.tor
-        if not tor.enabled:
-            return [
-                PlanStep(
-                    subsystem="tor",
-                    action_kind="service",
-                    summary="Tor: arrêter le service",
-                    note="service tor stop",
-                    readiness="ready",
-                )
-            ]
-        steps = [
-            PlanStep(
-                subsystem="tor",
-                action_kind="service",
-                summary="Tor: démarrer le service (transparent proxy)",
-                note="RPC tor.set_config + service tor restart.",
-                target_values={"enabled": True, "bridge": tor.bridge},
-                readiness="needs_probe",
-            )
-        ]
-        if tor.bridge:
-            steps.append(
-                PlanStep(
-                    subsystem="tor",
-                    action_kind="uci",
-                    summary="Activer obfs4 bridges (Tor non identifiable)",
-                    note="Nécessite paquet `obfs4proxy` + liste de bridges configurée.",
-                    readiness="needs_probe",
-                )
-            )
-        return steps
+    def _plan_tor(self, _profile: Profile) -> list[PlanStep]:
+        # Per-profile Tor was removed from the model — the global daemon
+        # switch + bridges + exit_country live in TorSettings (DB), and
+        # routing decisions live on NetworkRow.tor_route_mode. No profile-
+        # scoped Tor planning anymore. Kept as a stub so any caller that
+        # still iterates _plan_* methods gets an empty list instead of an
+        # AttributeError on the removed `profile.tor` field.
+        return []
 
     def _plan_tailscale(self, profile: Profile) -> list[PlanStep]:
         ts = profile.tailscale
@@ -390,13 +338,22 @@ class ProfileApplier:
             )
         ]
         if ts.admin_only:
+            # Source of truth for the port list lives in the sync layer
+            # (single ADMIN_PORTS_TCP tuple). Import lazily to avoid
+            # cycles between profiles ↔ slate_agent at module load.
+            from app.slate_agent.sync import ADMIN_PORTS_TCP
+            ports = ", ".join(str(p) for p in ADMIN_PORTS_TCP)
             steps.append(
                 PlanStep(
                     subsystem="tailscale",
                     action_kind="uci",
-                    summary="Restreindre l'accès au tailnet admin uniquement",
-                    note="ACL Tailscale + règle firewall: drop tout trafic non-admin sur l'iface ts.",
-                    readiness="needs_probe",
+                    summary=f"Restreindre l'admin tailnet aux IPs whitelistées (TCP {ports})",
+                    note=(
+                        "Génère SC_FR_TS_ADMIN_ALLOW_<ip> + SC_FR_TS_ADMIN_DROP_ALL "
+                        "puis fw3 reload. La whitelist se gère dans Settings > "
+                        "Tailnet admin IPs ; vide = no-op (auto-downgrade côté sync)."
+                    ),
+                    readiness="ready",
                 )
             )
         return steps

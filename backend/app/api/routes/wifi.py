@@ -13,6 +13,7 @@ from app.auth import User, get_current_user
 from app.slate.ssh import SlateSSH
 from app.wifi.discovery import discover_wireless, slugify_ssid_name
 from app.wifi.models import WifiSsidCreate, WifiSsidPublic, WifiSsidWrite
+from app.wifi.slate_state import WifiSlotState, get_slate_wifi_state
 from app.wifi.qr import build_wifi_qr_string, render_qr_png
 from app.wifi.store import (
     WifiSsidDuplicateError,
@@ -35,6 +36,63 @@ class WifiPasswordResponse(BaseModel):
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/wifi", tags=["wifi"])
+
+
+class WifiSlotStateView(BaseModel):
+    """Pydantic mirror of `WifiSlotState` for the API surface."""
+
+    section_name: str
+    ifname: str
+    band: str | None
+    mode: str
+    ssid_uci: str
+    ssid_broadcast: str | None
+    enabled: bool
+    network: str
+    encryption: str
+    is_up: bool
+    slot_kind: str
+    marker: bool
+    notes: list[str]
+
+
+@router.get("/slate-state", response_model=list[WifiSlotStateView])
+async def read_slate_wifi_state(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> list[WifiSlotStateView]:
+    """Live diagnostic of every WiFi slot on the Slate.
+
+    Cross-references `uci show wireless` (persisted config) with `iwinfo`
+    (runtime broadcast state). Used by the WiFi UI's "État live" panel
+    so the operator can spot drift between controller intent and Slate
+    reality without SSH'ing manually.
+    """
+    try:
+        slots = await get_slate_wifi_state(ssh)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return [
+        WifiSlotStateView(
+            section_name=s.section_name,
+            ifname=s.ifname,
+            band=s.band,
+            mode=s.mode,
+            ssid_uci=s.ssid_uci,
+            ssid_broadcast=s.ssid_broadcast,
+            enabled=s.enabled,
+            network=s.network,
+            encryption=s.encryption,
+            is_up=s.is_up,
+            slot_kind=s.slot_kind,
+            marker=s.marker,
+            notes=s.notes,
+        )
+        for s in slots
+    ]
 
 
 @router.get("/suggestions", response_model=SsidSuggestionsLibrary)
@@ -95,15 +153,26 @@ async def discover_from_slate(
                 WifiSsidCreate(
                     slug=slug,
                     ssid_name=d.ssid_name,
-                    band=d.band,
+                    bands=list(d.bands),
+                    # MLO can't be inferred from `uci show wireless`
+                    # alone (would need to peek at mtwifi's `mld_id`
+                    # extension fields). Start as plain multi-VAP and
+                    # let the user re-tick if it was a Wi-Fi 7 MLO.
+                    mlo=False,
                     security=d.security,
+                    hidden=d.hidden,
                     # password : we can't read it from the Slate without
                     # extra UCI digging (and even then it'd be plaintext in
                     # uci show — privacy concern). Imported entries start
                     # password-less and the user enters it once in the UI.
                     password=None,
-                    network_slug=d.network,
-                    notes=f"imported from Slate (iface={d.iface})",
+                    # network binding is NOT imported onto the SSID — it's
+                    # a per-profile decision now. We record the discovered
+                    # bridge in the notes for reference only.
+                    notes=(
+                        f"imported from Slate "
+                        f"(ifaces={','.join(d.ifaces)}, was on network={d.network})"
+                    ),
                 )
             )
             imported.append(created)

@@ -123,6 +123,17 @@ export async function auditTailscale(): Promise<TailscaleAuditReport> {
   return data;
 }
 
+export async function fixTailscaleAuditFinding(
+  findingId: string,
+): Promise<{ ok: boolean; finding_id: string; message: string }> {
+  const { data } = await api.post(
+    "/api/tailscale/audit/fix",
+    null,
+    { params: { finding_id: findingId }, timeout: 30_000 },
+  );
+  return data;
+}
+
 export async function tracerouteTailscale(
   target: string,
   max_hops = 15,

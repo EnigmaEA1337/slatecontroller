@@ -43,7 +43,13 @@ def _to_public(row: NetworkRow) -> NetworkPublic:
         intra_bridge_isolation=row.intra_bridge_isolation,
         reach_internet=row.reach_internet,
         reachable_networks=list(row.reachable_networks or []),
-        admin_access=row.admin_access,
+        services_access=row.services_access,
+        admin_ui_access=row.admin_ui_access,
+        ssh_access=row.ssh_access,
+        expose_to_tailnet=row.expose_to_tailnet,
+        tor_route_mode=row.tor_route_mode,  # type: ignore[arg-type]
+        tor_dns_over_tor=row.tor_dns_over_tor,
+        tor_kill_switch=row.tor_kill_switch,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -91,7 +97,13 @@ def _copy_write_fields(row: NetworkRow, body: NetworkWrite) -> None:
     row.intra_bridge_isolation = body.intra_bridge_isolation
     row.reach_internet = body.reach_internet
     row.reachable_networks = list(body.reachable_networks or [])
-    row.admin_access = body.admin_access
+    row.services_access = body.services_access
+    row.admin_ui_access = body.admin_ui_access
+    row.ssh_access = body.ssh_access
+    row.expose_to_tailnet = body.expose_to_tailnet
+    row.tor_route_mode = body.tor_route_mode
+    row.tor_dns_over_tor = body.tor_dns_over_tor
+    row.tor_kill_switch = body.tor_kill_switch
 
 
 class NetworkStore:

@@ -441,6 +441,13 @@ async def adopt_device(
             port=row.ssh_port,
         )
 
+    # Adoption needs the global settings (for AdGuard admin creds) and
+    # the wifi catalog (for PSKs). Both are resolved here so the
+    # adoption module stays I/O-free apart from SSH.
+    from app.api.deps import get_wifi_store as _get_wifi_store
+    from app.config import get_settings as _get_settings
+    settings = _get_settings()
+    wifi_store = _get_wifi_store(request)
     try:
         report = await run_adoption(
             device_slug=slug,
@@ -450,6 +457,8 @@ async def adopt_device(
             ssh=ssh,
             store=store,
             keypair_store=keypair_store,
+            settings=settings,
+            wifi_store=wifi_store,
         )
     finally:
         if not row.is_default:
@@ -458,6 +467,22 @@ async def adopt_device(
     logger.info(
         "devices.adopt", slug=slug, overall=report.overall_status,
     )
+
+    # If this adoption succeeded and brought us from 0 → 1 adopted devices,
+    # kick off the post-adoption background services (CVE feed warmup,
+    # Tailscale HA watchdog) that the lifespan skipped on a vierge boot.
+    # Idempotent : if they're already running, the helper no-ops.
+    if report.overall_status in ("ok", "partial"):
+        starter = getattr(request.app.state, "start_post_adoption_services", None)
+        if starter is not None:
+            try:
+                starter()
+            except Exception as exc:  # noqa: BLE001 — never fail adoption on this
+                logger.warning(
+                    "devices.adopt.post_services_start_failed",
+                    slug=slug, error=str(exc),
+                )
+
     return report
 
 

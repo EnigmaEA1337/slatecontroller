@@ -6,6 +6,9 @@ export interface HardeningCheck {
   max_points: number;
   status: HardeningCheckStatus;
   note: string;
+  /** True when the backend knows an idempotent auto-fix for this check.
+   *  The UI surfaces a Corriger button only when this is set. */
+  fix_available?: boolean;
 }
 
 export interface HardeningResponse {

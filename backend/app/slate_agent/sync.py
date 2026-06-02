@@ -19,12 +19,38 @@ from typing import Any
 
 import structlog
 
-from app.adguard.feeds import get_feed
 from app.models.profile import Profile
+from app.networks.models import NetworkPublic
 from app.profiles.wallpapers import WallpaperStore
+from app.settings.tailnet_admin import TailnetAdminStore
 from app.slate.ssh import SlateSSH, SlateSSHError
 from app.slate_agent.deploy import REMOTE_PROFILES_DIR, REMOTE_SCREENS_DIR
 from app.wifi.models import WifiSsidPublic
+
+# Slate-side admin surface — TCP ports the tailnet-admin firewall guards
+# when the whitelist is non-empty. Single source of truth so the bash
+# handler reads the same list (passed in JSON), and so the listening-
+# surface audit knows what's expected to be filtered.
+#   22   dropbear (SSH)
+#   80   LuCI HTTP + GL.iNet UI redirect (nginx)
+#   443  LuCI HTTPS + GL.iNet UI (nginx)
+#   3000 AdGuard Home UI (HTTP)
+#   3443 AdGuard Home UI (HTTPS — planned, currently inactive until the
+#        AdGuard TLS toggle is wired up ; harmless to include early)
+#   8000 slate-ctrl API (controller's own listener)
+#   8080 uhttpd HTTP (GL.iNet ships uhttpd serving LuCI on :8080 in
+#        parallel to nginx :80 — same surface, just a different port)
+#   8443 uhttpd HTTPS (LuCI HTTPS port, also exposed on tailnet)
+#
+# NOT admin (intentionally left open on the tailnet — these are SERVICES
+# that tailnet peers consume, not admin surface) :
+#   53   DNS (dnsmasq / AdGuard) — tailnet peers may use the Slate as
+#        resolver, blocking would break that
+#   853  DoT — same rationale, encrypted DNS for tailnet peers
+#   3053 AdGuard's actual DNS port when forced (cf. quirk : default 53
+#        clashes with dnsmasq) — also a client-facing service
+#   34641 Tailscale peerapi — internal, managed by Tailscale itself
+ADMIN_PORTS_TCP: tuple[int, ...] = (22, 80, 443, 3000, 3443, 8000, 8080, 8443)
 
 # Where pre-rendered wallpaper PNGs live on the Slate (one per profile×kind).
 # The wallpaper.sh handler copies the matching file into the gl_screen paths
@@ -35,7 +61,14 @@ logger = structlog.get_logger(__name__)
 
 
 def _profile_to_agent_payload(
-    profile: Profile, wifi_catalog: list[WifiSsidPublic],
+    profile: Profile,
+    wifi_catalog: list[WifiSsidPublic],
+    network_catalog: list[NetworkPublic],
+    admin_ips: list[str] | None = None,
+    tor_daemon_enabled: bool = False,
+    tor_use_bridges: bool = False,
+    tor_bridge_lines: list[str] | None = None,
+    tor_exit_country_code: str = "",
 ) -> dict[str, Any]:
     """Transform a Pydantic Profile into the on-Slate JSON shape.
 
@@ -45,54 +78,163 @@ def _profile_to_agent_payload(
 
       - Wi-Fi: the Pydantic profile has `ssids: [{slug, enabled}]`. The
         handler needs the broadcast SSID name to find the uci section, so
-        we hoist that under `wifi.ssids: [{slug, name, band, security,
-        network_slug, enabled}]`. The original `ssids` field is preserved
-        so we don't break introspection but the agent reads `wifi.*`.
-      - AdGuard: the Pydantic profile has `adguard.lists: [slug, ...]`.
-        The handler needs the upstream URL + a display name to call the
-        local REST API, so we replace it with `adguard.lists: [{slug,
-        name, url}]`. Slugs absent from the catalog get `{slug, missing:
-        true}` so the handler can log them.
+        we hoist that under `wifi.ssids: [{slug, name, bands, mlo,
+        security, network_slug, enabled}]`. The original `ssids` field
+        is preserved so we don't break introspection but the agent reads
+        `wifi.*`. ``bands`` is a list of compact tokens ("2"/"5"/"6") —
+        the handler creates one wifi-iface per band when MLO is off.
+      - AdGuard: REMOVED from profiles. The controller drives AdGuard
+        directly via the per-network DNS protection manager (uses
+        AdGuard's persistent-clients REST API). The agent handler for
+        adguard now only deals with the global daemon (start/stop) ;
+        no per-profile filterlists payload is shipped anymore.
     """
     payload = profile.model_dump(mode="json")
 
-    catalog_by_slug = {s.slug: s for s in wifi_catalog}
+    # Catalog-driven layout : ship the FULL wifi_ssids catalog in every
+    # apply, not just the SSIDs the active profile references. The
+    # handler then materializes one UCI section per (slug, band) at
+    # deploy time (or reuses the existing one) and only flips `disabled`
+    # to reflect the profile's activation choices. Result : profile
+    # switches stay layout-stable → no reboot, only `wifi reload`.
+    # Layout-pending now means "the CATALOG changed" (SSID added/
+    # removed / band list edited / MLO toggled), not "this profile
+    # selected a different subset of SSIDs".
+    profile_refs_by_slug = {ref.slug: ref for ref in profile.ssids}
     resolved_ssids: list[dict[str, Any]] = []
-    for ref in profile.ssids:
-        catalog = catalog_by_slug.get(ref.slug)
-        if catalog is None:
-            # Reference to a non-existent SSID — surface in the JSON so the
-            # handler can log it and the operator can clean up.
-            resolved_ssids.append(
-                {"slug": ref.slug, "enabled": ref.enabled, "missing": True}
-            )
-            continue
+    for catalog in wifi_catalog:
+        ref = profile_refs_by_slug.get(catalog.slug)
+        # network_slug : the profile decides L2→L3 binding. When the
+        # SSID isn't referenced in the profile, we still need a syntactic
+        # default so the section is provisioned validly ; "lan" is the
+        # universal fallback (every Slate has a `lan` network). The slot
+        # will be disabled so the binding is dormant anyway.
+        network_slug = ref.network_slug if ref is not None else "lan"
+        enabled = ref.enabled if ref is not None else False
         resolved_ssids.append({
-            "slug": ref.slug,
+            "slug": catalog.slug,
             "name": catalog.ssid_name,
-            "band": catalog.band,
+            "bands": list(catalog.bands),
+            "mlo": catalog.mlo,
             "security": catalog.security,
-            "network_slug": catalog.network_slug,
-            "enabled": ref.enabled,
+            "network_slug": network_slug,
+            "client_isolation": catalog.client_isolation,
+            "hidden": catalog.hidden,
+            "enabled": enabled,
         })
     payload["wifi"] = {"ssids": resolved_ssids}
 
-    # AdGuard: replace `lists: [slug, ...]` with enriched objects so the
-    # shell handler doesn't need a catalog file on the Slate.
-    adguard_block = payload.get("adguard") or {}
-    resolved_lists: list[dict[str, Any]] = []
-    for slug in profile.adguard.lists:
-        feed = get_feed(slug)
-        if feed is None:
-            resolved_lists.append({"slug": slug, "missing": True})
-            continue
-        resolved_lists.append({
-            "slug": feed.slug,
-            "name": feed.name,
-            "url": feed.url,
+    # Network block — materialize the catalog so the `network.sh`
+    # handler can reconcile UCI bridges / interfaces / DHCP / firewall
+    # zones / forwardings to the user's intent. Networks are GLOBAL
+    # state (not per-profile) but we embed the same block in every
+    # profile JSON so apply = reconcile : if the user adds a network
+    # and then activates ANY profile, the new network materializes on
+    # the Slate. Same idempotency contract as wifi.ssids.
+    #
+    # Top-level key is singular `network` (not `networks`) so the
+    # slate-ctrl dispatcher's `run_handler "network" ...` finds the
+    # block via ``@.network`` — convention is "subsystem name == JSON
+    # key", same as for ``wifi``/``firewall``/``tailscale``. The list
+    # lives under ``items`` to keep room for future per-subsystem flags
+    # at the same level.
+    resolved_nets: list[dict[str, Any]] = []
+    for net in network_catalog:
+        resolved_nets.append({
+            "slug": net.slug,
+            "display_name": net.display_name,
+            "bridge_name": net.bridge_name,
+            "subnet_cidr": net.subnet_cidr,
+            "gateway_ip": net.gateway_ip,
+            "dhcp_enabled": net.dhcp_enabled,
+            "vlan_tag": net.vlan_tag,
+            "ipv6_enabled": net.ipv6_enabled,
+            "ipv6_subnet_cidr": net.ipv6_subnet_cidr,
+            "intra_bridge_isolation": net.intra_bridge_isolation,
+            "reach_internet": net.reach_internet,
+            "reachable_networks": list(net.reachable_networks),
+            "services_access": net.services_access,
+            "admin_ui_access": net.admin_ui_access,
+            "ssh_access": net.ssh_access,
+            # Per-network Tor routing — tor.sh reads these to decide
+            # whether to install NAT rules / kill-switch / DNSPort
+            # redirect for this bridge.
+            "tor_route_mode": net.tor_route_mode,
+            "tor_dns_over_tor": net.tor_dns_over_tor,
+            "tor_kill_switch": net.tor_kill_switch,
         })
-    adguard_block["lists"] = resolved_lists
-    payload["adguard"] = adguard_block
+    payload["network"] = {"items": resolved_nets}
+
+    # AdGuard enrichment removed — there is no per-profile AdGuard
+    # block anymore. All filtering / blocklists are driven by the
+    # per-network DNS protection manager (which talks to AdGuard via
+    # its persistent-clients REST API directly, not through this
+    # agent JSON). Strip any legacy `adguard` block that lingers on
+    # old profile payloads so the agent handler doesn't see it.
+    payload.pop("adguard", None)
+
+    # Tailscale subnet routing : the source of truth is the per-network
+    # `expose_to_tailnet` flag — NOT a per-profile override. Whatever
+    # the profile carries in `tailscale.connection.advertise_routes` is
+    # ignored ; the network catalog wins. Rationale : routing is a
+    # subnet property, not a profile property — a network is either
+    # reachable from the tailnet or it isn't, regardless of which
+    # profile is active. The user enforced this separation explicitly.
+    advertised: list[str] = []
+    for net in network_catalog:
+        if not net.expose_to_tailnet:
+            continue
+        if net.subnet_cidr:
+            advertised.append(net.subnet_cidr)
+        if net.ipv6_enabled and net.ipv6_subnet_cidr:
+            advertised.append(net.ipv6_subnet_cidr)
+    ts_block = payload.get("tailscale") or {}
+    conn = ts_block.get("connection") or {}
+    conn["advertise_routes"] = advertised  # always overwrite
+    ts_block["connection"] = conn
+
+    # Admin-only enforcement payload. Design simplification (2026-06-01) :
+    # the per-profile `admin_only` flag is dropped — the whitelist itself
+    # IS the switch :
+    #
+    #   - whitelist empty → no enforcement (anti-self-DoS safety, same as
+    #     before, prevents the operator from accidentally locking themself
+    #     out of the Slate from the tailnet)
+    #   - whitelist non-empty → enforcement active across ALL profiles
+    #
+    # Rationale : Tailscale is always-on on the Slate (not a profile-
+    # scoped feature). Filtering the admin surface profile-by-profile led
+    # to the foot-gun where Mission was strict but switching to Vacances
+    # silently opened the admin to every tailnet peer. The legacy flag
+    # in profile YAMLs is parsed but ignored at sync time ; the handler
+    # decides purely from the (admin_ips, admin_ports_tcp) tuple. Old
+    # profiles continue to work, no schema migration needed.
+    flag_on = bool(admin_ips)
+    ts_block["admin_only"] = flag_on  # kept in payload for back-compat handler reads
+    ts_block["admin_ips"] = list(admin_ips or []) if flag_on else []
+    ts_block["admin_ports_tcp"] = list(ADMIN_PORTS_TCP) if flag_on else []
+    payload["tailscale"] = ts_block
+
+    # Override Profile.tor (TorConfig = enabled+bridge) with the new
+    # structured block. The Tor model moved to "global daemon switch +
+    # per-network routing modes" (cf TorSettings store + NetworkRow
+    # tor_*) — the legacy per-profile fields are no longer the source of
+    # truth. The handler reads only the new structure (ports, bridges,
+    # global enable); per-network routing comes from `@.network.items[*]`.
+    payload["tor"] = {
+        "enabled": tor_daemon_enabled,
+        "use_bridges": tor_use_bridges,
+        "bridges": list(tor_bridge_lines or []),
+        # ISO-3166-1 alpha-2 lowercase ("ch", "de"…). Empty = let Tor pick.
+        "exit_country_code": (tor_exit_country_code or "").lower(),
+        # Standard ports — we expose them here so the handler can write a
+        # consistent torrc and the controller-side status check looks at
+        # the same numbers. Override per-deployment by editing this dict.
+        "socks_port": 9050,
+        "control_port": 9051,
+        "trans_port": 9040,
+        "dns_port": 5353,
+    }
     return payload
 
 
@@ -130,14 +272,24 @@ class SyncReport:
 
 async def sync_profiles(
     ssh: SlateSSH, profiles: list[Profile],
-    wifi_catalog: list[WifiSsidPublic] | None = None,
+    *,
+    wifi_catalog: list[WifiSsidPublic],
+    network_catalog: list[NetworkPublic] | None = None,
+    tailnet_admin_store: TailnetAdminStore | None = None,
     wallpaper_store: WallpaperStore | None = None,
+    tor_settings_store: Any | None = None,
+    tor_bridge_store: Any | None = None,
 ) -> SyncReport:
     """Push every profile's JSON to the Slate.
 
     `wifi_catalog` lets us resolve SSID slugs → broadcast names so the
     wifi.sh handler can find the uci section directly. Pass None if you
     don't care about Wi-Fi (handler will skip with a warning).
+
+    `network_catalog` provides the per-network `expose_to_tailnet` flag,
+    from which we compute `tailscale.connection.advertise_routes`. Pass
+    None and no subnet routes will be advertised (no breakage — the
+    handler just clears advertised routes).
 
     `wallpaper_store` lets us add a `wallpaper: {home, lock}` block to each
     profile JSON indicating which wallpaper kinds exist for that profile.
@@ -150,7 +302,26 @@ async def sync_profiles(
     are NOT pruned — `slate-ctrl list` will still see them.
     """
     rep = SyncReport()
-    catalog = wifi_catalog or []
+    # Defensive guard : `wifi_catalog` USED to default to None, which
+    # silently degraded each SSID to `{slug, enabled, missing: true}` in
+    # the pushed JSON. The wifi.sh handler then skipped every SSID
+    # (`[ -z "$name" ] && continue` line ~302) and the Slate's wireless
+    # state drifted across applies — a previous profile's SSID could
+    # remain UP because nothing was ever rewritten. Fixed 2026-06-02 :
+    # the param is now required (`*` keyword-only above) so the caller
+    # can no longer forget to fetch the catalog.
+    catalog = wifi_catalog
+    networks = network_catalog or []
+
+    # Resolve the global tailnet admin whitelist once per sync. Cheaper
+    # than per-profile and the value is unlikely to change mid-loop.
+    admin_ips: list[str] = []
+    if tailnet_admin_store is not None:
+        try:
+            data = await tailnet_admin_store.get()
+            admin_ips = list(data.get("admin_ips") or [])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sync.tailnet_admin_load_failed", error=str(exc))
 
     # Pull the wallpaper index ONCE rather than N queries (N profiles).
     wallpaper_index: dict[tuple[str, str], object] = {}
@@ -159,6 +330,28 @@ async def sync_profiles(
             wallpaper_index = await wallpaper_store.list_existing()  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001
             logger.warning("sync.wallpaper_index_failed", error=str(exc))
+
+    # Resolve the global Tor settings + enabled bridges once per sync — the
+    # same block is embedded in every profile JSON (Tor config is global,
+    # not per-profile ; per-network routing modes live on the network
+    # catalog itself).
+    tor_daemon_enabled = False
+    tor_use_bridges = False
+    tor_bridge_lines: list[str] = []
+    tor_exit_country_code = ""
+    if tor_settings_store is not None:
+        try:
+            ts = await tor_settings_store.get()
+            tor_daemon_enabled = bool(getattr(ts, "daemon_enabled", False))
+            tor_use_bridges = bool(getattr(ts, "use_bridges", False))
+            tor_exit_country_code = str(getattr(ts, "exit_country_code", "") or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sync.tor_settings_load_failed", error=str(exc))
+    if tor_bridge_store is not None:
+        try:
+            tor_bridge_lines = await tor_bridge_store.list_enabled_lines()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sync.tor_bridges_load_failed", error=str(exc))
 
     # Ensure the destination dir exists (deploy_agent already creates it,
     # but sync can be called independently).
@@ -170,7 +363,13 @@ async def sync_profiles(
 
     for profile in profiles:
         try:
-            data = _profile_to_agent_payload(profile, catalog)
+            data = _profile_to_agent_payload(
+                profile, catalog, networks, admin_ips=admin_ips,
+                tor_daemon_enabled=tor_daemon_enabled,
+                tor_use_bridges=tor_use_bridges,
+                tor_bridge_lines=tor_bridge_lines,
+                tor_exit_country_code=tor_exit_country_code,
+            )
             kinds_present = {
                 kind for (pname, kind) in wallpaper_index
                 if pname == profile.name
@@ -453,12 +652,80 @@ async def get_active_remote_profile(ssh: SlateSSH) -> str | None:
     return None
 
 
+async def resolve_active_name(ssh: SlateSSH, store: Any) -> str | None:
+    """The Slate is the source of truth for which profile is active.
+
+    Queries `slate-ctrl status` first ; if it disagrees with the controller
+    DB (which happens when an apply ran via the physical button, a direct
+    SSH call, or any path that bypassed `ProfileStore.set_active`), auto-
+    reconciles the DB to match. Falls back to the DB value when the Slate
+    is unreachable so the UI keeps working offline.
+
+    `store` is typed `Any` so this module stays a leaf — its only job is to
+    talk to the device. The caller passes its ProfileStore.
+    """
+    device = await get_active_remote_profile(ssh)
+    try:
+        db = await store.get_active_name()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("active.db_read_failed", error=str(exc))
+        db = None
+    if device is None:
+        return db
+    if device != db:
+        try:
+            await store.set_active(device)
+            logger.info("active.reconciled", from_=db, to=device)
+        except Exception as exc:  # noqa: BLE001
+            # Device names a profile we don't know (or DB write failed) —
+            # surface the device value anyway, just don't sync the DB.
+            logger.warning(
+                "active.reconcile_failed", device=device, db=db, error=str(exc),
+            )
+    return device
+
+
+# Emitted by slate-ctrl when a handler (wifi.sh) signalled a radio change
+# that only applies after a full reboot. The agent schedules the reboot
+# itself ~8s later; the controller watches for this line to know it should
+# poll for the Slate to come back. Single source of truth — keep in sync
+# with the echo in scripts/slate-ctrl.
+REBOOT_SENTINEL = "REBOOT SCHEDULED"
+
+
+async def apply_single_handler(
+    ssh: SlateSSH, subsystem: str, *, timeout: float = 45.0,
+) -> tuple[bool, str]:
+    """Run ONE handler (network / wifi / tor / ...) against the currently
+    active profile on the device. Lighter than the full
+    ``apply_remote_profile`` flow : used by the per-area Save+Apply
+    endpoints so the operator's "I changed the Tor exit country" PUT
+    request finishes in a couple seconds rather than running every other
+    handler too.
+
+    The caller is expected to have just synced the profile JSON (so the
+    handler sees the user's latest intent). On busybox/dropbear this is
+    ~1-3 s per call.
+    """
+    cmd = f"/usr/local/bin/slate-ctrl apply-only {subsystem} 2>&1"
+    try:
+        r = await ssh.run(cmd, timeout=timeout)
+    except SlateSSHError as exc:
+        return False, f"SSH error: {exc}"
+    return r.exit_status == 0, r.stdout
+
+
 async def apply_remote_profile(ssh: SlateSSH, name: str) -> tuple[bool, str]:
     """Invoke `slate-ctrl apply <name>` on the Slate.
 
     Returns (ok, output). On success, the agent's local handlers have
     applied the profile — this replaces (when used) the per-subsystem
     appliers the controller runs over SSH today.
+
+    If the output contains `REBOOT_SENTINEL`, the agent has scheduled a
+    deferred reboot (radio changes). Callers should detect that and run
+    `finalize_after_reboot` as a background task rather than continuing to
+    SSH the (about-to-reboot) Slate inline.
     """
     try:
         r = await ssh.run(
@@ -467,3 +734,61 @@ async def apply_remote_profile(ssh: SlateSSH, name: str) -> tuple[bool, str]:
         return r.exit_status == 0, r.stdout
     except SlateSSHError as exc:
         return False, f"SSH error: {exc}"
+
+
+async def wait_for_slate_recovery(
+    ssh: SlateSSH,
+    *,
+    label: str = "",
+    settle_seconds: float = 20.0,
+    timeout_seconds: float = 240.0,
+    poll_seconds: float = 5.0,
+) -> tuple[bool, str]:
+    """Poll the Slate over SSH until it answers again after a reboot.
+
+    The agent schedules the reboot ~8s after `slate-ctrl apply` returns, so
+    we sleep `settle_seconds` first (let it actually go down) to avoid
+    matching the pre-reboot sshd, then poll `/proc/uptime` until SSH is back.
+    Returns (recovered, human_message) and logs the outcome.
+    """
+    await asyncio.sleep(settle_seconds)
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    while loop.time() - start < timeout_seconds:
+        try:
+            r = await ssh.run("cat /proc/uptime", timeout=8)
+            if r.exit_status == 0 and r.stdout.strip():
+                elapsed = loop.time() - start + settle_seconds
+                uptime = r.stdout.split(".", 1)[0]
+                msg = f"Slate back after ~{elapsed:.0f}s (uptime={uptime}s)"
+                logger.info("agent.reboot.recovered", profile=label, detail=msg)
+                return True, msg
+        except SlateSSHError:
+            pass
+        await asyncio.sleep(poll_seconds)
+    msg = f"Slate did not answer within {timeout_seconds:.0f}s after reboot"
+    logger.warning("agent.reboot.timeout", profile=label, detail=msg)
+    return False, msg
+
+
+async def finalize_after_reboot(ssh: SlateSSH, name: str, db_engine: Any) -> None:
+    """Background task: wait for the agent-scheduled reboot to complete,
+    then re-run the button-cycle menu refresh.
+
+    The inline cycle refresh that both activate paths normally do needs SSH,
+    which is dead while the Slate reboots — so when a reboot is pending we
+    defer that refresh here instead of racing the box on its way down.
+    """
+    recovered, _ = await wait_for_slate_recovery(ssh, label=name)
+    if not recovered:
+        return
+    try:
+        from app.db.database import make_session_factory
+        from app.settings.button_cycle import ButtonCycleStore
+
+        steps = await ButtonCycleStore(make_session_factory(db_engine)).get()
+        await refresh_button_cycle_active(ssh, steps, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "agent.reboot.cycle_refresh_failed", name=name, error=str(exc),
+        )

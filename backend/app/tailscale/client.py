@@ -81,7 +81,13 @@ def _parse_status_json(data: dict[str, Any]) -> TailscaleStatus:
             )
         )
 
-    tailnet = data.get("MagicDNSSuffix") or data.get("CurrentTailnet", {}).get("MagicDNSSuffix") or ""
+    # `CurrentTailnet` is `null` (not absent) in the JSON when the
+    # daemon is up but the device isn't bound to a tailnet yet — the
+    # "NeedsLogin" state on a freshly-installed Slate. The default-`{}`
+    # form of `dict.get` doesn't help there (it's not missing, it's
+    # explicitly None), so we `or {}` the value before re-indexing.
+    _cur = data.get("CurrentTailnet") or {}
+    tailnet = data.get("MagicDNSSuffix") or _cur.get("MagicDNSSuffix") or ""
 
     return TailscaleStatus(
         installed=True,

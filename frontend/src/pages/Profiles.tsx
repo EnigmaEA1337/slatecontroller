@@ -200,18 +200,38 @@ function ProfileCard({
       <footer className="mt-4 flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => activate.mutate()}
-          disabled={activate.isPending || is_active}
+          onClick={() => {
+            if (is_active) {
+              // Re-apply on the same profile is idempotent server-side but
+              // not free (full sync + run all handlers + likely reboot for
+              // wifi layout changes). Confirm before firing so the operator
+              // doesn't accidentally trigger a Slate reboot.
+              if (!confirm(
+                `Re-appliquer ${profile.name} ? Cela re-pousse la config sur le Slate et peut déclencher un reboot si les SSIDs ont changé.`,
+              )) return;
+            }
+            activate.mutate();
+          }}
+          disabled={activate.isPending}
           className={cn(
             "flex items-center gap-1.5 border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.18em] transition",
             is_active
-              ? "border-[color:var(--color-cyber-ok)] text-[color:var(--color-cyber-ok)]"
+              ? "border-[color:var(--color-cyber-ok)] text-[color:var(--color-cyber-ok)] hover:bg-[color:var(--color-cyber-ok)]/10"
               : "border-[color:var(--color-cyber-accent-dim)] text-[color:var(--color-cyber-accent)] hover:border-[color:var(--color-cyber-accent)] hover:bg-[color:var(--color-cyber-accent)]/6",
             "disabled:opacity-50",
           )}
+          title={
+            is_active
+              ? "Re-pousser la conf de ce profil au Slate (utile après une modif de SSID, réseau, etc.)"
+              : "Activer ce profil sur le Slate"
+          }
         >
           <Power className="h-3 w-3" />
-          {is_active ? "active" : "Activer"}
+          {activate.isPending
+            ? "Apply…"
+            : is_active
+              ? "Re-appliquer"
+              : "Activer"}
         </button>
         <button
           type="button"

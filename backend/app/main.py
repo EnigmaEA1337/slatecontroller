@@ -14,7 +14,9 @@ from app.adguard.manager import AdGuardManager
 from app.api.routes import adguard as adguard_routes
 from app.api.routes import agent as agent_routes
 from app.api.routes import auth as auth_routes
+from app.api.routes import controller_https as controller_https_routes
 from app.api.routes import devices as device_routes
+from app.api.routes import internal_ca as internal_ca_routes
 from app.api.routes import dns_protection as dns_protection_routes
 from app.api.routes import firewall as firewall_routes
 from app.api.routes import networks as network_routes
@@ -24,6 +26,7 @@ from app.api.routes import security as security_routes
 from app.api.routes import settings as settings_routes
 from app.api.routes import slate as slate_routes
 from app.api.routes import tailscale as tailscale_routes
+from app.api.routes import tor as tor_routes
 from app.api.routes import vpn_configs as vpn_config_routes
 from app.api.routes import wifi as wifi_routes
 from app.config import get_settings
@@ -38,7 +41,6 @@ from app.slate.profiles import ProfileManager
 from app.slate.ssh import SlateSSH
 from app.vpn.configs_store import VPNConfigStore
 from app.vpn.proton_client import ProtonClient
-from app.wifi.models import WifiSsidCreate
 from app.wifi.store import WifiSsidStore
 
 # No default networks anymore. A fresh controller install starts with
@@ -47,54 +49,10 @@ from app.wifi.store import WifiSsidStore
 # seeds that used to live here were demo content that pre-populated
 # every install, which was confusing on real deployments.
 
-# Default Wi-Fi catalog. Slug == network slug == broadcast theme (1:1).
-DEFAULT_WIFI_SSIDS: list[WifiSsidCreate] = [
-    WifiSsidCreate(
-        slug="neuralcore",
-        ssid_name="NEURAL_LINK_01",
-        band="MLO",
-        security="WPA3-SAE",
-        network_slug="neuralcore",
-        client_isolation=False,
-        notes="SSID principal perso, WiFi 7 MLO max perf, AirPlay/Chromecast OK",
-    ),
-    WifiSsidCreate(
-        slug="grid",
-        ssid_name="TRON_LEGACY",
-        band="5GHz",
-        security="WPA3-SAE",
-        network_slug="grid",
-        client_isolation=False,
-        notes="Devices enfants. Iso OFF pour local play (Switch/jeux LAN)",
-    ),
-    WifiSsidCreate(
-        slug="blackice",
-        ssid_name="BLACK_ICE",
-        band="MLO",
-        security="WPA3-SAE",
-        network_slug="blackice",
-        client_isolation=True,
-        notes="Mission corp. WPA3-only, client iso ON (defense in depth)",
-    ),
-    WifiSsidCreate(
-        slug="chromelounge",
-        ssid_name="CHROME_LOUNGE",
-        band="2GHz",
-        security="WPA2-PSK",
-        network_slug="chromelounge",
-        client_isolation=True,
-        notes="Invités. WPA2 pour compat, client iso ON",
-    ),
-    WifiSsidCreate(
-        slug="shadowrun",
-        ssid_name="SHADOWRUN_NET",
-        band="5GHz",
-        security="WPA3-SAE",
-        network_slug="shadowrun",
-        client_isolation=True,
-        notes="Burner OSINT, network propre (séparé L2 de chromelounge)",
-    ),
-]
+# No default Wi-Fi catalog anymore. Same philosophy as DEFAULT_NETWORKS :
+# a fresh install starts with an EMPTY catalog — the user creates their
+# SSIDs as they need via the Radio page (or imports from the live Slate
+# via POST /api/wifi/discover-from-slate).
 
 logger = structlog.get_logger(__name__)
 
@@ -122,9 +80,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # later — for now we always operate on the default device.
     device_store = DeviceStore(session_factory)
     app.state.device_store = device_store
+
+    # Auto-seed sentinel : we only seed from .env ONCE in the lifetime
+    # of this DB. After that the user is the source of truth — if they
+    # delete the device, it stays deleted, even after a backend restart.
+    # Sentinel key persists in app_state so the user's choice survives
+    # container rebuilds.
+    from sqlalchemy import select as _select
+    from app.db.models import AppStateRow as _AppStateRow
+    _SEED_FLAG_KEY = "device_env_seeded"
+    async with session_factory() as _s:
+        _seed_row = await _s.scalar(
+            _select(_AppStateRow).where(_AppStateRow.key == _SEED_FLAG_KEY),
+        )
+        _already_seeded = _seed_row is not None and _seed_row.value == "1"
+
     default_device = await device_store.get_default()
-    if default_device is None:
-        # No device in DB yet → seed one from the .env values.
+
+    # One-time migration : si on a déjà un device par défaut mais pas
+    # de sentinel (install d'avant ce patch), pose le sentinel maintenant.
+    # Ça garantit que si l'utilisateur supprime ce device plus tard, on
+    # ne le re-seed pas au prochain reboot du backend.
+    if default_device is not None and not _already_seeded:
+        async with session_factory() as _s:
+            _s.add(_AppStateRow(key=_SEED_FLAG_KEY, value="1"))
+            await _s.commit()
+        _already_seeded = True
+        logger.info("devices.seed_sentinel_backfilled")
+
+    if default_device is None and not _already_seeded:
+        # First boot ever → seed one from the .env values.
         from urllib.parse import urlparse
 
         parsed = urlparse(settings.slate_url)
@@ -144,7 +129,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             notes="Auto-créé depuis .env au premier boot — renomme/édite si besoin.",
             is_default=True,
         )
+        # Pose le sentinel : plus jamais de re-seed automatique, même si
+        # l'utilisateur supprime ce device plus tard.
+        async with session_factory() as _s:
+            _s.add(_AppStateRow(key=_SEED_FLAG_KEY, value="1"))
+            await _s.commit()
         logger.info("devices.seeded_from_env", slug=default_device.slug, host=host)
+    elif default_device is None and _already_seeded:
+        logger.info("devices.no_default_present", reason="user_removed_no_auto_reseed")
 
     # SSH keypair store needs to exist before the registry builds devices
     # so the registry can auto-switch to key auth on cold builds.
@@ -171,17 +163,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Pre-warm the default device so the first request after boot doesn't
     # pay the cold-build cost (resolver probe + SSH connect, ~200-500ms).
     # Also surfaces config errors at boot time instead of on first call.
-    default_conn = await device_registry.for_default()
-
-    # Backwards-compatible app.state shortcuts. Most existing routes still
-    # reach for these directly; behind the curtain they're the default
-    # device's bundle. Kept here so the lifespan teardown + a handful of
-    # background tasks (tailscale watchdog) that don't take a slug yet
-    # have a stable handle.
-    app.state.slate_url_resolver = default_conn.url_resolver
-    app.state.slate_client = default_conn.client
-    app.state.slate_ssh = default_conn.ssh
-    app.state.adguard_manager = default_conn.adguard
+    # Guard for the case where the user removed every device (and we now
+    # honour that choice without auto-reseeding) : the controller boots
+    # in "no device" mode and routes that need slate_* return clear 4xx
+    # errors instead of crashing the startup.
+    if await device_store.get_default() is not None:
+        default_conn = await device_registry.for_default()
+        app.state.slate_url_resolver = default_conn.url_resolver
+        app.state.slate_client = default_conn.client
+        app.state.slate_ssh = default_conn.ssh
+        app.state.adguard_manager = default_conn.adguard
+    else:
+        # No device registered. Background tasks + routes that need a
+        # default device will check these for None and degrade
+        # gracefully.
+        app.state.slate_url_resolver = None
+        app.state.slate_client = None
+        app.state.slate_ssh = None
+        app.state.adguard_manager = None
+        logger.info("controller.no_device_mode", reason="no default device")
 
     # Networks catalog. No seeding — the user creates networks
     # explicitly via the UI. Existing rows from previous installs
@@ -190,10 +190,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     network_store = NetworkStore(session_factory)
     app.state.network_store = network_store
 
-    # Wi-Fi catalog (seed defaults — profiles reference these slugs).
+    # Wi-Fi catalog. No more default seeds — fresh installs start with
+    # an empty catalog and the user creates SSIDs via the UI or imports
+    # them from the live Slate (POST /api/wifi/discover-from-slate).
     wifi_store = WifiSsidStore(session_factory)
     app.state.wifi_store = wifi_store
-    await wifi_store.seed_defaults(DEFAULT_WIFI_SSIDS)
 
     # Profile store + first-boot seeding from the YAML templates.
     profile_store = ProfileStore(session_factory)
@@ -258,10 +259,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler.start()
     app.state.scheduler = scheduler
 
-    # Warm exploit sources in the background on startup so the UI shows
-    # populated counts within ~10s of boot, without blocking the lifespan
-    # on a 30s download.
     import asyncio as _asyncio
+
+    # Tailscale exit-node HA watchdog : same gating — pointless to probe
+    # a non-existent Slate. The store stays alive (the UI reads it).
+    from app.tailscale.client import TailscaleClient as _TSClient
+    from app.tailscale.ha_store import TailscaleHAStore
+    from app.tailscale.ha_watchdog import run_watchdog
+
+    app.state.tailscale_ha_store = TailscaleHAStore(session_factory)
 
     async def _warm_sources() -> None:
         try:
@@ -269,21 +275,54 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("security.sources.warm_failed", error=str(exc))
 
-    app.state._security_warmup_task = _asyncio.create_task(_warm_sources())
+    def _start_post_adoption_services() -> None:
+        """Kick off background tasks that only make sense once at least one
+        device is adopted : CVE feed warmup + Tailscale HA watchdog.
 
-    # Tailscale exit-node HA watchdog — background loop. No-op if disabled
-    # in the HA store; the user toggles it from /vpn/tailscale.
-    from app.tailscale.client import TailscaleClient as _TSClient
-    from app.tailscale.ha_store import TailscaleHAStore
-    from app.tailscale.ha_watchdog import run_watchdog
+        Idempotent : if a task is already running, we don't start a
+        second one. Called both at boot (if a device is already adopted
+        from a previous session) and from the adoption route after the
+        first successful adoption.
+        """
+        cur_w = getattr(app.state, "_security_warmup_task", None)
+        if cur_w is None or cur_w.done():
+            app.state._security_warmup_task = _asyncio.create_task(_warm_sources())
+            logger.info("post_adoption.security_warmup.started")
+        cur_t = getattr(app.state, "_tailscale_ha_task", None)
+        if cur_t is None or cur_t.done():
+            app.state._tailscale_ha_task = _asyncio.create_task(
+                run_watchdog(
+                    _TSClient(app.state.slate_ssh),
+                    app.state.tailscale_ha_store,
+                )
+            )
+            logger.info("post_adoption.ha_watchdog.started")
 
-    app.state.tailscale_ha_store = TailscaleHAStore(session_factory)
-    app.state._tailscale_ha_task = _asyncio.create_task(
-        run_watchdog(
-            _TSClient(app.state.slate_ssh),
-            app.state.tailscale_ha_store,
+    # Expose the starter on app.state so the adoption route can call it
+    # after marking the first device as adopted.
+    app.state.start_post_adoption_services = _start_post_adoption_services
+
+    # Boot-time decision : do we already have an adopted device from
+    # a previous run ? If yes, kick off the post-adoption services now.
+    # Otherwise wait for the user to finish adoption — the route will
+    # call `start_post_adoption_services()` then.
+    adopted_rows = [
+        d for d in await device_store.list_all() if d.status == "adopted"
+    ]
+    if adopted_rows:
+        logger.info(
+            "post_adoption.boot_kick", adopted_count=len(adopted_rows),
         )
-    )
+        _start_post_adoption_services()
+    else:
+        # Make the placeholders explicit so the teardown code below
+        # doesn't AttributeError when no adoption happened this run.
+        app.state._security_warmup_task = None
+        app.state._tailscale_ha_task = None
+        logger.info(
+            "post_adoption.deferred",
+            reason="no adopted device — watchdog + CVE warmup deferred",
+        )
 
     try:
         yield
@@ -291,12 +330,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("slate_controller.stopping")
         app.state.scheduler.shutdown(wait=False)
         # Stop the watchdog before tearing down SSH — otherwise its in-flight
-        # ssh.run() call could raise during cleanup.
-        app.state._tailscale_ha_task.cancel()
-        try:
-            await app.state._tailscale_ha_task
-        except (Exception, _asyncio.CancelledError):  # noqa: BLE001
-            pass
+        # ssh.run() call could raise during cleanup. Watchdog may be None
+        # if no device was ever adopted in this run (post-adoption gating).
+        ha_task = getattr(app.state, "_tailscale_ha_task", None)
+        if ha_task is not None:
+            ha_task.cancel()
+            try:
+                await ha_task
+            except (Exception, _asyncio.CancelledError):  # noqa: BLE001
+                pass
         # Close every per-device bundle in the registry. This supersedes
         # the old "close the singleton client+ssh+adguard" trio — each
         # bundle's aclose() handles them all.
@@ -354,6 +396,9 @@ def create_app() -> FastAPI:
     app.include_router(agent_routes.router, prefix="/api")
     app.include_router(dns_protection_routes.router, prefix="/api")
     app.include_router(firewall_routes.router, prefix="/api")
+    app.include_router(tor_routes.router, prefix="/api")
+    app.include_router(controller_https_routes.router, prefix="/api")
+    app.include_router(internal_ca_routes.router, prefix="/api")
 
     return app
 

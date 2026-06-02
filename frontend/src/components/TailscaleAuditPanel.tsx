@@ -10,15 +10,18 @@ import {
   ExternalLink,
   Info as InfoIcon,
   KeyRound,
+  Loader2,
   RefreshCw,
   ShieldCheck,
   ShieldOff,
   Trash2,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import {
   auditTailscale,
   deleteAdminPat,
+  fixTailscaleAuditFinding,
   getAdminPatStatus,
   setAdminPat,
 } from "@/api/tailscale";
@@ -106,6 +109,17 @@ export default function TailscaleAuditPanel({
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [patInput, setPatInput] = useState("");
   const [patFormOpen, setPatFormOpen] = useState(false);
+  // Per-finding fix : we track which finding triggered the fix so the
+  // spinner stays scoped to its card.
+  const [activeFixId, setActiveFixId] = useState<string | null>(null);
+  const fixMut = useMutation({
+    mutationFn: fixTailscaleAuditFinding,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["tailscale", "audit"] });
+      qc.invalidateQueries({ queryKey: ["tailscale", "status"] });
+      setActiveFixId(null);
+    },
+  });
 
   const savePatMutation = useMutation({
     mutationFn: ({ pat }: { pat: string }) => setAdminPat(pat),
@@ -386,12 +400,49 @@ export default function TailscaleAuditPanel({
                       </div>
                       {f.recommendation && (
                         <div className="border border-[color:var(--color-cyber-accent)]/40 bg-[color:var(--color-cyber-accent)]/5 p-2">
-                          <span className="cyber-label text-[color:var(--color-cyber-accent)]">
-                            recommendation
-                          </span>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="cyber-label text-[color:var(--color-cyber-accent)]">
+                              recommendation
+                            </span>
+                            {f.fix_available && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActiveFixId(f.id);
+                                  fixMut.mutate(f.id);
+                                }}
+                                disabled={fixMut.isPending}
+                                className="inline-flex shrink-0 items-center gap-1 border border-[color:var(--color-cyber-accent)] bg-[color:var(--color-cyber-accent)]/10 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-[color:var(--color-cyber-accent)] hover:bg-[color:var(--color-cyber-accent)]/20 disabled:opacity-50"
+                              >
+                                {fixMut.isPending && activeFixId === f.id ? (
+                                  <>
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                    fix…
+                                  </>
+                                ) : (
+                                  <>
+                                    <Wrench className="h-3 w-3" />
+                                    Corriger
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
                           <div className="mt-1 text-[color:var(--color-cyber-fg)]">
                             {f.recommendation}
                           </div>
+                          {fixMut.isError && activeFixId === f.id && (
+                            <div className="mt-2 text-[10px] text-red-300">
+                              <AlertTriangle className="mr-1 inline h-3 w-3" />
+                              {String((fixMut.error as Error)?.message ?? fixMut.error)}
+                            </div>
+                          )}
+                          {fixMut.isSuccess && activeFixId === null && fixMut.data?.ok && (
+                            <div className="mt-2 text-[10px] text-emerald-300">
+                              <CheckCircle2 className="mr-1 inline h-3 w-3" />
+                              {fixMut.data.message || "Fix appliqué"} — relance du scan…
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

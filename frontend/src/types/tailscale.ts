@@ -71,6 +71,10 @@ export interface AuditFinding {
   severity: AuditSeverity;
   evidence: string;
   recommendation: string | null;
+  /** True when the controller knows an idempotent auto-fix for this
+   *  exact finding id (daemon_running, shields_up, uci_enable). The UI
+   *  surfaces a Corriger button only when set. */
+  fix_available?: boolean;
 }
 
 export type HAFailsafeMode = "fail_open" | "keep";

@@ -26,6 +26,7 @@ from app.api.deps import (
 )
 from app.auth import User, get_current_user
 from app.dns.catalog import CATALOG, filter_providers
+from app.adguard.manager import AdGuardError
 from app.dns.manager import (
     DnsProtectionError,
     DnsProtectionManager,
@@ -268,6 +269,17 @@ async def set_protection(
     except DnsProtectionError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+    except AdGuardError as exc:
+        # AdGuard rejected the apply (typical : CIDR collision against an
+        # operator-added client, AdGuard down, auth wrong). Surface as 502
+        # so the UI can render the actual cause instead of a generic 500.
+        logger.warning(
+            "dns_protection.adguard_apply_failed",
+            network=network_slug, level=body.level_slug, error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc),
         ) from exc
     logger.info(
         "dns_protection.set",

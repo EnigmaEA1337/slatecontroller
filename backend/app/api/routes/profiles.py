@@ -11,7 +11,16 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -182,10 +191,15 @@ def _wallpaper_store(request: Request) -> WallpaperStore:
 async def list_profiles(
     request: Request,
     store: Annotated[ProfileStore, Depends(get_profile_store)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> list[ProfileEnvelope]:
-    active = await store.get_active_name()
+    # Source of truth = the Slate (state/active). Reconciles the DB on read
+    # so an apply via physical button / direct SSH still surfaces correctly.
+    from app.slate_agent.sync import resolve_active_name
+
+    active = await resolve_active_name(ssh, store)
     items = await store.list_all()
     secrets = await _gather_wifi_secrets(wifi)
     # Keys are (profile_name, kind) — ProfileEnvelope.of indexes by both.
@@ -201,9 +215,12 @@ async def list_profiles(
 @router.get("/active", response_model=ActiveProfileResponse)
 async def get_active_profile(
     store: Annotated[ProfileStore, Depends(get_profile_store)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> ActiveProfileResponse:
-    active = await store.get_active_name()
+    from app.slate_agent.sync import resolve_active_name
+
+    active = await resolve_active_name(ssh, store)
     if active is None:
         return ActiveProfileResponse(active_name=None, profile=None)
     try:
@@ -219,6 +236,7 @@ async def get_profile(
     name: str,
     request: Request,
     store: Annotated[ProfileStore, Depends(get_profile_store)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> ProfileEnvelope:
@@ -229,7 +247,9 @@ async def get_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Profile {name!r} not found",
         ) from exc
-    active = await store.get_active_name()
+    from app.slate_agent.sync import resolve_active_name
+
+    active = await resolve_active_name(ssh, store)
     secrets = await _gather_wifi_secrets(wifi)
     ws = _wallpaper_store(request)
     wallpapers: dict[tuple[str, str], WallpaperRecord] = {}
@@ -712,6 +732,7 @@ async def duplicate_profile(
 async def activate_profile(
     name: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     store: Annotated[ProfileStore, Depends(get_profile_store)],
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
@@ -777,23 +798,33 @@ async def activate_profile(
             name=name,
         )
 
-    # If the new active is part of the configured cycle, regenerate
-    # menu frames so the on-Slate menu shows the ACTIVE badge on the
-    # right row. Best-effort — failures here never fail the activation.
-    try:
-        from app.settings.button_cycle import ButtonCycleStore
-        from app.slate_agent.sync import refresh_button_cycle_active
+    # If the agent scheduled a reboot (radio changes), the Slate is about
+    # to go down — don't race it with an inline SSH refresh. Defer the
+    # menu refresh to a background task that first waits for the box to
+    # come back. Otherwise refresh inline as before. Best-effort either
+    # way: failures here never fail the activation.
+    if applied.get("agent", {}).get("reboot_pending"):
+        from app.slate_agent.sync import finalize_after_reboot
 
-        cycle_store = ButtonCycleStore(
-            make_session_factory(request.app.state.db_engine),
+        background_tasks.add_task(
+            finalize_after_reboot, ssh, name, request.app.state.db_engine,
         )
-        cycle_steps = await cycle_store.get()
-        await refresh_button_cycle_active(ssh, cycle_steps, name)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "profile.activated.cycle_refresh_failed",
-            name=name, error=str(exc),
-        )
+        logger.info("profile.activated.reboot_pending", name=name)
+    else:
+        try:
+            from app.settings.button_cycle import ButtonCycleStore
+            from app.slate_agent.sync import refresh_button_cycle_active
+
+            cycle_store = ButtonCycleStore(
+                make_session_factory(request.app.state.db_engine),
+            )
+            cycle_steps = await cycle_store.get()
+            await refresh_button_cycle_active(ssh, cycle_steps, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "profile.activated.cycle_refresh_failed",
+                name=name, error=str(exc),
+            )
 
     return ActiveProfileResponse(active_name=name, profile=stored.profile, applied=applied)
 
@@ -808,6 +839,7 @@ async def _activate_via_agent(
 ) -> dict[str, dict]:
     """Agent-driven activation. See `activate_profile` docstring."""
     from app.slate_agent.sync import (
+        REBOOT_SENTINEL,
         apply_remote_profile,
         sync_loading_screens,
         sync_profile_wallpapers,
@@ -820,13 +852,26 @@ async def _activate_via_agent(
     wifi_catalog = await wifi.list_all()
     wallpaper_store = _wallpaper_store(request)
 
+    # Load the network catalog so sync_profiles writes the per-network
+    # bridge/dhcp/firewall rules into the JSON the agent reads. Without
+    # this, network.items is empty and wifi.sh skips every SSID with
+    # `network 'network.<x>' missing`.
+    from app.networks.store import NetworkStore
+    from app.tor.store import TorBridgeStore, TorSettingsStore
+
+    sf = make_session_factory(request.app.state.db_engine)
+    network_catalog = await NetworkStore(sf).list_all()
+
     # 1. Sync the 3 artifact families for this single profile. Same code
     # the user runs from "Synchroniser le Slate" — we just scope it to
     # the one profile being activated so the apply works against
     # up-to-date artifacts. ~1-3s of SSH/SFTP work.
     json_rep = await sync_profiles(
         ssh, [profile], wifi_catalog=wifi_catalog,
+        network_catalog=network_catalog,
         wallpaper_store=wallpaper_store,
+        tor_settings_store=TorSettingsStore(sf),
+        tor_bridge_store=TorBridgeStore(sf),
     )
     screen_rep = await sync_loading_screens(ssh, [profile])
     wallpaper_rep = await sync_profile_wallpapers(
@@ -843,7 +888,11 @@ async def _activate_via_agent(
     # then paint the final wallpaper. Timeout is high (60s) because the
     # firewall reload alone can take 5-10s.
     ok, output = await apply_remote_profile(ssh, name)
-    applied["agent"] = {"ok": ok, "output": output}
+    applied["agent"] = {
+        "ok": ok,
+        "output": output,
+        "reboot_pending": REBOOT_SENTINEL in output,
+    }
 
     # 3. Controller-side bit the agent can't do : HA watchdog config in
     # our own DB. Returns a TailscaleApplyReport even if profile.tailscale.ha

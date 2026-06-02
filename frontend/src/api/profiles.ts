@@ -60,8 +60,16 @@ export async function duplicateProfile(
 export async function activateProfile(
   name: string,
 ): Promise<ActiveProfileResponse> {
+  // Override the default 15s axios timeout — a legitimate activate flow
+  // (sync profile JSON via SFTP + reconcile UCI + fw3 reload + every
+  // handler) routinely lands around 12-25s on this hardware ; even more
+  // on first apply of a brand-new profile. The reboot-pending branch
+  // returns ~5s because finalize runs in BackgroundTasks, but we still
+  // need to cover the non-reboot path.
   const { data } = await api.post<ActiveProfileResponse>(
     `/api/profiles/${encodeURIComponent(name)}/activate`,
+    undefined,
+    { timeout: 120_000 },
   );
   return data;
 }

@@ -1,7 +1,14 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, Cog, Cpu, Globe, Key, MessageSquare } from "lucide-react";
+import { CheckCircle2, ChevronRight, Cog, Cpu, Key, Lock, MessageSquare, Shield, ShieldCheck } from "lucide-react";
 
 const cards = [
+  {
+    to: "/settings/setup-status",
+    icon: CheckCircle2,
+    title: "Setup Status",
+    subtitle:
+      "Vue agrégée de la configuration · Tailscale, CA, SSH, Slate, callbacks · checklist post-déploiement",
+  },
   {
     to: "/settings/ssh-key",
     icon: Key,
@@ -9,10 +16,29 @@ const cards = [
     subtitle: "Auth clé-only sur le Slate · génération + déploiement",
   },
   {
-    to: "/settings/connectivity",
-    icon: Globe,
-    title: "Connectivité Slate ↔ Controller",
-    subtitle: "URLs Tailscale / LAN pour les callbacks du Slate vers nous",
+    to: "/settings/controller-https",
+    icon: Lock,
+    title: "HTTPS Controller",
+    subtitle:
+      "Expose ce controller en HTTPS sur le tailnet via Tailscale Serve · cert Let's Encrypt auto, jamais public",
+  },
+  {
+    to: "/settings/internal-ca",
+    icon: ShieldCheck,
+    title: "CA interne (LAN HTTPS Slate)",
+    subtitle:
+      "Root CA local + cert pour le Slate valide sur 192.168.8.1 (cas hotel offline). One-time install du Root CA → zéro warning partout",
+  },
+  // `/settings/connectivity` est volontairement omis : les callback URLs
+  // existent en store mais aucun consommateur ne les lit (les webhooks
+  // Slate → controller ne sont pas implémentés). À ressortir quand on
+  // attaquera les notifs anti-theft.
+  {
+    to: "/settings/tailnet-admin",
+    icon: Shield,
+    title: "Tailnet admin IPs",
+    subtitle:
+      "Whitelist des peers tailnet autorisés à atteindre l'admin (LuCI / SSH / AdGuard / controller). Drive le flag admin_only des profils.",
   },
   {
     to: "/settings/communication",

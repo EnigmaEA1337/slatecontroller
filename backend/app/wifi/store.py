@@ -28,10 +28,11 @@ def _to_public(row: WifiSsidRow) -> WifiSsidPublic:
     return WifiSsidPublic(
         slug=row.slug,
         ssid_name=row.ssid_name,
-        band=row.band,  # type: ignore[arg-type]
+        bands=list(row.bands or []),  # type: ignore[arg-type]
+        mlo=row.mlo,
         security=row.security,  # type: ignore[arg-type]
-        network_slug=row.network_slug,
         client_isolation=row.client_isolation,
+        hidden=row.hidden,
         notes=row.notes,
         has_password=bool(row.password_encrypted),
         created_at=row.created_at,
@@ -78,11 +79,12 @@ class WifiSsidStore:
         row = WifiSsidRow(
             slug=body.slug,
             ssid_name=body.ssid_name,
-            band=body.band,
+            bands=list(body.bands),
+            mlo=body.mlo,
             security=body.security,
             password_encrypted=encrypted,
-            network_slug=body.network_slug,
             client_isolation=body.client_isolation,
+            hidden=body.hidden,
             notes=body.notes,
         )
         async with self._sf() as session:
@@ -103,10 +105,11 @@ class WifiSsidStore:
             if row is None:
                 raise WifiSsidNotFoundError(slug)
             row.ssid_name = body.ssid_name
-            row.band = body.band
+            row.bands = list(body.bands)
+            row.mlo = body.mlo
             row.security = body.security
-            row.network_slug = body.network_slug
             row.client_isolation = body.client_isolation
+            row.hidden = body.hidden
             row.notes = body.notes
             # password semantics: None = leave alone, "" = clear, anything else = set
             if body.password is not None:
@@ -141,11 +144,12 @@ class WifiSsidStore:
                     WifiSsidRow(
                         slug=default.slug,
                         ssid_name=default.ssid_name,
-                        band=default.band,
+                        bands=list(default.bands),
+                        mlo=default.mlo,
                         security=default.security,
                         password_encrypted=encrypted,
-                        network_slug=default.network_slug,
                         client_isolation=default.client_isolation,
+                        hidden=default.hidden,
                         notes=default.notes,
                     )
                 )

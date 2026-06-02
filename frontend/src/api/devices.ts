@@ -39,9 +39,15 @@ export async function adoptDevice(
   slug: string,
   body: AdoptionOptions,
 ): Promise<AdoptionRunReport> {
+  // Adoption now runs 7 tasks including a full agent deploy (push of
+  // slate-ctrl + 10 handlers + secrets + scripts + cron). On a slow
+  // uplink that easily takes 60s — way above axios' default 15s. Give
+  // it 180s so the operator never sees a misleading frontend timeout
+  // while the backend is still doing work.
   const { data } = await api.post<AdoptionRunReport>(
     `/api/devices/${slug}/adopt`,
     body,
+    { timeout: 180_000 },
   );
   return data;
 }

@@ -6,17 +6,9 @@ vpn:
   type: wireguard
   client: mullvad-hardened
   kill_switch: true
-tor:
-  enabled: false
 tailscale:
   enabled: true
   admin_only: true
-adguard:
-  enabled: true
-  lists:
-  - hagezi-pro-plus
-  - hagezi-tif
-  - oisd-big
 ssids:
 - slug: neuralcore
   enabled: false

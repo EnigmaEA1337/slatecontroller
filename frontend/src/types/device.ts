@@ -46,6 +46,8 @@ export interface AdoptionOptions {
   force_https_webui: boolean;
   ssh_key_only: boolean;
   disable_upnp: boolean;
+  // LuCI access is a prerequisite, not an option — the backend
+  // unconditionally enables it on every adoption. No checkbox here.
 }
 
 export interface AdoptionTaskReport {

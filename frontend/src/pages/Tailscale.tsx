@@ -20,10 +20,12 @@ import {
   pingTailscale,
   tracerouteTailscale,
 } from "@/api/tailscale";
+import { listNetworks } from "@/api/networks";
 import type {
   TailscaleBackendState,
   TailscaleConfigInput,
 } from "@/types/tailscale";
+import { ClickableHost } from "@/components/ClickableHost";
 import TailscaleHAPanel from "@/components/TailscaleHAPanel";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
@@ -117,6 +119,31 @@ export default function Tailscale() {
   const stateLabel = (s && STATE_LABEL[s.backend_state]) || "?";
   const hasAuthKey = configQ.data?.has_auth_key ?? false;
 
+  // Controller intent : CIDRs the user has marked `expose_to_tailnet` on
+  // their Network catalog. This is the SOURCE OF TRUTH for what SHOULD
+  // be advertised on the tailnet. The live `advertised_routes` from
+  // `tailscale status` may differ (stale state in tailscaled across
+  // factory resets, manual `tailscale set --advertise-routes` from
+  // someone outside the controller, etc.) ; we surface the drift below.
+  const networksQ = useQuery({
+    queryKey: ["networks"],
+    queryFn: listNetworks,
+  });
+  const intentedRoutes: string[] = [];
+  for (const n of networksQ.data ?? []) {
+    if (!n.expose_to_tailnet) continue;
+    if (n.subnet_cidr) intentedRoutes.push(n.subnet_cidr);
+    if (n.ipv6_enabled && n.ipv6_subnet_cidr) {
+      intentedRoutes.push(n.ipv6_subnet_cidr);
+    }
+  }
+  const liveRoutes = s?.advertised_routes ?? [];
+  const intentSet = new Set(intentedRoutes);
+  const liveSet = new Set(liveRoutes);
+  const onlyInLive = liveRoutes.filter((r) => !intentSet.has(r));
+  const onlyInIntent = intentedRoutes.filter((r) => !liveSet.has(r));
+  const hasDrift = onlyInLive.length > 0 || onlyInIntent.length > 0;
+
   return (
     <div className="space-y-6 p-6">
       <div className="space-y-2">
@@ -170,7 +197,13 @@ export default function Tailscale() {
             <Info label="Hostname" value={s.hostname || "—"} />
             <Info
               label="Tailnet IP"
-              value={s.tailscale_ips[0] ?? "—"}
+              value={
+                s.tailscale_ips[0] ? (
+                  <ClickableHost value={s.tailscale_ips[0]} />
+                ) : (
+                  "—"
+                )
+              }
               accent={!!s.tailscale_ips[0]}
             />
             <Info label="Tailnet" value={s.tailnet || "—"} />
@@ -178,10 +211,31 @@ export default function Tailscale() {
               label="Routes acceptées"
               value={s.accept_routes ? "oui" : "non"}
             />
-            {s.advertised_routes.length > 0 && (
+            {/* Intent first (controller catalog), live state second.
+                Drift is highlighted explicitly so it stops being a
+                silent footgun. */}
+            <Info
+              label="Routes annoncées (intent)"
+              value={
+                intentedRoutes.length > 0 ? intentedRoutes.join(", ") : "—"
+              }
+              accent={intentedRoutes.length > 0}
+            />
+            {hasDrift && (
               <Info
-                label="Routes annoncées"
-                value={s.advertised_routes.join(", ")}
+                label="⚠ Drift live vs intent"
+                value={
+                  [
+                    onlyInLive.length > 0
+                      ? `live-only: ${onlyInLive.join(", ")}`
+                      : "",
+                    onlyInIntent.length > 0
+                      ? `intent-only: ${onlyInIntent.join(", ")}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                }
               />
             )}
             {s.exit_node_enabled && (
@@ -434,9 +488,15 @@ export default function Tailscale() {
                       )}
                     />
                   </td>
-                  <td className="px-3 py-2 font-mono">{p.hostname}</td>
                   <td className="px-3 py-2 font-mono">
-                    {p.tailscale_ips[0] ?? "—"}
+                    {p.hostname ? <ClickableHost value={p.hostname} /> : "—"}
+                  </td>
+                  <td className="px-3 py-2 font-mono">
+                    {p.tailscale_ips[0] ? (
+                      <ClickableHost value={p.tailscale_ips[0]} />
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   <td className="px-3 py-2 font-mono text-[color:var(--color-cyber-muted)]">
                     {p.os}
@@ -631,7 +691,9 @@ function Info({
   accent = false,
 }: {
   label: string;
-  value: string;
+  /** Accepts a ReactNode so callers can pass a `<ClickableHost />` for
+   *  IP/hostname fields without breaking the layout. */
+  value: React.ReactNode;
   accent?: boolean;
 }) {
   return (

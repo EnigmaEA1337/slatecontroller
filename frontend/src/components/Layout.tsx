@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getActiveProfile } from "@/api/profiles";
+import { useAdoptedDevice } from "@/hooks/useAdoptedDevice";
 import { useCurrentUser, useLogout } from "@/hooks/useAuth";
 import { reliabilityShieldStyle } from "@/components/ReliabilityShield";
 import DevicePicker from "@/components/DevicePicker";
@@ -39,8 +40,13 @@ const topItems = [
 // top list (their URLs stay /wifi and /networks — no link rewrites).
 const networkChildren = [
   { to: "/networks/interfaces", label: "Interfaces" },
+  { to: "/networks/diagnostic", label: "Diagnostic" },
   { to: "/networks", label: "Réseaux" },
-  { to: "/wifi", label: "Wi-Fi" },
+  { to: "/wifi", label: "Radio" },
+  // Tor = couche de routage par-réseau (per-bridge transparent / SOCKS),
+  // donc sa place est ici à côté des autres surfaces réseau — pas dans
+  // "Protection".
+  { to: "/networks/tor", label: "Tor" },
 ];
 
 // "Audit" group — renamed from "Sécurité" so the label matches what
@@ -51,11 +57,20 @@ const auditChildren = [
   { to: "/security/hardening", label: "Hardening" },
   { to: "/security/vulnerabilities", label: "Vulnérabilités" },
   { to: "/security/tailscale", label: "Tailscale Audit" },
+  { to: "/security/tor-audit", label: "Tor Audit" },
 ];
 
+// Note : `/settings/connectivity` (controller callback URLs) is volontairement
+// absent du menu. Le store + endpoints existent mais aucun consommateur ne
+// les lit (les webhooks Slate → controller ne sont pas implémentés). On
+// le ressortira quand on attaquera les notifs anti-theft / audit, où la
+// latence webhook bat le polling. Cf. Phase 1 anti-forensics du todo.
 const settingsChildren = [
+  { to: "/settings/setup-status", label: "Setup Status" },
   { to: "/settings/ssh-key", label: "SSH Keypair" },
-  { to: "/settings/connectivity", label: "Connectivity" },
+  { to: "/settings/controller-https", label: "HTTPS Controller" },
+  { to: "/settings/internal-ca", label: "CA interne" },
+  { to: "/settings/tailnet-admin", label: "Tailnet admin" },
   { to: "/settings/communication", label: "Communication" },
   { to: "/settings/agent", label: "Agent local" },
 ];
@@ -71,11 +86,38 @@ const protectionChildren = [
   { to: "/protection/firewall", label: "Firewall" },
 ];
 
+// Routes that stay reachable BEFORE adoption — operator needs them to
+// finish first-time setup. Everything else is hidden / redirected to
+// /devices until at least one Slate is adopted.
+const ONBOARDING_ALLOWLIST: ReadonlyArray<string> = [
+  "/devices",
+  "/settings",
+];
+
+function pathIsAllowedPreAdoption(path: string): boolean {
+  return ONBOARDING_ALLOWLIST.some(
+    (prefix) => path === prefix || path.startsWith(prefix + "/"),
+  );
+}
+
 export default function Layout() {
   const me = useCurrentUser();
   const logout = useLogout();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Onboarding gate : until the first Slate is adopted, the controller
+  // can't talk to anything — dashboards, security scans, profile apply
+  // all probe a device. Redirect to /devices so the user can finish
+  // adoption ; allow /settings paths through (SSH keypair etc. are
+  // adoption prereqs).
+  const adopted = useAdoptedDevice();
+  useEffect(() => {
+    if (adopted.isLoading) return;
+    if (adopted.hasAdopted) return;
+    if (pathIsAllowedPreAdoption(location.pathname)) return;
+    navigate("/devices", { replace: true });
+  }, [adopted.isLoading, adopted.hasAdopted, location.pathname, navigate]);
 
   const isNetworkPath = (p: string) =>
     p.startsWith("/networks") || p.startsWith("/wifi");
@@ -496,6 +538,10 @@ export default function Layout() {
           <Outlet />
         </Suspense>
       </main>
+
+      {/* The floating "Apply" pill was removed — too coarse, too
+          ambiguous (was it pending or always there?). Per-control inline
+          apply is the new direction, see the per-page Save buttons. */}
     </div>
   );
 }

@@ -49,6 +49,20 @@ class AuditFinding:
     severity: Severity
     evidence: str
     recommendation: str | None = None
+    # True when the controller knows an idempotent fix for this exact
+    # finding id AND its current status warrants action. Surfaced as a
+    # "Corriger" button on the audit page ; non-fixable findings only
+    # get the remediation text (PAT setup, ACL edits, etc.).
+    fix_available: bool = False
+
+
+# Finding ids the controller can auto-fix. Kept in sync with the
+# /api/tailscale/audit/fix endpoint's dispatch table.
+TAILSCALE_FIXABLE_IDS: frozenset[str] = frozenset({
+    "daemon_running",     # start daemon (init.d + uci enable)
+    "uci_enable",         # uci set tailscale enabled=1 for boot
+    "shields_up",         # tailscale set --shields-up=true
+})
 
 
 @dataclass
@@ -61,6 +75,74 @@ class AuditReport:
     findings: list[AuditFinding] = field(default_factory=list)
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     raw_summary: dict[str, Any] = field(default_factory=dict)
+
+
+# Parse SC_FR_TS_ADMIN_DROP_ALL.dest_port to know which TCP ports the
+# tailnet-admin firewall blocks for non-whitelisted peers. The handler
+# at `slate_agent/scripts/handlers/tailscale.sh` writes the catch-all
+# REJECT rule with a space-separated port list, e.g.
+#   firewall.SC_FR_TS_ADMIN_DROP_ALL.dest_port='22 443 80 3000 8000'
+# UCI values are single-quoted on stdout. Returns the set of ports as
+# ints (empty when no firewall rules present → nothing protected).
+_DEST_PORT_RE = re.compile(
+    r"^firewall\.SC_FR_TS_ADMIN_DROP_ALL\.dest_port=['\"]?([^'\"\s]+(?:\s+[^'\"\s]+)*)['\"]?$",
+    re.MULTILINE,
+)
+# Counts SC_FR_TS_ADMIN_ALLOW_* sections — one per whitelisted IP.
+_ALLOW_SECTION_RE = re.compile(
+    r"^firewall\.SC_FR_TS_ADMIN_ALLOW_[A-Z0-9_]+=rule$",
+    re.MULTILINE,
+)
+
+
+def _parse_admin_fw_protected_ports(raw: str | None) -> set[int]:
+    if not raw:
+        return set()
+    m = _DEST_PORT_RE.search(raw)
+    if not m:
+        return set()
+    out: set[int] = set()
+    for tok in m.group(1).split():
+        try:
+            out.add(int(tok))
+        except ValueError:
+            continue
+    return out
+
+
+def _count_admin_fw_allow_ips(raw: str | None) -> int:
+    if not raw:
+        return 0
+    return len(_ALLOW_SECTION_RE.findall(raw))
+
+
+# Ports we *intentionally* leave open on the tailnet. They serve tailnet
+# peers (DNS, NTP, multicast discovery, Tailscale's own control plane)
+# and aren't part of the admin surface. The listening_surface check
+# excludes them from the "bare exposed" count so that a normally-
+# configured Slate audits clean without forcing the operator to manually
+# justify each one.
+KNOWN_SERVICE_PORTS_TCP: frozenset[int] = frozenset({
+    53,     # dnsmasq DNS over TCP — fallback for queries too large for UDP
+            # (EDNS0 truncation, AXFR-like responses). Standard side-channel
+            # to the UDP DNS service ; reachable on the tailnet but harmless.
+    34641,  # Tailscale peerapi (internal, managed by tailscaled itself)
+    3053,   # AdGuard Home DNS (forced port — default 53 conflicts with dnsmasq)
+})
+KNOWN_SERVICE_PORTS_UDP: frozenset[int] = frozenset({
+    53,    # dnsmasq DNS for tailnet clients
+    67,    # DHCP server (dnsmasq) — listens on all interfaces by default.
+           # Reachable from the tailnet but functionally a no-op : tailnet
+           # peers already get their IP from Tailscale's coordination
+           # server, they don't DHCP from us. Could be tightened with
+           # `no-dhcp-interface=tailscale0` in dnsmasq if pedantic, but
+           # there's no actual leak.
+    123,   # NTP — clock sync for tailnet clients
+    853,   # DoT (DNS-over-TLS) for clients
+    3053,  # AdGuard Home DNS (UDP side)
+    5353,  # mDNS (avahi) for local discovery
+    41641, # Tailscale's own UDP port (STUN / direct connections)
+})
 
 
 def _grade(score: int) -> Literal["A", "B", "C", "D", "F"]:
@@ -112,6 +194,7 @@ class TailscaleAuditor:
             netcheck_raw,
             listening_raw,
             uci_raw,
+            admin_fw_raw,
         ) = await asyncio.gather(
             probe("tailscale version 2>&1"),
             probe("tailscale status --json 2>&1"),
@@ -130,6 +213,11 @@ class TailscaleAuditor:
             probe(
                 "uci get tailscale.settings.enabled 2>&1; uci get tailscale.settings.flags 2>&1"
             ),
+            # Tailnet admin firewall : the SC_FR_TS_ADMIN_* UCI rules pushed
+            # by the tailscale handler when the whitelist is non-empty.
+            # Used by `_check_listening_surface` to mark each listening
+            # port as "filtered by firewall" instead of bare "exposed".
+            probe("uci show firewall 2>/dev/null | grep -E '^firewall\\.SC_FR_TS_ADMIN_'"),
         )
 
         return {
@@ -139,6 +227,7 @@ class TailscaleAuditor:
             "netcheck_raw": netcheck_raw,
             "listening_raw": listening_raw,
             "uci_raw": uci_raw,
+            "admin_fw_raw": admin_fw_raw,
         }
 
     @staticmethod
@@ -511,6 +600,7 @@ class TailscaleAuditor:
         listening_raw: str | None,
         status: dict[str, Any],
         prefs: dict[str, Any],
+        admin_fw_raw: str | None = None,
     ) -> AuditFinding:
         if not listening_raw:
             return AuditFinding(
@@ -529,17 +619,33 @@ class TailscaleAuditor:
             )
         # Match either an explicit bind on the Tailscale IP, or wildcard binds
         # which are also reachable from the tailnet.
-        exposed: list[str] = []
+        exposed: list[tuple[str, str, int]] = []  # (proto, addr, port)
         for line in listening_raw.splitlines():
             parts = line.split()
             if len(parts) < 2:
                 continue
+            proto = parts[0]
             addr = parts[1]
-            # 0.0.0.0:N, *:N, [::]:N → wildcard. Also direct binds to the TS IP.
             wildcard = addr.startswith(("0.0.0.0:", "*:", "[::]:", ":::"))
             on_ts = any(addr.startswith(ip + ":") or addr.startswith("[" + ip + "]:") for ip in ts_ips)
-            if wildcard or on_ts:
-                exposed.append(f"{parts[0]} {addr}")
+            if not (wildcard or on_ts):
+                continue
+            port_s = addr.rsplit(":", 1)[-1]
+            try:
+                port_n = int(port_s)
+            except ValueError:
+                continue
+            exposed.append((proto, addr, port_n))
+
+        # Parse the SC_FR_TS_ADMIN_* rules — the handler pushes one
+        # ACCEPT rule per whitelisted source IP, plus one REJECT catch-
+        # all on the tailnet CIDR. We only need the catch-all to know
+        # which TCP ports are filtered for non-whitelisted peers ;
+        # ACCEPT rules let the whitelisted peers through but don't
+        # change the surface "what's reachable to a random peer".
+        protected_tcp: set[int] = _parse_admin_fw_protected_ports(admin_fw_raw)
+        whitelist_count: int = _count_admin_fw_allow_ips(admin_fw_raw)
+
         shields = prefs.get("ShieldsUp") is True
         if not exposed:
             return AuditFinding(
@@ -555,12 +661,85 @@ class TailscaleAuditor:
                 status="info", severity="info",
                 evidence=f"{len(exposed)} port(s) en écoute mais ShieldsUp=true (drop)",
             )
+
+        # Three-way split :
+        #   - filtered : TCP listener on a port covered by SC_FR_TS_ADMIN_DROP_ALL
+        #   - services : listener on a port we intentionally leave open
+        #     (Tailscale peerapi, DNS, NTP, mDNS — cf. KNOWN_SERVICE_PORTS_*),
+        #     OR UDP on an ephemeral high port (>32768) which is typically
+        #     a transient client-side binding (DHCP client, ICMPv6, DNS
+        #     resolver source port, mdnsd reply socket, …), not an
+        #     intentional admin endpoint
+        #   - bare     : the rest = actual unexpected exposure
+        bare: list[str] = []
+        filtered: list[str] = []
+        services: list[str] = []
+        for proto, addr, port in exposed:
+            label = f"{proto} {addr}"
+            if proto == "tcp" and port in protected_tcp:
+                filtered.append(label)
+            elif proto == "tcp" and port in KNOWN_SERVICE_PORTS_TCP:
+                services.append(label)
+            elif proto == "udp" and port in KNOWN_SERVICE_PORTS_UDP:
+                services.append(label)
+            elif proto == "udp" and port >= 32768:
+                # IANA ephemeral / Linux dynamic range. Random bindings
+                # used by client-side connections, not admin surface.
+                services.append(label)
+            else:
+                bare.append(label)
+
+        if not bare:
+            # Every listening port is either firewall-protected or a
+            # known service. That's the desired posture.
+            parts: list[str] = []
+            if filtered:
+                parts.append(
+                    f"{len(filtered)} filtré(s) par SC_FR_TS_ADMIN_DROP_ALL "
+                    f"({whitelist_count} IP(s) whitelistée(s))"
+                )
+            if services:
+                parts.append(f"{len(services)} service(s) tailnet légitimes (DNS/NTP/mDNS/peerapi)")
+            return AuditFinding(
+                id="listening_surface",
+                label="Surface d'écoute sur tailscale0",
+                status="pass", severity="pass",
+                evidence=f"Posture saine : {' · '.join(parts) or 'aucun listener'}.",
+            )
+
+        if filtered or services:
+            # Mixed : firewall + known services cover some ports, but
+            # not all — there are genuinely unexpected listeners.
+            extras: list[str] = []
+            if filtered:
+                extras.append(f"{len(filtered)} filtré(s) par SC_FR_TS_ADMIN_DROP_ALL")
+            if services:
+                extras.append(f"{len(services)} service(s) tailnet légitimes")
+            return AuditFinding(
+                id="listening_surface",
+                label="Surface d'écoute sur tailscale0",
+                status="warn", severity="medium",
+                evidence=(
+                    f"{len(bare)} port(s) inattendu(s) accessibles : {bare[:8]}. "
+                    f"({' · '.join(extras)}.)"
+                ),
+                recommendation=(
+                    "Ajouter les ports manquants à ADMIN_PORTS_TCP si ce sont "
+                    "des admin endpoints, ou à KNOWN_SERVICE_PORTS_TCP/UDP "
+                    "si ce sont des services tailnet légitimes."
+                ),
+            )
+
+        # No firewall rules at all — the original warn.
         return AuditFinding(
             id="listening_surface",
             label="Surface d'écoute sur tailscale0",
             status="warn", severity="medium",
-            evidence=f"{len(exposed)} port(s) accessibles au tailnet: {exposed[:8]}",
-            recommendation="Soit activer Shields-up, soit cadenasser avec une ACL Tailscale ('dst:0.0.0.0/0 reject' sauf services autorisés).",
+            evidence=f"{len(bare)} port(s) accessibles au tailnet: {bare[:8]}",
+            recommendation=(
+                "Soit activer Shields-up, soit configurer la whitelist Tailnet admin "
+                "(Settings → Tailnet admin) pour pousser les règles SC_FR_TS_ADMIN_*."
+            ),
         )
 
     async def _check_version_recency(
@@ -1007,7 +1186,8 @@ class TailscaleAuditor:
             self._check_netcheck_quality(netcheck_json),
             self._check_uci_enable(raw.get("uci_raw")),
             self._check_listening_surface(
-                raw.get("listening_raw"), status_json, prefs_json
+                raw.get("listening_raw"), status_json, prefs_json,
+                admin_fw_raw=raw.get("admin_fw_raw"),
             ),
             self._check_version_recency(raw.get("version_raw")),
             self._check_key_expiry(status_json),
@@ -1048,6 +1228,13 @@ class TailscaleAuditor:
                 score -= _PENALTY[f.severity]
 
         score = max(0, score)
+        # Stamp each finding with fix_available so the UI knows when to
+        # show the "Corriger" button. Cheap to compute here (one set
+        # membership check per finding) and avoids leaking the dispatch
+        # map into the route layer.
+        for f in findings:
+            if f.id in TAILSCALE_FIXABLE_IDS and f.status in {"fail", "warn"}:
+                f.fix_available = True
         return AuditReport(
             score=score,
             grade=_grade(score),

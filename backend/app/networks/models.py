@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+TorRouteMode = Literal["off", "transparent", "socks_only"]
 
 
 class NetworkPublic(BaseModel):
@@ -21,11 +25,21 @@ class NetworkPublic(BaseModel):
     ipv6_enabled: bool
     ipv6_subnet_cidr: str
 
-    # 3-level isolation model. See db/models.py NetworkRow for the rationale.
+    # Isolation model. See db/models.py NetworkRow for the rationale.
     intra_bridge_isolation: bool
     reach_internet: bool
     reachable_networks: list[str]
-    admin_access: bool
+    # Admin/management plane split per service.
+    services_access: bool
+    admin_ui_access: bool
+    ssh_access: bool
+    # Tailnet exposure (Tailscale subnet routing).
+    expose_to_tailnet: bool
+    # Per-network Tor routing. See db/models.py NetworkRow for the
+    # semantics of each field.
+    tor_route_mode: TorRouteMode = "off"
+    tor_dns_over_tor: bool = False
+    tor_kill_switch: bool = False
 
     created_at: datetime
     updated_at: datetime
@@ -80,13 +94,74 @@ class NetworkWrite(BaseModel):
             "Example: ['lan'] = can reach main LAN, no other."
         ),
     )
-    admin_access: bool = Field(
+    # ── admin/management plane (was a single `admin_access` flag) ──
+    services_access: bool = Field(
         default=True,
         description=(
-            "Zone input policy : whether clients can reach the Slate "
-            "itself (DHCP, DNS, admin UI). False = clients can't even "
-            "ping their gateway — strongly discouraged unless you really "
-            "know why."
+            "Input policy for essential services : DHCP, DNS local "
+            "(dnsmasq), ICMP. False = clients can't get an IP or "
+            "resolve names through the Slate ; strongly discouraged "
+            "unless you really know why."
+        ),
+    )
+    admin_ui_access: bool = Field(
+        default=False,
+        description=(
+            "Input policy for the admin web UI (LuCI + GL.iNet, "
+            "TCP 80 & 443). Default OFF — only trusted networks "
+            "should be able to manage the Slate."
+        ),
+    )
+    ssh_access: bool = Field(
+        default=False,
+        description=(
+            "Input policy for SSH / dropbear (TCP 22). Default OFF — "
+            "explicit opt-in per network."
+        ),
+    )
+
+    # ── tailnet exposure ────────────────────────────────────────
+    expose_to_tailnet: bool = Field(
+        default=False,
+        description=(
+            "Advertise this network's CIDR as a subnet route on the "
+            "tailnet (Tailscale `--advertise-routes`). False = the "
+            "network stays invisible to remote tailnet peers ; True = "
+            "any tailnet peer can reach hosts in this subnet via the "
+            "Slate's tailscale0 interface (useful for e.g. remote Plex "
+            "access from a phone)."
+        ),
+    )
+
+    # ── per-network Tor routing ─────────────────────────────────
+    tor_route_mode: TorRouteMode = Field(
+        default="off",
+        description=(
+            "Tor integration for this network. "
+            "`off` (default) ignores Tor entirely. "
+            "`transparent` NATs every WAN-bound connection through the "
+            "Slate's Tor daemon — high latency, capped throughput, but "
+            "fully automatic for connected clients (use this for OSINT "
+            "networks). "
+            "`socks_only` does not redirect, only exposes the Tor SOCKS5 "
+            "proxy on the gateway IP — clients opt in per app."
+        ),
+    )
+    tor_dns_over_tor: bool = Field(
+        default=False,
+        description=(
+            "When `tor_route_mode=transparent`, also redirect this "
+            "network's DNS queries to Tor's DNSPort. Avoids DNS leaks to "
+            "the upstream resolver. Ignored otherwise."
+        ),
+    )
+    tor_kill_switch: bool = Field(
+        default=False,
+        description=(
+            "When `tor_route_mode=transparent`, if the Tor daemon is "
+            "down DROP this network's WAN egress (fail-closed). Default "
+            "OFF = fail-open (clients keep regular internet, lose Tor). "
+            "Turn ON when leakage is unacceptable."
         ),
     )
 

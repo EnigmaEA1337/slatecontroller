@@ -7,17 +7,8 @@ vpn:
   type: wireguard
   client: mullvad-randomized
   kill_switch: true
-tor:
-  enabled: true
-  bridge: false
 tailscale:
   enabled: false
-adguard:
-  enabled: true
-  lists:
-  - hagezi-pro-plus
-  - hagezi-tif
-  - oisd-big
 ssids:
 - slug: shadowrun
   enabled: true

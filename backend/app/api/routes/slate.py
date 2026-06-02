@@ -182,6 +182,12 @@ class HardeningCheckModel(BaseModel):
     max_points: int
     status: str
     note: str = ""
+    # True when the controller knows an idempotent fix for this exact
+    # check name. The Sécurité Hardening page surfaces a "Corriger"
+    # button only when this is set ; otherwise the operator gets the
+    # remediation text only (firmware upgrade, manual password reset,
+    # cooling fix, etc. fall here).
+    fix_available: bool = False
 
     @classmethod
     def of(cls, c: HardeningCheck) -> HardeningCheckModel:
@@ -191,6 +197,7 @@ class HardeningCheckModel(BaseModel):
             max_points=c.max_points,
             status=c.status,
             note=c.note,
+            fix_available=_hardening_fix_for(c.name) is not None,
         )
 
 
@@ -210,6 +217,129 @@ class HardeningResponse(BaseModel):
             reachable=r.reachable,
             checks=[HardeningCheckModel.of(c) for c in r.checks],
         )
+
+
+# Map a hardening-check display name → an idempotent fix function. Each
+# fix reuses an existing adoption task (which is already designed to be
+# safe to re-run). Names that aren't in this map are NOT auto-fixable —
+# the UI hides the Fix button for them, surfacing only the remediation
+# text. New fixable checks should add their entry here.
+def _hardening_fix_for(check_name: str):
+    """Return an async fix function or None."""
+    from app.devices.adoption import (
+        _task_disable_upnp,
+        _task_enable_adguard,
+        _task_enable_doh_blocklist,
+        _task_force_https,
+        _task_lock_wan_admin,
+        _task_ssh_key_only,
+    )
+
+    mapping = {
+        "Web UI HTTPS forcé": _task_force_https,
+        "SSH key-only auth": _task_ssh_key_only,
+        "Admin UI restreinte au LAN": _task_lock_wan_admin,
+        "AdGuard service actif": _task_enable_adguard,
+        "UPnP désactivé": _task_disable_upnp,
+        "Blocklist anti-bypass DoH/VPN": _task_enable_doh_blocklist,
+    }
+    return mapping.get(check_name)
+
+
+@router.post("/hardening/fix")
+async def fix_hardening_check(
+    check_name: str,
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    slate: Annotated[SlateClient, Depends(get_slate_client)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Auto-fix a single Hardening check, when the controller knows how."""
+    logger.info(
+        "hardening.fix.entry",
+        username=user.username, check=check_name,
+        ssh_host=ssh.host, slate_url=slate.url if hasattr(slate, 'url') else "?",
+    )
+    try:
+        return await _do_fix_hardening(check_name, request, ssh, slate, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        logger.error(
+            "hardening.fix.exception",
+            username=user.username, check=check_name,
+            error=str(exc), error_type=type(exc).__name__,
+            traceback=traceback.format_exc(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+
+async def _do_fix_hardening(check_name, request, ssh, slate, user) -> dict:
+    fix = _hardening_fix_for(check_name)
+    if fix is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Aucun fix automatique disponible pour « {check_name} » — "
+                "vérifie la note de remediation."
+            ),
+        )
+    # Every fixable task in the adoption pipeline takes ssh as keyword-only.
+    # Some need extra deps :
+    #   - force_https wants the JSON-RPC SlateClient (local-access setter)
+    #   - enable_adguard wants Settings (admin creds for bootstrap)
+    #   - enable_doh_blocklist wants Settings (admin creds for AdGuard REST)
+    # We pass them when the task accepts them. inspect.signature lets us
+    # avoid the brittle "try/except TypeError" pattern.
+    import inspect
+    from app.config import get_settings
+    sig = inspect.signature(fix)
+    # _task_ssh_key_only needs to know which device's keypair to deploy.
+    # Default device — the SSH connection is already bound to it.
+    default_dev = await request.app.state.device_store.get_default()
+    candidate_kwargs: dict = {
+        "ssh": ssh,
+        "slate": slate,
+        "settings": get_settings(),
+        "keypair_store": request.app.state.ssh_keypair_store,
+        "device_slug": default_dev.slug if default_dev else "slate",
+    }
+    kwargs = {k: v for k, v in candidate_kwargs.items() if k in sig.parameters}
+    try:
+        report = await fix(**kwargs)
+    except Exception as exc:
+        # Surface the underlying error so the UI doesn't show a bare 500.
+        # Hardening tasks routinely talk to the Slate over SSH / RPC and
+        # those can fail in many idiosyncratic ways (auth refused, busy,
+        # firmware quirk) — bubbling them up as 502 with the actual
+        # message gives the operator a real lead.
+        import traceback
+        logger.error(
+            "hardening.fix.exception",
+            username=user.username, check=check_name,
+            error=str(exc), error_type=type(exc).__name__,
+            traceback=traceback.format_exc(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+    logger.info(
+        "hardening.fix",
+        username=user.username, check=check_name,
+        status=report.status, message=report.message,
+    )
+    return {
+        "ok": report.status in {"ok", "skipped"},
+        "check_name": check_name,
+        "status": report.status,
+        "message": report.message,
+        "evidence": getattr(report, "evidence", "") or "",
+    }
 
 
 @router.get("/hardening", response_model=HardeningResponse)

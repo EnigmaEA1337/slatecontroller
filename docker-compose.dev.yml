@@ -1,6 +1,75 @@
-# Dev compose - hot reload, pas de Traefik, ports exposés en local
+# Dev compose — hot reload, no Traefik.
+#
+# Architecture :
+#   - `slate-tailscale` : sidecar that owns the controller's tailnet
+#     identity. Its tailscaled runs serve.json declaratively to expose
+#     `/` → frontend, `/api` → backend on :443 with a Let's Encrypt
+#     cert for ${TS_HOSTNAME}.${tailnet}.ts.net.
+#   - `backend` + `frontend` : share the sidecar's network namespace
+#     (`network_mode: service:slate-tailscale`). They listen on
+#     127.0.0.1:8000 and 0.0.0.0:5173 from INSIDE that namespace, which
+#     means :
+#       (a) tailscaled in the sidecar reaches them via localhost — the
+#           Serve proxy works.
+#       (b) ports published on the sidecar service expose those same
+#           ports on the host's LAN interfaces — LAN access without
+#           Tailscale enabled.
+#     One container set, two access paths.
 
 services:
+  slate-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: slate-tailscale-dev
+    hostname: ${TS_HOSTNAME:-slate-controller-dev}
+    environment:
+      # First-boot auth. Get one from https://login.tailscale.com/admin/settings/keys
+      # → "Generate auth key". Tag the key (e.g. tag:controller), reusable=no,
+      # ephemeral=no so node persists across restarts. After first boot,
+      # state is in the volume below — you can blank TS_AUTHKEY out then.
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-slate-controller-dev}
+      # Declarative Serve config — bind-mounted from repo, no CLI needed.
+      - TS_SERVE_CONFIG=/config/serve.json
+      # Accept routes advertised by other tailnet peers (Slate, UniFi
+      # subnet routers, etc.). Required so the controller can call back
+      # to LAN-only resources when relaying through the tailnet.
+      - TS_EXTRA_ARGS=--accept-routes
+      # Persistent state location — first boot writes the node key
+      # here, subsequent boots reuse it.
+      - TS_STATE_DIR=/var/lib/tailscale
+      # Userspace networking off (we have the tun device available).
+      # If your host can't expose /dev/net/tun (e.g. some NAS BSD-derived
+      # builds), flip this to true and add TS_OUTBOUND_HTTP_PROXY_LISTEN.
+      - TS_USERSPACE=false
+      # Force the actual socket (not a symlink to /tmp/) into the named
+      # volume so the backend container sees a real file when it follows
+      # /var/run/tailscale/tailscaled.sock. Without this, the official
+      # image creates the socket at /tmp/tailscaled.sock and only
+      # symlinks /var/run/tailscale/ — the symlink resolves nowhere
+      # in the backend's filesystem.
+      - TS_SOCKET=/var/run/tailscale/tailscaled.sock
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+      # Socket lives in a named volume shared with the backend (so the
+      # backend's CLI sees it at the default path /var/run/tailscale/).
+      - tailscale-socket:/var/run/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      # Tailscale Serve terminates HTTPS here (cert managed by Tailscale).
+      - "443:443"
+      # LAN-direct HTTP for devices not on the tailnet. Same Vite/
+      # FastAPI processes, just bypassing Tailscale Serve.
+      - "5173:5173"
+      - "8000:8000"
+    networks:
+      - slate-net
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -8,8 +77,11 @@ services:
       target: dev
     container_name: slate-backend-dev
     env_file: .env
-    ports:
-      - "8000:8000"
+    # Share slate-tailscale's netns. NOT compatible with `ports:` here —
+    # all port publishing must live on the sidecar service above.
+    network_mode: "service:slate-tailscale"
+    depends_on:
+      - slate-tailscale
     volumes:
       - ./backend/app:/app/app
       - ./backend/profiles:/app/profiles
@@ -18,27 +90,33 @@ services:
       - ./backend/alembic.ini:/app/alembic.ini
       - ./data/db:/app/data/db
       - ./data/logs:/app/data/logs
+      # Sidecar's tailscaled socket — used by /api/settings/controller-https
+      # to read Serve status / hostname / cert info.
+      - tailscale-socket:/var/run/tailscale
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    networks:
-      - slate-net
 
   frontend:
     image: node:20-alpine
     container_name: slate-frontend-dev
+    # Same netns as the sidecar + backend. Vite's proxy can now reach
+    # the backend at localhost:8000 instead of a docker service name.
+    network_mode: "service:slate-tailscale"
+    depends_on:
+      - slate-tailscale
     working_dir: /app
-    ports:
-      - "5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      # No VITE_API_URL → baseURL is relative → Vite proxies /api to the
-      # backend container. Works from localhost, LAN, Tailscale, etc.
-      - VITE_BACKEND_URL=http://backend:8000
+      # Backend reachable on localhost since we share the sidecar's netns.
+      - VITE_BACKEND_URL=http://localhost:8000
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    networks:
-      - slate-net
 
 networks:
   slate-net:
     driver: bridge
+
+volumes:
+  # Holds the sidecar's tailscaled.sock so the backend can read it.
+  # Named volume (not bind mount) → portable across hosts.
+  tailscale-socket:

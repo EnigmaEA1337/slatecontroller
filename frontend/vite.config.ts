@@ -13,6 +13,15 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // Vite 5.4+ ships a Host-header allowlist (CVE-2024-23331 mitigation
+    // against DNS rebinding when running the dev server). With the
+    // Tailscale sidecar architecture we get hit by requests bearing
+    // `<host>.<tailnet>.ts.net` as the Host header, which Vite rejects
+    // with 403. Allow the `.ts.net` parent so any tailnet hostname works
+    // (including future renames of TS_HOSTNAME). LAN access via raw IP
+    // doesn't need an entry — it's covered by the default `localhost`
+    // and the IP-literal allowance Vite ships with.
+    allowedHosts: [".ts.net"],
     // Same-origin API proxy. Lets the browser hit `/api/...` on whatever
     // host serves the UI (localhost / LAN / Tailscale 100.x.x.x / Traefik
     // domain) without CORS preflights or runtime baseURL detection.

@@ -18,9 +18,15 @@ from __future__ import annotations
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
-from app.api.deps import get_profile_store, get_slate_ssh, get_wifi_store
+from app.api.deps import (
+    get_network_store,
+    get_profile_store,
+    get_slate_ssh,
+    get_wifi_store,
+)
+from app.networks.store import NetworkStore
 from app.auth import User, get_current_user
 from app.config import get_settings
 from app.profiles.store import ProfileStore
@@ -31,7 +37,9 @@ from app.profiles.wallpapers import WallpaperStore
 from app.slate_agent.deploy import deploy_agent, get_agent_version
 from app.settings.button_cycle import ButtonCycleStore
 from app.slate_agent.sync import (
+    REBOOT_SENTINEL,
     apply_remote_profile,
+    finalize_after_reboot,
     get_active_remote_profile,
     list_remote_profiles,
     refresh_button_cycle_active,
@@ -136,6 +144,7 @@ async def agent_sync(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     store: Annotated[ProfileStore, Depends(get_profile_store)],
     wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
+    networks: Annotated[NetworkStore, Depends(get_network_store)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """Push profile JSONs + pre-rendered loading screens + wallpapers to
@@ -158,14 +167,19 @@ async def agent_sync(
     items = await store.list_all()
     profiles = [stored.profile for stored in items]
     wifi_catalog = await wifi.list_all()
-    # Wallpaper store is built per-call rather than depended-on globally
-    # because session factory lifetime is tied to request scope here.
-    wallpaper_store = WallpaperStore(
-        make_session_factory(request.app.state.db_engine),
-    )
+    network_catalog = await networks.list_all()
+    # Wallpaper + tailnet-admin stores are built per-call rather than
+    # depended-on globally because session factory lifetime is tied to
+    # request scope here.
+    sf = make_session_factory(request.app.state.db_engine)
+    wallpaper_store = WallpaperStore(sf)
+    from app.settings.tailnet_admin import TailnetAdminStore
+    tailnet_admin_store = TailnetAdminStore(sf)
     json_report = await sync_profiles(
         ssh, profiles,
         wifi_catalog=wifi_catalog,
+        network_catalog=network_catalog,
+        tailnet_admin_store=tailnet_admin_store,
         wallpaper_store=wallpaper_store,
     )
     screens_report = await sync_loading_screens(ssh, profiles)
@@ -211,6 +225,7 @@ async def agent_sync(
 async def agent_apply(
     name: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
     store: Annotated[ProfileStore, Depends(get_profile_store)],
     user: Annotated[User, Depends(get_current_user)],
@@ -235,14 +250,21 @@ async def agent_apply(
         ) from exc
 
     ok, output = await apply_remote_profile(ssh, name)
+    reboot_pending = REBOOT_SENTINEL in output
     logger.info(
         "agent.apply", username=user.username, name=name, ok=ok,
+        reboot_pending=reboot_pending,
     )
-    # If the new active is part of the configured cycle, regenerate
-    # menu frames so the on-Slate menu shows the ACTIVE badge on the
-    # right row. Best-effort — a sync failure here doesn't fail the
-    # apply.
-    if ok:
+    # Regenerate the on-Slate menu frames so the ACTIVE badge lands on the
+    # right row. Best-effort — failures never fail the apply. When the agent
+    # scheduled a reboot (radio changes), the box is going down: defer the
+    # refresh to a background task that waits for it to come back, rather
+    # than racing the reboot with an inline SSH call.
+    if ok and reboot_pending:
+        background_tasks.add_task(
+            finalize_after_reboot, ssh, name, request.app.state.db_engine,
+        )
+    elif ok:
         try:
             cycle_store = ButtonCycleStore(
                 make_session_factory(request.app.state.db_engine),
@@ -254,4 +276,7 @@ async def agent_apply(
                 "agent.apply.cycle_refresh_failed",
                 name=name, error=str(exc),
             )
-    return {"ok": ok, "name": name, "output": output}
+    return {
+        "ok": ok, "name": name, "output": output,
+        "reboot_pending": reboot_pending,
+    }

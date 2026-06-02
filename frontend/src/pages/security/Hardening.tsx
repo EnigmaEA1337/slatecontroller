@@ -1,5 +1,5 @@
 import { ShieldAlert } from "lucide-react";
-import DeviceHardeningGauge from "@/components/DeviceHardeningGauge";
+import HardeningAuditPanel from "@/components/HardeningAuditPanel";
 
 export default function SecurityHardening() {
   return (
@@ -13,7 +13,7 @@ export default function SecurityHardening() {
           Niveau de durcissement du Slate — checks OpenWrt/GL.iNet contre le baseline pondéré.
         </p>
       </div>
-      <DeviceHardeningGauge />
+      <HardeningAuditPanel />
     </div>
   );
 }

@@ -5,14 +5,8 @@ color: '#f59e0b'
 vpn:
   type: none
   kill_switch: false
-tor:
-  enabled: false
 tailscale:
   enabled: true
-adguard:
-  enabled: true
-  lists:
-  - oisd-big
 ssids:
 - slug: neuralcore
   enabled: true

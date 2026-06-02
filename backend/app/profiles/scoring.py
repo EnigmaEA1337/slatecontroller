@@ -58,41 +58,19 @@ def _score_anonymization(profile: Profile) -> tuple[int, list[ScoreItem]]:
         )
     )
 
-    tor_on = profile.tor.enabled
-    items.append(
-        ScoreItem(
-            name="Tor activé",
-            points=35 if tor_on else 0,
-            max_points=35,
-            note="chaîne de 3 relais Tor" if tor_on else "",
-        )
-    )
-    items.append(
-        ScoreItem(
-            name="Tor bridges",
-            points=5 if (tor_on and profile.tor.bridge) else 0,
-            max_points=5,
-            note="résistance au DPI / pays bloquant Tor" if profile.tor.bridge else "",
-        )
-    )
+    # Tor scoring was per-profile (tor.enabled / tor.bridge) before — both
+    # fields are gone from the model now. The daemon switch + bridges + exit
+    # country live in TorSettings (global), and routing in NetworkRow.tor_*.
+    # Scoring Tor here would require pulling both stores at score time, which
+    # this pure-function scorer can't do. The Tor signal moved to the
+    # /networks/tor live status panel (real circuits, exit IP, country).
 
     # DNS scoring removed from per-profile schema — protection is per-network
     # now and scored implicitly via the DnsProtectionManager presence.
 
-    has_anti_tracking = profile.adguard.enabled and any(
-        "tif" in s or "tracking" in s or "pro" in s.lower()
-        for s in profile.adguard.lists
-    )
-    items.append(
-        ScoreItem(
-            name="AdGuard anti-tracking",
-            points=5 if has_anti_tracking else 0,
-            max_points=5,
-            note="liste hagezi-tif / pro-plus / anti-tracking active"
-            if has_anti_tracking
-            else "",
-        )
-    )
+    # AdGuard anti-tracking is no longer profile-scored — DNS protection
+    # is per-network now and its anonymization signal is captured by the
+    # security scoring section ("DNS protections configured") below.
 
     items.append(
         ScoreItem(
@@ -230,17 +208,12 @@ def _score_security(
         )
     )
 
-    # DNS forcing score removed — concept moved to per-network DNS protection.
-    items.append(
-        ScoreItem(
-            name="AdGuard activé",
-            points=10 if profile.adguard.enabled else 0,
-            max_points=10,
-            note="bloque malware + tracking au niveau DNS"
-            if profile.adguard.enabled
-            else "",
-        )
-    )
+    # AdGuard/DNS scoring moved to per-network DNS protection. The profile
+    # no longer carries a global flag — every network with a configured
+    # DNS protection contributes to the security posture. The signal is
+    # surfaced on the Networks page (DNS protection widget) rather than
+    # in the profile score, since it's now orthogonal to which profile
+    # is active.
     items.append(
         ScoreItem(
             name="GeoIP whitelist",

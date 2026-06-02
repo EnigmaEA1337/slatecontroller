@@ -1,12 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
+  CheckCircle2,
   ChevronRight,
   ScanLine,
   ShieldAlert,
   ShieldCheck,
   Siren,
+  Wifi,
 } from "lucide-react";
+import { api } from "@/api/client";
 import { getRiskScore } from "@/api/security";
 import { getSlateHardening } from "@/api/slate";
 import { auditTailscale, getTailscaleStatus } from "@/api/tailscale";
@@ -46,6 +49,21 @@ export default function SecurityHub() {
     refetchOnWindowFocus: false,
     staleTime: 5 * 60 * 1000,
   });
+  const torAuditQ = useQuery({
+    queryKey: ["security", "tor-audit"],
+    queryFn: async () => {
+      const { data } = await api.get<{
+        score: number;
+        tor_installed: boolean;
+        tor_running: boolean;
+        transparent_networks: string[];
+        findings: { label: string; status: string; severity: string }[];
+      }>("/api/tor/audit");
+      return data;
+    },
+    refetchOnWindowFocus: false,
+    staleTime: 5 * 60 * 1000,
+  });
 
   const reliability = useSecurityReliability();
   const shieldStyle = reliabilityShieldStyle(reliability.status);
@@ -55,6 +73,7 @@ export default function SecurityHub() {
   const hardeningPct = hardeningQ.data?.percent;
   const vulnPct = riskQ.data ? Math.max(0, 100 - riskQ.data.score) : undefined;
   const tailscalePct = tailscaleAuditQ.data?.score;
+  const torPct = torAuditQ.data?.score;
 
   return (
     <div className="space-y-6 p-6">
@@ -68,64 +87,61 @@ export default function SecurityHub() {
         </p>
       </div>
 
-      {/* Aggregated reliability shield */}
+      {/* Reliability shield + priority actions — explicit 2-column
+          grid (not flex-wrap) so both column headers ("FIABILITÉ SLATE"
+          and "ACTIONS PRIORITAIRES") sit at the same Y by construction.
+          Grid items naturally top-align in their cell. */}
       <section
         className={cn(
-          "cyber-panel flex flex-wrap items-center gap-6 p-6",
+          "cyber-panel grid grid-cols-1 gap-6 p-6 md:grid-cols-[auto_1fr]",
           shieldStyle.border,
           shieldStyle.bg,
         )}
       >
-        <ShieldIcon className={cn("h-20 w-20", shieldStyle.text)} />
-        <div className="flex flex-col">
-          <div className="cyber-label text-[10px]">Fiabilité Slate</div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <span
-              className={cn(
-                "cyber-display text-6xl leading-none",
-                shieldStyle.text,
-              )}
-            >
-              {reliability.percent !== null ? `${reliability.percent}%` : "—"}
-            </span>
-            <span
-              className={cn(
-                "border px-2 py-[1px] text-[10px] font-bold uppercase tracking-[0.18em]",
-                shieldStyle.border,
-                shieldStyle.text,
-              )}
-            >
-              {shieldStyle.label}
-            </span>
-          </div>
-          <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-            moyenne pondérée des indicateurs disponibles
-          </div>
-        </div>
-        <div className="ml-auto grid min-w-[260px] grid-cols-1 gap-1.5">
-          {reliability.components.map((c) => (
-            <div
-              key={c.id}
-              className="flex items-center justify-between gap-3 border border-[color:var(--color-cyber-border)] px-3 py-1.5 text-[11px]"
-            >
-              <span className="text-[color:var(--color-cyber-fg)]">{c.label}</span>
+        {/* LEFT cell : shield + score column (its own internal flex). */}
+        <div className="flex items-start gap-6">
+          <ShieldIcon className={cn("h-20 w-20 shrink-0", shieldStyle.text)} />
+          <div className="flex flex-col">
+            <div className="cyber-label text-[10px]">Fiabilité Slate</div>
+            <div className="mt-1 flex items-baseline gap-2">
               <span
                 className={cn(
-                  "font-mono",
-                  c.available
-                    ? postureColor(c.percent)
-                    : "text-[color:var(--color-cyber-muted)]",
+                  "cyber-display text-6xl leading-none",
+                  shieldStyle.text,
                 )}
               >
-                {c.available ? `${c.percent}%` : "—"}
+                {reliability.percent !== null ? `${reliability.percent}%` : "—"}
+              </span>
+              <span
+                className={cn(
+                  "border px-2 py-[1px] text-[10px] font-bold uppercase tracking-[0.18em]",
+                  shieldStyle.border,
+                  shieldStyle.text,
+                )}
+              >
+                {shieldStyle.label}
               </span>
             </div>
-          ))}
+            <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
+              moyenne pondérée des indicateurs disponibles
+            </div>
+          </div>
         </div>
+        {/* Actions prioritaires — top N findings high/medium across the
+            3 actionable audits (Tailscale + Tor + Hardening). Each row
+            jumps to the right audit page where the operator can hit
+            "Corriger" on that specific finding. Vulnerabilities is
+            intentionally left out : its findings are CVE rows that
+            aren't auto-fixable from here. */}
+        <PriorityActions
+          tailscale={tailscaleAuditQ.data}
+          tor={torAuditQ.data}
+          hardening={hardeningQ.data}
+        />
       </section>
 
       {/* KPI cards */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         {/* Hardening */}
         <KpiCard
           to="/security/hardening"
@@ -191,14 +207,12 @@ export default function SecurityHub() {
         >
           {tailscaleAuditQ.data && tailscalePct !== undefined && (
             <>
-              <div className="flex items-baseline gap-3">
-                <BigKpi
-                  value={`${tailscalePct}%`}
-                  className={postureColor(tailscalePct)}
-                />
-                <span className="text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-                  grade {tailscaleAuditQ.data.grade}
-                </span>
+              <BigKpi
+                value={`${tailscalePct}%`}
+                className={postureColor(tailscalePct)}
+              />
+              <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
+                grade {tailscaleAuditQ.data.grade}
               </div>
               <div className="mt-2 text-[10px] text-[color:var(--color-cyber-muted)]">
                 {tailscaleAuditQ.data.pass_count} pass ·{" "}
@@ -210,6 +224,53 @@ export default function SecurityHub() {
                   {tailscaleAuditQ.data.fail_count} fail
                 </span>
               </div>
+            </>
+          )}
+        </KpiCard>
+
+        {/* Tor audit — same posture KPI shape as the other 3 cards. */}
+        <KpiCard
+          to="/security/tor-audit"
+          icon={<Wifi className="h-5 w-5" />}
+          title="Tor audit"
+          subtitle="passerelle Tor (ports, ip6tables, kill-switch)"
+          loading={torAuditQ.isLoading}
+          error={torAuditQ.isError}
+          empty={!torAuditQ.data}
+          unavailable={
+            torAuditQ.data && !torAuditQ.data.tor_installed
+              ? "tor non installé"
+              : torAuditQ.data && !torAuditQ.data.tor_running
+              ? "daemon arrêté"
+              : undefined
+          }
+        >
+          {torAuditQ.data && torPct !== undefined && (
+            <>
+              <div className="flex items-baseline gap-3">
+                <BigKpi
+                  value={`${torPct}%`}
+                  className={postureColor(torPct)}
+                />
+              </div>
+              <div className="mt-2 text-[10px] text-[color:var(--color-cyber-muted)]">
+                {torAuditQ.data.findings.filter((f) => f.status === "pass").length} pass ·{" "}
+                {(() => {
+                  const warn = torAuditQ.data.findings.filter((f) => f.status === "warn").length;
+                  const fail = torAuditQ.data.findings.filter((f) => f.status === "fail").length;
+                  return (
+                    <>
+                      <span className={warn ? "text-yellow-200" : ""}>{warn} warn</span>{" · "}
+                      <span className={fail ? "text-red-300" : ""}>{fail} fail</span>
+                    </>
+                  );
+                })()}
+              </div>
+              {torAuditQ.data.transparent_networks.length > 0 && (
+                <div className="mt-1 text-[10px] text-[color:var(--color-cyber-muted)]">
+                  {torAuditQ.data.transparent_networks.length} réseau(x) transparent(s)
+                </div>
+              )}
             </>
           )}
         </KpiCard>
@@ -225,6 +286,126 @@ function BigKpi({
     <span className={cn("cyber-display text-4xl leading-none", className)}>
       {value}
     </span>
+  );
+}
+
+// ── Priority actions panel ───────────────────────────────────────────
+
+type Priority = {
+  audit: "tailscale" | "tor" | "hardening";
+  label: string;
+  severity: "critical" | "high" | "medium";
+  to: string;
+};
+
+const SEV_BADGE: Record<Priority["severity"], string> = {
+  critical: "border-red-500/60 bg-red-500/10 text-red-300",
+  high:     "border-orange-500/60 bg-orange-500/10 text-orange-300",
+  medium:   "border-yellow-500/60 bg-yellow-500/10 text-yellow-200",
+};
+
+const SEV_ORDER: Record<Priority["severity"], number> = {
+  critical: 0, high: 1, medium: 2,
+};
+
+const AUDIT_LABEL: Record<Priority["audit"], string> = {
+  tailscale: "tailscale",
+  tor: "tor",
+  hardening: "hardening",
+};
+
+function buildPriorities(
+  tailscale: { findings?: { label: string; status: string; severity: string }[] } | undefined,
+  tor: { findings?: { label: string; status: string; severity: string }[] } | undefined,
+  hardening: { checks?: { name: string; status: string; points: number; max_points: number }[] } | undefined,
+): Priority[] {
+  const out: Priority[] = [];
+  const wantSev = (s: string): s is Priority["severity"] =>
+    s === "critical" || s === "high" || s === "medium";
+  const wantStatus = (s: string) => s === "fail" || s === "warn";
+
+  for (const f of tailscale?.findings ?? []) {
+    if (wantStatus(f.status) && wantSev(f.severity)) {
+      out.push({ audit: "tailscale", label: f.label, severity: f.severity, to: "/security/tailscale" });
+    }
+  }
+  for (const f of tor?.findings ?? []) {
+    if (wantStatus(f.status) && wantSev(f.severity)) {
+      out.push({ audit: "tor", label: f.label, severity: f.severity, to: "/security/tor-audit" });
+    }
+  }
+  for (const c of hardening?.checks ?? []) {
+    // Mirror HardeningAuditPanel's status / severity derivation.
+    const status =
+      c.status === "error" ? "fail" :
+      c.status === "ready"
+        ? (c.points >= c.max_points ? "pass" : c.points <= 0 ? "fail" : "warn")
+        : "info";
+    if (!wantStatus(status)) continue;
+    const missed = c.max_points - Math.max(0, c.points);
+    const severity: "high" | "medium" | "low" =
+      c.status === "error" ? "high"
+      : missed >= 10 ? "high"
+      : missed >= 5  ? "medium"
+      : "low";
+    if (severity === "low") continue;
+    out.push({ audit: "hardening", label: c.name, severity, to: "/security/hardening" });
+  }
+  out.sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
+  return out.slice(0, 5);
+}
+
+function PriorityActions({
+  tailscale, tor, hardening,
+}: {
+  tailscale: Parameters<typeof buildPriorities>[0];
+  tor: Parameters<typeof buildPriorities>[1];
+  hardening: Parameters<typeof buildPriorities>[2];
+}) {
+  const items = buildPriorities(tailscale, tor, hardening);
+
+  return (
+    <div className="ml-auto flex w-full min-w-[300px] max-w-[460px] flex-col border-l border-[color:var(--color-cyber-border)] pl-6">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="cyber-label">actions prioritaires</span>
+        <span className="text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-dim)]">
+          {items.length} / top 5
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <div className="border border-emerald-500/40 bg-emerald-500/5 p-3 text-[11px] text-emerald-300">
+          <CheckCircle2 className="mr-1.5 inline h-3 w-3" />
+          Aucune action prioritaire — tous les indicateurs en pass / info.
+        </div>
+      ) : (
+        <ul className="space-y-1">
+          {items.map((p, i) => (
+            <li key={i}>
+              <Link
+                to={p.to}
+                className="group flex items-center gap-2 border border-[color:var(--color-cyber-border)] px-2 py-1.5 text-[11px] transition hover:border-[color:var(--color-cyber-accent)] hover:bg-[color:var(--color-cyber-surface-elev)]"
+              >
+                <span
+                  className={cn(
+                    "border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-[0.18em]",
+                    SEV_BADGE[p.severity],
+                  )}
+                >
+                  {p.severity.toUpperCase()}
+                </span>
+                <span className="flex-1 truncate text-[color:var(--color-cyber-fg)]">
+                  {p.label}
+                </span>
+                <span className="hidden text-[9px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)] sm:inline">
+                  {AUDIT_LABEL[p.audit]}
+                </span>
+                <ChevronRight className="h-3 w-3 shrink-0 text-[color:var(--color-cyber-muted)] transition-transform group-hover:translate-x-0.5 group-hover:text-[color:var(--color-cyber-accent)]" />
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -245,17 +426,21 @@ function KpiCard({
   return (
     <Link
       to={to}
-      className="cyber-panel group flex flex-col gap-3 p-5 transition-all hover:border-[color:var(--color-cyber-accent)]"
+      className="cyber-panel group flex h-full flex-col gap-3 p-5 transition-all hover:border-[color:var(--color-cyber-accent)]"
     >
-      <div className="flex items-center gap-2 text-[color:var(--color-cyber-accent)]">
+      {/* Title row : single-line, truncated if long, so the 4 cards line
+          up at the same vertical position regardless of label width. */}
+      <div className="flex min-h-[28px] items-center gap-2 text-[color:var(--color-cyber-accent)]">
         {icon}
-        <h3 className="cyber-display cyber-glow text-base">{title}</h3>
-        <ChevronRight className="ml-auto h-4 w-4 text-[color:var(--color-cyber-muted)] transition-transform group-hover:translate-x-1 group-hover:text-[color:var(--color-cyber-accent)]" />
+        <h3 className="cyber-display cyber-glow truncate text-base">{title}</h3>
+        <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-[color:var(--color-cyber-muted)] transition-transform group-hover:translate-x-1 group-hover:text-[color:var(--color-cyber-accent)]" />
       </div>
-      <div className="text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
+      {/* Subtitle : fixed two-line height so the percentage row below
+          aligns across cards even when one card's subtitle is short. */}
+      <div className="line-clamp-2 min-h-[28px] text-[10px] uppercase tracking-[0.18em] leading-[14px] text-[color:var(--color-cyber-muted)]">
         {subtitle}
       </div>
-      <div className="min-h-[88px]">
+      <div className="flex min-h-[100px] flex-col justify-end">
         {unavailable ? (
           <div className="text-[11px] text-[color:var(--color-cyber-muted)]">
             ⊘ {unavailable}

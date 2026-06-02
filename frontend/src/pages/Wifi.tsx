@@ -5,7 +5,6 @@ import {
   EyeOff,
   KeyRound,
   Lock,
-  Network as NetworkIcon,
   Pencil,
   Plus,
   QrCode,
@@ -20,23 +19,24 @@ import {
   listWifiSsids,
   updateWifiSsid,
 } from "@/api/wifi";
-import { listNetworks } from "@/api/networks";
 import PasswordGenerator from "@/components/PasswordGenerator";
 import SsidSuggestionsPicker, {
   UniverseCombosPanel,
 } from "@/components/SsidSuggestionsPicker";
+import WifiPasswordModal from "@/components/WifiPasswordModal";
 import WifiQRModal from "@/components/WifiQRModal";
-import type {
-  WifiBand,
-  WifiSecurity,
-  WifiSsidPublic,
-  WifiSsidWrite,
+import WifiSlateStatePanel from "@/components/WifiSlateStatePanel";
+import {
+  labelForBand,
+  type WifiBand,
+  type WifiSecurity,
+  type WifiSsidPublic,
+  type WifiSsidWrite,
 } from "@/types/wifi";
-import type { NetworkPublic } from "@/types/network";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
-const BANDS: WifiBand[] = ["2GHz", "5GHz", "6GHz", "MLO"];
+const ALL_BANDS: WifiBand[] = ["2", "5", "6"];
 const SECURITIES: WifiSecurity[] = [
   "WPA3-SAE",
   "WPA3-PSK",
@@ -51,24 +51,28 @@ const SECURITIES: WifiSecurity[] = [
 interface FormProps {
   initialSlug?: string;
   initial?: WifiSsidPublic;
-  networks: NetworkPublic[];
   onClose: () => void;
 }
 
-function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
+function WifiForm({ initialSlug, initial, onClose }: FormProps) {
   const isEdit = Boolean(initial);
   const [slug, setSlug] = useState(initialSlug ?? "");
   const [ssidName, setSsidName] = useState(initial?.ssid_name ?? "");
-  const [band, setBand] = useState<WifiBand>(initial?.band ?? "5GHz");
+  // Multi-band : default to 5 GHz only for a fresh SSID. The user
+  // ticks 2.4 to add range / legacy compat, or 6 for Wi-Fi 6E/7 clients.
+  const [bands, setBands] = useState<Set<WifiBand>>(
+    new Set<WifiBand>(initial?.bands ?? ["5"]),
+  );
+  // MLO (Wi-Fi 7 Multi-Link) — flag persists but the handler currently
+  // refuses to deploy it, so we disable the checkbox in the form below.
+  const [mlo, setMlo] = useState(initial?.mlo ?? false);
   const [security, setSecurity] = useState<WifiSecurity>(
     initial?.security ?? "WPA3-SAE",
-  );
-  const [networkSlug, setNetworkSlug] = useState<string>(
-    initial?.network_slug ?? networks[0]?.slug ?? "lan",
   );
   const [clientIsolation, setClientIsolation] = useState(
     initial?.client_isolation ?? false,
   );
+  const [hidden, setHidden] = useState(initial?.hidden ?? false);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
@@ -81,11 +85,12 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
       const isOpen = security === "open";
       const body: WifiSsidWrite = {
         ssid_name: ssidName,
-        band,
+        bands: ALL_BANDS.filter((b) => bands.has(b)),
+        mlo,
         security,
         password: isOpen ? "" : changePassword ? password : null,
-        network_slug: networkSlug,
         client_isolation: clientIsolation,
+        hidden,
         notes,
       };
       return isEdit
@@ -152,20 +157,62 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
             onPick={(name) => setSsidName(name)}
           />
         </label>
-        <label className="block">
-          <span className="cyber-label mb-1.5 block">band</span>
-          <select
-            value={band}
-            onChange={(e) => setBand(e.target.value as WifiBand)}
-            className="cyber-input w-full py-2 px-3 text-sm font-mono"
+        <div className="block">
+          <span className="cyber-label mb-1.5 block">bandes</span>
+          <div className="flex flex-wrap gap-2">
+            {ALL_BANDS.map((b) => {
+              const on = bands.has(b);
+              return (
+                <label
+                  key={b}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-1.5 border px-2.5 py-1.5 text-xs font-mono",
+                    on
+                      ? "border-[color:var(--color-cyber-accent)] bg-[color:var(--color-cyber-accent)]/10 text-[color:var(--color-cyber-fg)]"
+                      : "border-[color:var(--color-cyber-border)] text-[color:var(--color-cyber-muted)]",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={(e) => {
+                      const next = new Set(bands);
+                      if (e.target.checked) next.add(b);
+                      else next.delete(b);
+                      // Refuse to leave bands empty — backend rejects it.
+                      if (next.size === 0) return;
+                      setBands(next);
+                    }}
+                    className="h-3 w-3 accent-[color:var(--color-cyber-accent)]"
+                  />
+                  {labelForBand(b)}
+                </label>
+              );
+            })}
+          </div>
+          <label
+            className={cn(
+              "mt-2 flex items-start gap-2 text-[11px]",
+              "opacity-60",
+            )}
+            title="MLO — Wi-Fi 7 Multi-Link Operation. Handler agent pas encore prêt."
           >
-            {BANDS.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
+            <input
+              type="checkbox"
+              checked={mlo}
+              disabled
+              onChange={(e) => setMlo(e.target.checked)}
+              className="mt-0.5 h-3 w-3 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              MLO (Wi-Fi 7 Multi-Link)
+              <span className="ml-2 cyber-chip">coming soon</span>
+              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+                ▸ regroupe les bandes sous un seul MLD pour les clients Wi-Fi 7
+              </span>
+            </span>
+          </label>
+        </div>
         <label className="block">
           <span className="cyber-label mb-1.5 block">security</span>
           <select
@@ -180,24 +227,16 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
             ))}
           </select>
         </label>
-        <label className="col-span-2 block">
-          <span className="cyber-label mb-1.5 block">network (subnet)</span>
-          <select
-            value={networkSlug}
-            onChange={(e) => setNetworkSlug(e.target.value)}
-            className="cyber-input w-full py-2 px-3 text-sm font-mono"
-          >
-            {networks.map((n) => (
-              <option key={n.slug} value={n.slug}>
-                {n.slug} · {n.subnet_cidr}
-                {n.reachable_networks.length === 0 && n.reach_internet
-                  ? " · isolé L3"
-                  : ""}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
+
+      {/* No network selector here : the SSID → network (bridge) binding
+          is a per-profile decision now (Profiles page). The radio
+          catalog only defines the L2 access (name/bands/security/PSK). */}
+      <p className="border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-bg-2)]/40 px-3 py-2 text-[10px] text-[color:var(--color-cyber-dim)]">
+        ▸ Le réseau (bridge/subnet) auquel ce SSID se rattache se choisit
+        dans chaque <span className="cyber-glow-soft">profil</span> — un SSID
+        peut router vers des réseaux différents selon le contexte.
+      </p>
 
       {security !== "open" && (
         <div>
@@ -260,6 +299,22 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
         client isolation (clients du SSID ne se voient pas entre eux)
       </label>
 
+      <label className="flex items-start gap-2 text-xs uppercase tracking-[0.15em] text-[color:var(--color-cyber-fg)]">
+        <input
+          type="checkbox"
+          checked={hidden}
+          onChange={(e) => setHidden(e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+        />
+        <span>
+          SSID caché — omis des beacons
+          <span className="ml-2 block normal-case tracking-normal text-[10px] text-[color:var(--color-cyber-dim)]">
+            ▸ ne masque PAS le réseau : les clients leakent toujours le nom
+            via probe requests, BSSID visible. Cosmétique uniquement.
+          </span>
+        </span>
+      </label>
+
       <label className="block">
         <span className="cyber-label mb-1.5 block">notes</span>
         <input
@@ -297,87 +352,107 @@ function WifiForm({ initialSlug, initial, networks, onClose }: FormProps) {
   );
 }
 
-// ---------------------------- Card ---------------------------- #
+// ---------------------------- Table row ---------------------------- #
 
-function WifiCard({
+// One SSID = one table row. Network/bridge mapping is intentionally NOT
+// shown here — that binding is a per-profile decision (Profiles page),
+// not a property of the radio catalog entry.
+function WifiRow({
   ssid,
-  networks,
   onEdit,
   onDeleted,
   onShowQR,
+  onShowPassword,
 }: {
   ssid: WifiSsidPublic;
-  networks: NetworkPublic[];
   onEdit: () => void;
   onDeleted: () => void;
   onShowQR: () => void;
+  onShowPassword: () => void;
 }) {
-  const network = networks.find((n) => n.slug === ssid.network_slug);
   const del = useMutation({
     mutationFn: () => deleteWifiSsid(ssid.slug),
     onSuccess: onDeleted,
   });
 
   return (
-    <article className="cyber-card p-5">
-      <div className="flex items-start gap-3">
-        <div className="cyber-glow flex h-10 w-10 shrink-0 items-center justify-center border border-[color:var(--color-cyber-accent)] bg-[color:var(--color-cyber-accent)]/10">
-          <WifiIcon className="h-5 w-5" />
+    <tr className="border-b border-[color:var(--color-cyber-border)] hover:bg-[color:var(--color-cyber-bg-2)]/40">
+      {/* SSID + slug */}
+      <td className="px-3 py-2.5 align-top">
+        <div className="cyber-glow-soft font-mono text-sm">{ssid.ssid_name}</div>
+        <div className="text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-dim)]">
+          {ssid.slug}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-2">
-            <h3 className="cyber-display cyber-glow text-base">{ssid.slug}</h3>
-            <span className="cyber-chip">{ssid.band}</span>
-            <span className="cyber-chip">{ssid.security}</span>
-            {ssid.client_isolation && (
-              <span className="cyber-chip cyber-chip-warn">client iso</span>
-            )}
-            {ssid.has_password ? (
-              <span className="cyber-chip cyber-chip-on">PSK</span>
-            ) : (
-              <span className="cyber-chip">open</span>
-            )}
+        {ssid.notes && (
+          <div className="mt-1 max-w-[22ch] truncate text-[10px] italic text-[color:var(--color-cyber-dim)]" title={ssid.notes}>
+            {ssid.notes}
           </div>
-          <p className="mt-1 text-xs text-[color:var(--color-cyber-muted)]">
-            broadcast:{" "}
-            <span className="cyber-glow-soft font-mono">{ssid.ssid_name}</span>
-          </p>
-          <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[color:var(--color-cyber-muted)]">
-            <NetworkIcon className="h-3 w-3" />
-            <span className="font-mono">{ssid.network_slug}</span>
-            {network && (
-              <>
-                <span>·</span>
-                <span className="font-mono">{network.subnet_cidr}</span>
-                {network.reachable_networks.length === 0 &&
-                  network.reach_internet && (
-                    <span className="cyber-glow-amber">· isolé L3</span>
-                  )}
-                {!network.reach_internet && (
-                  <span className="cyber-glow-amber">· no internet</span>
-                )}
-              </>
-            )}
-          </p>
-          {ssid.notes && (
-            <p className="mt-2 text-[11px] italic text-[color:var(--color-cyber-dim)]">
-              {ssid.notes}
-            </p>
+        )}
+      </td>
+      {/* Bands + MLO */}
+      <td className="px-3 py-2.5 align-top">
+        <div className="flex flex-wrap gap-1">
+          {ssid.bands.map((b) => (
+            <span key={b} className="cyber-chip">
+              {labelForBand(b)}
+            </span>
+          ))}
+          {ssid.mlo && (
+            <span className="cyber-chip cyber-chip-on" title="Wi-Fi 7 Multi-Link Operation">
+              MLO
+            </span>
           )}
         </div>
-        <div className="flex shrink-0 gap-1">
+      </td>
+      {/* Security */}
+      <td className="px-3 py-2.5 align-top">
+        <span className="font-mono text-[11px]">{ssid.security}</span>
+      </td>
+      {/* Flags : PSK/open, client iso, hidden */}
+      <td className="px-3 py-2.5 align-top">
+        <div className="flex flex-wrap gap-1">
+          {ssid.has_password ? (
+            <span className="cyber-chip cyber-chip-on">PSK</span>
+          ) : (
+            <span className="cyber-chip">open</span>
+          )}
+          {ssid.client_isolation && (
+            <span className="cyber-chip cyber-chip-warn" title="Clients du SSID isolés entre eux">
+              client iso
+            </span>
+          )}
+          {ssid.hidden && (
+            <span className="cyber-chip" title="SSID omis des beacons (cosmétique)">
+              caché
+            </span>
+          )}
+        </div>
+      </td>
+      {/* Actions */}
+      <td className="px-3 py-2.5 align-top">
+        <div className="flex justify-end gap-1">
           <button
             type="button"
             onClick={onShowQR}
             title="QR code WiFi"
-            className="border border-transparent p-2 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+            className="border border-transparent p-1.5 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
           >
             <QrCode className="h-3.5 w-3.5" />
           </button>
+          {ssid.has_password && (
+            <button
+              type="button"
+              onClick={onShowPassword}
+              title="Révéler le mot de passe"
+              className="border border-transparent p-1.5 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             type="button"
             onClick={onEdit}
-            className="border border-transparent p-2 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+            className="border border-transparent p-1.5 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
           >
             <Pencil className="h-3.5 w-3.5" />
           </button>
@@ -387,19 +462,14 @@ function WifiCard({
               if (confirm(`Supprimer le SSID "${ssid.slug}" ?`)) del.mutate();
             }}
             disabled={del.isPending}
-            className="border border-transparent p-2 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-40"
+            title={del.error ? errorMessage(del.error) : "Supprimer"}
+            className="border border-transparent p-1.5 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-40"
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
-      </div>
-
-      {del.error && (
-        <p className="mt-3 cyber-chip cyber-chip-on block !rounded-none px-3 py-2 text-xs">
-          {errorMessage(del.error)}
-        </p>
-      )}
-    </article>
+      </td>
+    </tr>
   );
 }
 
@@ -410,9 +480,9 @@ export default function Wifi() {
   const [editing, setEditing] = useState<WifiSsidPublic | null>(null);
   const [creating, setCreating] = useState(false);
   const [qrFor, setQrFor] = useState<WifiSsidPublic | null>(null);
+  const [pwFor, setPwFor] = useState<WifiSsidPublic | null>(null);
 
   const ssids = useQuery({ queryKey: ["wifi"], queryFn: listWifiSsids });
-  const networks = useQuery({ queryKey: ["networks"], queryFn: listNetworks });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["wifi"] });
   const closeForm = () => {
@@ -421,21 +491,21 @@ export default function Wifi() {
   };
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-10">
+    <div className="mx-auto max-w-5xl px-6 py-10">
       <header className="mb-8 flex items-end justify-between gap-4">
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <WifiIcon className="cyber-glow h-3 w-3" />
-            wifi catalog · {ssids.data?.length ?? 0} ssid(s)
+            radio catalog · {ssids.data?.length ?? 0} ssid(s)
           </div>
           <h1
             className="cyber-display cyber-glitch text-4xl"
-            data-text="WI-FI"
+            data-text="RADIO"
           >
-            WI-FI
+            RADIO
           </h1>
           <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-            SSIDs · band · security · network (subnet) · client isolation
+            SSIDs · bandes · sécurité · flags — le mapping réseau se fait par profil
           </p>
         </div>
         {!creating && !editing && (
@@ -450,24 +520,23 @@ export default function Wifi() {
         )}
       </header>
 
-      {creating && networks.data && (
+      {creating && (
         <section className="mb-6">
-          <WifiForm networks={networks.data} onClose={closeForm} />
+          <WifiForm onClose={closeForm} />
         </section>
       )}
 
-      {editing && networks.data && (
+      {editing && (
         <section className="mb-6">
           <WifiForm
             initialSlug={editing.slug}
             initial={editing}
-            networks={networks.data}
             onClose={closeForm}
           />
         </section>
       )}
 
-      {(ssids.isLoading || networks.isLoading) && (
+      {ssids.isLoading && (
         <p className="cyber-label cyber-cursor">chargement</p>
       )}
 
@@ -477,32 +546,40 @@ export default function Wifi() {
         </div>
       )}
 
-      {ssids.data && networks.data && ssids.data.length === 0 && (
+      {ssids.data && ssids.data.length === 0 && (
         <p className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-dim)]">
           ▸ aucun SSID. Crée le premier !
         </p>
       )}
 
-      {ssids.data && networks.data && ssids.data.length > 0 && (
-        <div
-          className={cn(
-            "grid grid-cols-1 gap-4",
-            !creating && !editing && "lg:grid-cols-2",
-          )}
-        >
-          {ssids.data.map((s) => (
-            <WifiCard
-              key={s.slug}
-              ssid={s}
-              networks={networks.data!}
-              onEdit={() => {
-                setCreating(false);
-                setEditing(s);
-              }}
-              onDeleted={refresh}
-              onShowQR={() => setQrFor(s)}
-            />
-          ))}
+      {ssids.data && ssids.data.length > 0 && (
+        <div className="cyber-card overflow-x-auto p-0">
+          <table className="w-full border-collapse text-left">
+            <thead>
+              <tr className="border-b border-[color:var(--color-cyber-border-strong)] text-[9px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
+                <th className="px-3 py-2 font-semibold">SSID</th>
+                <th className="px-3 py-2 font-semibold">Bandes</th>
+                <th className="px-3 py-2 font-semibold">Sécurité</th>
+                <th className="px-3 py-2 font-semibold">Flags</th>
+                <th className="px-3 py-2 text-right font-semibold">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ssids.data.map((s) => (
+                <WifiRow
+                  key={s.slug}
+                  ssid={s}
+                  onEdit={() => {
+                    setCreating(false);
+                    setEditing(s);
+                  }}
+                  onDeleted={refresh}
+                  onShowQR={() => setQrFor(s)}
+                  onShowPassword={() => setPwFor(s)}
+                />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -513,6 +590,18 @@ export default function Wifi() {
           onClose={() => setQrFor(null)}
         />
       )}
+
+      {pwFor && (
+        <WifiPasswordModal
+          slug={pwFor.slug}
+          ssidName={pwFor.ssid_name}
+          onClose={() => setPwFor(null)}
+        />
+      )}
+
+      <div className="mt-8">
+        <WifiSlateStatePanel />
+      </div>
 
       <UniverseCombosPanel />
 

@@ -15,6 +15,7 @@ import Dashboard from "./pages/Dashboard";
 const Devices = lazy(() => import("./pages/Devices"));
 const SecurityHub = lazy(() => import("./pages/security/SecurityHub"));
 const SecurityHardening = lazy(() => import("./pages/security/Hardening"));
+const SecurityTorAudit = lazy(() => import("./pages/security/TorAudit"));
 const Vulnerabilities = lazy(() => import("./pages/security/Vulnerabilities"));
 const SecurityTailscaleAudit = lazy(
   () => import("./pages/security/TailscaleAudit"),
@@ -26,6 +27,9 @@ const Networks = lazy(() => import("./pages/Networks"));
 const NetworkInterfaces = lazy(
   () => import("./pages/networks/Interfaces"),
 );
+const NetworkDiagnostic = lazy(
+  () => import("./pages/networks/Diagnostic"),
+);
 const SlateScreen = lazy(() => import("./pages/SlateScreen"));
 const ProtonVPN = lazy(() => import("./pages/ProtonVPN"));
 const Tailscale = lazy(() => import("./pages/Tailscale"));
@@ -34,6 +38,9 @@ const ProtectionDns = lazy(() => import("./pages/protection/Dns"));
 const ProtectionFirewall = lazy(
   () => import("./pages/protection/Firewall"),
 );
+// Tor lives under /networks/* because it's a routing layer, not a
+// protection — it sits next to Interfaces / Diagnostic / Réseaux / Radio.
+const NetworksTor = lazy(() => import("./pages/networks/Tor"));
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
 const SettingsSshKey = lazy(() => import("./pages/settings/SshKey"));
 const SettingsConnectivity = lazy(
@@ -42,7 +49,19 @@ const SettingsConnectivity = lazy(
 const SettingsCommunication = lazy(
   () => import("./pages/settings/Communication"),
 );
+const SettingsTailnetAdmin = lazy(
+  () => import("./pages/settings/TailnetAdmin"),
+);
 const SettingsAgent = lazy(() => import("./pages/settings/Agent"));
+const SettingsControllerHttps = lazy(
+  () => import("./pages/settings/ControllerHttps"),
+);
+const SettingsInternalCa = lazy(
+  () => import("./pages/settings/InternalCa"),
+);
+const SettingsSetupStatus = lazy(
+  () => import("./pages/settings/SetupStatus"),
+);
 
 export default function App() {
   return (
@@ -57,6 +76,7 @@ export default function App() {
           <Route path="/devices" element={<Devices />} />
           <Route path="/security" element={<SecurityHub />} />
           <Route path="/security/hardening" element={<SecurityHardening />} />
+          <Route path="/security/tor-audit" element={<SecurityTorAudit />} />
           <Route path="/security/vulnerabilities" element={<Vulnerabilities />} />
           <Route path="/security/tailscale" element={<SecurityTailscaleAudit />} />
           <Route path="/profiles" element={<Profiles />} />
@@ -68,6 +88,10 @@ export default function App() {
             path="/networks/interfaces"
             element={<NetworkInterfaces />}
           />
+          <Route
+            path="/networks/diagnostic"
+            element={<NetworkDiagnostic />}
+          />
           <Route path="/slate-screen" element={<SlateScreen />} />
           <Route path="/vpn/proton" element={<ProtonVPN />} />
           <Route path="/vpn/tailscale" element={<Tailscale />} />
@@ -77,11 +101,25 @@ export default function App() {
             path="/protection/firewall"
             element={<ProtectionFirewall />}
           />
+          <Route path="/networks/tor" element={<NetworksTor />} />
           <Route path="/settings" element={<SettingsHub />} />
           <Route path="/settings/ssh-key" element={<SettingsSshKey />} />
           <Route path="/settings/connectivity" element={<SettingsConnectivity />} />
+          <Route path="/settings/tailnet-admin" element={<SettingsTailnetAdmin />} />
           <Route path="/settings/communication" element={<SettingsCommunication />} />
           <Route path="/settings/agent" element={<SettingsAgent />} />
+          <Route
+            path="/settings/controller-https"
+            element={<SettingsControllerHttps />}
+          />
+          <Route
+            path="/settings/internal-ca"
+            element={<SettingsInternalCa />}
+          />
+          <Route
+            path="/settings/setup-status"
+            element={<SettingsSetupStatus />}
+          />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

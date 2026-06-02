@@ -476,3 +476,67 @@ async def set_button_cycle(
         "pushed_to_slate": pushed,
         "push_error": push_error,
     }
+
+
+
+# ---------------------------- tailnet admin ---------------------------- #
+
+
+class TailnetAdminBody(BaseModel):
+    """PUT body for /settings/tailnet-admin-ips.
+
+    Pass the full list ; empty list = no whitelist (every tailnet peer
+    can reach the admin surface when profile.admin_only=true). The
+    actual firewall enforcement only happens when at least one profile
+    has admin_only=true active.
+    """
+
+    admin_ips: list[str] = Field(default_factory=list, max_length=32)
+
+
+def _tailnet_admin_store(request: Request):
+    from app.db.database import make_session_factory
+    from app.settings.tailnet_admin import TailnetAdminStore
+    sf = make_session_factory(request.app.state.db_engine)
+    return TailnetAdminStore(sf)
+
+
+@router.get("/tailnet-admin-ips")
+async def get_tailnet_admin_ips(
+    request: Request,
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Current whitelist of tailnet peers that can reach admin surface.
+
+    The list drives the firewall rules generated when a profile has
+    tailscale.admin_only=true. Empty = no whitelist (everyone passes
+    even with admin_only ; the flag effectively becomes a no-op until
+    the user adds at least one entry).
+    """
+    return await _tailnet_admin_store(request).get()
+
+
+@router.put("/tailnet-admin-ips")
+async def set_tailnet_admin_ips(
+    body: TailnetAdminBody,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Replace the admin-IPs whitelist.
+
+    Validation is light here (shape only) ; the agent-side handler is
+    the authoritative validator since it issues the actual UCI commands.
+    Changes only take effect on the next /api/agent/deploy (or
+    profile re-activation).
+    """
+    try:
+        saved = await _tailnet_admin_store(request).save(body.admin_ips)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+    logger.info(
+        "settings.tailnet_admin.saved",
+        username=user.username, count=len(saved["admin_ips"]),
+    )
+    return saved

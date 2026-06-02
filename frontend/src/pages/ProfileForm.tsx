@@ -8,6 +8,7 @@ import {
   updateProfile,
 } from "@/api/profiles";
 import { listWifiSsids } from "@/api/wifi";
+import { listNetworks } from "@/api/networks";
 import WallpaperUploader from "@/components/WallpaperUploader";
 import type {
   Profile,
@@ -24,11 +25,10 @@ const EMPTY_PROFILE: Profile = {
   icon: null,
   color: "#ff3a52",
   vpn: { type: "none", client: null, kill_switch: false },
-  tor: { enabled: false, bridge: false },
   tailscale: { enabled: false, admin_only: false, connection: null, ha: null },
-  adguard: { enabled: false, lists: [] },
+  // AdGuard + DNS protection both moved to per-network config (Networks
+  // page > DNS widget) — no per-profile blocks anymore.
   ssids: [],
-  // DNS protection moved to per-network config (Networks page > DNS widget).
   firewall: {
     lockdown: false,
     geoip_whitelist: [],
@@ -44,13 +44,19 @@ const EMPTY_PROFILE: Profile = {
 function SsidSelector({
   profile,
   onToggle,
+  onNetworkChange,
 }: {
   profile: Profile;
   onToggle: (slug: string, enabled: boolean) => void;
+  onNetworkChange: (slug: string, networkSlug: string) => void;
 }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["wifi"],
     queryFn: listWifiSsids,
+  });
+  const networksQ = useQuery({
+    queryKey: ["networks"],
+    queryFn: listNetworks,
   });
   if (isLoading) {
     return (
@@ -67,35 +73,59 @@ function SsidSelector({
   if (data.length === 0) {
     return (
       <p className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-dim)]">
-        ▸ aucun SSID dans le catalog · ajoute-en sur la page Wi-Fi
+        ▸ aucun SSID dans le catalog · ajoute-en sur la page Radio
       </p>
     );
   }
-  const enabledBySlug = new Map(profile.ssids.map((s) => [s.slug, s.enabled]));
+  const refBySlug = new Map(profile.ssids.map((s) => [s.slug, s]));
+  const networks = networksQ.data ?? [];
   return (
     <div className="space-y-2">
       {data.map((s) => {
-        const enabled = enabledBySlug.get(s.slug) ?? false;
+        const ref = refBySlug.get(s.slug);
+        const enabled = ref?.enabled ?? false;
+        const networkSlug = ref?.network_slug ?? networks[0]?.slug ?? "lan";
         return (
-          <label
+          <div
             key={s.slug}
-            className="flex cursor-pointer items-center gap-3 border border-[color:var(--color-cyber-border)] p-2.5 transition hover:border-[color:var(--color-cyber-accent)]"
+            className="flex flex-wrap items-center gap-3 border border-[color:var(--color-cyber-border)] p-2.5 transition hover:border-[color:var(--color-cyber-accent)]"
           >
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => onToggle(s.slug, e.target.checked)}
-              className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
-            />
-            <Wifi className="h-3.5 w-3.5 text-[color:var(--color-cyber-accent)]" />
-            <span className="font-mono text-xs">{s.slug}</span>
+            <label className="flex cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => onToggle(s.slug, e.target.checked)}
+                className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+              />
+              <Wifi className="h-3.5 w-3.5 text-[color:var(--color-cyber-accent)]" />
+              <span className="font-mono text-xs">{s.slug}</span>
+            </label>
             <span className="text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)]">
-              {s.band} · {s.security} · {s.network_slug}
+              {(s.mlo ? "MLO " : "") + s.bands.map((b) => `${b}G`).join("/")} ·{" "}
+              {s.security}
             </span>
             {s.client_isolation && (
-              <span className="cyber-chip cyber-chip-warn ml-auto">client iso</span>
+              <span className="cyber-chip cyber-chip-warn">client iso</span>
             )}
-          </label>
+            {/* L2→L3 binding : which network this SSID routes to in THIS
+                profile. Only relevant when the SSID is enabled. */}
+            <label className="ml-auto flex items-center gap-1.5 text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)]">
+              réseau
+              <select
+                value={networkSlug}
+                disabled={!enabled || networks.length === 0}
+                onChange={(e) => onNetworkChange(s.slug, e.target.value)}
+                className="cyber-input py-1 px-2 text-[11px] font-mono disabled:opacity-40"
+              >
+                {networks.length === 0 && <option value="lan">lan</option>}
+                {networks.map((n) => (
+                  <option key={n.slug} value={n.slug}>
+                    {n.slug}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         );
       })}
     </div>
@@ -231,7 +261,25 @@ export default function ProfileForm() {
           ssids: p.ssids.map((s) => (s.slug === slug ? { ...s, enabled } : s)),
         };
       }
-      const next: ProfileSSIDRef = { slug, enabled };
+      const next: ProfileSSIDRef = { slug, enabled, network_slug: "lan" };
+      return { ...p, ssids: [...p.ssids, next] };
+    });
+  }
+
+  function setSsidNetwork(slug: string, network_slug: string) {
+    setProfile((p) => {
+      const existing = p.ssids.find((s) => s.slug === slug);
+      if (existing) {
+        return {
+          ...p,
+          ssids: p.ssids.map((s) =>
+            s.slug === slug ? { ...s, network_slug } : s,
+          ),
+        };
+      }
+      // SSID not yet in the list (network picked before enabling) — add
+      // it disabled with the chosen network.
+      const next: ProfileSSIDRef = { slug, enabled: false, network_slug };
       return { ...p, ssids: [...p.ssids, next] };
     });
   }
@@ -360,18 +408,10 @@ export default function ProfileForm() {
           />
         </Section>
 
-        <Section title="tor">
-          <Checkbox
-            label="enabled"
-            checked={profile.tor.enabled}
-            onChange={(v) => patchSub("tor", { enabled: v })}
-          />
-          <Checkbox
-            label="bridge"
-            checked={profile.tor.bridge}
-            onChange={(v) => patchSub("tor", { bridge: v })}
-          />
-        </Section>
+        {/* Tor was removed from the per-profile schema. The daemon master
+            switch + bridges + exit country live in TorSettings (global,
+            see Réseau → Tor) ; routing decisions live per-network
+            (NetworkRow.tor_route_mode). Nothing profile-shaped left. */}
 
         <Section title="tailscale">
           <Checkbox
@@ -379,11 +419,15 @@ export default function ProfileForm() {
             checked={profile.tailscale.enabled}
             onChange={(v) => patchSub("tailscale", { enabled: v })}
           />
-          <Checkbox
-            label="admin only"
-            checked={profile.tailscale.admin_only}
-            onChange={(v) => patchSub("tailscale", { admin_only: v })}
-          />
+          {/*
+            Le flag `admin_only` per-profil a été retiré (2026-06-01) : la
+            whitelist Settings → Tailnet admin est devenue la source unique.
+            Si la whitelist est non-vide, les règles SC_FR_TS_ADMIN_*
+            s'appliquent dans TOUS les profils ; si vide, pas de filtrage
+            (anti self-DoS). Cf. backend `slate_agent/sync.py` pour la
+            logique. Le champ reste dans le schéma profil pour
+            back-compatibilité mais est ignoré au sync.
+          */}
 
           {profile.tailscale.enabled && (
             <TailscaleOverridesEditor
@@ -397,20 +441,8 @@ export default function ProfileForm() {
           )}
         </Section>
 
-        <Section title="adguard">
-          <Checkbox
-            label="enabled"
-            checked={profile.adguard.enabled}
-            onChange={(v) => patchSub("adguard", { enabled: v })}
-          />
-          <Field label="blocklists (csv)">
-            <CSVInput
-              value={profile.adguard.lists}
-              onChange={(lists) => patchSub("adguard", { lists })}
-              placeholder="hagezi-tif, oisd-big"
-            />
-          </Field>
-        </Section>
+        {/* AdGuard section removed — filtering / blocklists are now
+            per-network (Networks page > DNS protection widget). */}
 
         <Section title="ssids">
           <p className="mb-3 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-dim)]">
@@ -419,7 +451,11 @@ export default function ProfileForm() {
               gérer le catalog
             </Link>
           </p>
-          <SsidSelector profile={profile} onToggle={setSsidEnabled} />
+          <SsidSelector
+            profile={profile}
+            onToggle={setSsidEnabled}
+            onNetworkChange={setSsidNetwork}
+          />
         </Section>
 
         <Section title="firewall">

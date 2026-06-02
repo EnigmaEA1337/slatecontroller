@@ -73,6 +73,10 @@ class AdoptionOptions(BaseModel):
 
     Default = everything safe to do automatically. The user can untick from
     the UI before clicking 'Adopt'.
+
+    Note: enabling LuCI access is NOT an option here — it's a prerequisite
+    of every adoption (the controller relies on it for advanced debugging,
+    and it costs nothing security-wise). See ``_task_enable_luci``.
     """
 
     pin_tls: bool = True

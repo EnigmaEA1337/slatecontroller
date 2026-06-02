@@ -1,69 +1,81 @@
-# Production compose - Traefik + backend + frontend
-# Pour dev local sans Traefik: utiliser docker-compose.dev.yml
+# Production compose — Tailscale sidecar handles HTTPS termination
+# directly (Let's Encrypt cert managed by Tailscale, no ACME challenge
+# to configure, no port 80 required on the public Internet, no DNS
+# record to manage). Traefik is not needed for HTTPS on the tailnet.
+#
+# Architecture mirrors docker-compose.dev.yml :
+#   - slate-tailscale : sidecar with the controller's tailnet identity
+#   - backend + frontend : share the sidecar's netns
+#   - ports published on the sidecar : 443 (tailnet HTTPS), 5173+8000
+#     (LAN HTTP fallback for non-tailnet devices)
+#
+# Both backend and frontend are baked production images (no hot reload).
 
 services:
-  traefik:
-    image: traefik:v3.1
-    container_name: slate-traefik
-    restart: unless-stopped
-    command:
-      - --configfile=/etc/traefik/traefik.yml
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
-      - ./data/traefik/acme.json:/acme.json
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+  slate-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: slate-tailscale
+    hostname: ${TS_HOSTNAME:-slate-controller}
     environment:
-      - TRAEFIK_ACME_EMAIL=${TRAEFIK_ACME_EMAIL}
-    networks:
-      - slate-net
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-slate-controller}
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_EXTRA_ARGS=--accept-routes
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      # See docker-compose.dev.yml comment for the rationale.
+      - TS_SOCKET=/var/run/tailscale/tailscaled.sock
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+      - tailscale-socket:/var/run/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "443:443"
+      - "5173:5173"
+      - "8000:8000"
+    restart: unless-stopped
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: prod
     container_name: slate-backend
     restart: unless-stopped
     env_file: .env
+    network_mode: "service:slate-tailscale"
+    depends_on:
+      - slate-tailscale
     volumes:
       - ./data/db:/app/data/db
       - ./data/logs:/app/data/logs
       - ./backend/profiles:/app/profiles:ro
+      - tailscale-socket:/var/run/tailscale
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.slate-api.rule=Host(`${TRAEFIK_API_DOMAIN}`)"
-      - "traefik.http.routers.slate-api.entrypoints=websecure"
-      - "traefik.http.routers.slate-api.tls.certresolver=letsencrypt"
-      - "traefik.http.services.slate-api.loadbalancer.server.port=8000"
-    networks:
-      - slate-net
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: https://${TRAEFIK_API_DOMAIN}
+        # Same-origin in prod (Tailscale Serve handles routing). No
+        # cross-origin baseURL needed.
+        VITE_API_URL: ""
     container_name: slate-frontend
     restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.slate.rule=Host(`${TRAEFIK_DOMAIN}`)"
-      - "traefik.http.routers.slate.entrypoints=websecure"
-      - "traefik.http.routers.slate.tls.certresolver=letsencrypt"
-      - "traefik.http.services.slate.loadbalancer.server.port=80"
-    networks:
-      - slate-net
+    network_mode: "service:slate-tailscale"
+    depends_on:
+      - slate-tailscale
 
-networks:
-  slate-net:
-    driver: bridge
+volumes:
+  tailscale-socket:

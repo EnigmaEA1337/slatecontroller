@@ -1,5 +1,6 @@
 /**
- * 3-dimension isolation model (see backend NetworkRow docstring) :
+ * Isolation model (see backend NetworkRow docstring for the canonical
+ * source of truth) :
  *
  *   intra_bridge_isolation  L2 — ports of the SAME bridge cloisonnés
  *                           (rare ; achieved via bridge port_isolation
@@ -10,9 +11,17 @@
  *   reachable_networks      L3 — list of OTHER network slugs this one
  *                           can route to (besides wan). Empty = full
  *                           isolation from every other subnet.
- *   admin_access            input policy — clients can reach the Slate
- *                           itself (DHCP/DNS/UI). Default ON ; turning
- *                           OFF makes the network unusable for most.
+ *
+ * Admin / management plane is split per service (was a single
+ * `admin_access` flag before — see migration b2c4d68e90f1) :
+ *
+ *   services_access         input — DHCP, DNS local (dnsmasq), ICMP.
+ *                           Default ON. False = clients can't even
+ *                           get an IP through the Slate.
+ *   admin_ui_access         input — LuCI + GL.iNet web UI (TCP 80/443).
+ *                           Default OFF — only trusted networks.
+ *   ssh_access              input — SSH / dropbear (TCP 22).
+ *                           Default OFF — explicit opt-in.
  *
  * Separate concern : client_isolation on the WiFi SSID (intra-SSID L2)
  * lives on the WifiSsid model, NOT here.
@@ -32,7 +41,20 @@ export interface NetworkPublic {
   intra_bridge_isolation: boolean;
   reach_internet: boolean;
   reachable_networks: string[];
-  admin_access: boolean;
+
+  services_access: boolean;
+  admin_ui_access: boolean;
+  ssh_access: boolean;
+
+  // Tailnet subnet routing. When true the Slate advertises this
+  // network's CIDR(s) as `--advertise-routes=...` so tailnet peers can
+  // reach hosts in this subnet via the Slate's tailscale0.
+  expose_to_tailnet: boolean;
+
+  // Per-network Tor routing (see backend NetworkRow docstring).
+  tor_route_mode: "off" | "transparent" | "socks_only";
+  tor_dns_over_tor: boolean;
+  tor_kill_switch: boolean;
 
   created_at: string;
   updated_at: string;
@@ -51,7 +73,13 @@ export interface NetworkWrite {
   intra_bridge_isolation: boolean;
   reach_internet: boolean;
   reachable_networks: string[];
-  admin_access: boolean;
+  services_access: boolean;
+  admin_ui_access: boolean;
+  ssh_access: boolean;
+  expose_to_tailnet: boolean;
+  tor_route_mode: "off" | "transparent" | "socks_only";
+  tor_dns_over_tor: boolean;
+  tor_kill_switch: boolean;
 }
 
 export interface NetworkCreate extends NetworkWrite {

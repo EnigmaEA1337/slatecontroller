@@ -5,8 +5,11 @@ import {
   Network as NetworkIcon,
   Pencil,
   Plus,
+  Settings2,
+  Share2,
   Shield,
   ShieldOff,
+  Terminal,
   Trash2,
   X,
 } from "lucide-react";
@@ -16,8 +19,8 @@ import {
   listNetworks,
   updateNetwork,
 } from "@/api/networks";
+import { ClickableHost } from "@/components/ClickableHost";
 import DnsProtectionWidget from "@/components/DnsProtectionWidget";
-import NetworkDiagPanel from "@/components/NetworkDiagPanel";
 import type { NetworkPublic, NetworkWrite } from "@/types/network";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -57,8 +60,34 @@ function NetworkForm({
   const [reachable, setReachable] = useState<Set<string>>(
     new Set(initial?.reachable_networks ?? []),
   );
-  const [adminAccess, setAdminAccess] = useState(
-    initial?.admin_access ?? true,
+  // Admin/management plane split per service. Defaults mirror the
+  // backend Pydantic defaults : services ON, UI + SSH OFF.
+  const [servicesAccess, setServicesAccess] = useState(
+    initial?.services_access ?? true,
+  );
+  const [adminUiAccess, setAdminUiAccess] = useState(
+    initial?.admin_ui_access ?? false,
+  );
+  const [sshAccess, setSshAccess] = useState(
+    initial?.ssh_access ?? false,
+  );
+  // Tailnet subnet routing — toggle whether this network's CIDR is
+  // advertised on the tailnet via `tailscale --advertise-routes`.
+  const [exposeToTailnet, setExposeToTailnet] = useState(
+    initial?.expose_to_tailnet ?? false,
+  );
+
+  // Per-network Tor. `off` is the sane default — opt in per network.
+  // `transparent` redirects every TCP via Tor's TransPort (slow, anonymous).
+  // `socks_only` keeps direct WAN but exposes SOCKS5 on the gateway IP.
+  const [torMode, setTorMode] = useState<"off" | "transparent" | "socks_only">(
+    initial?.tor_route_mode ?? "off",
+  );
+  const [torDnsOverTor, setTorDnsOverTor] = useState(
+    initial?.tor_dns_over_tor ?? false,
+  );
+  const [torKillSwitch, setTorKillSwitch] = useState(
+    initial?.tor_kill_switch ?? false,
   );
 
   // Peers candidate to "reachable_networks" : every other network in
@@ -88,7 +117,13 @@ function NetworkForm({
         intra_bridge_isolation: intraBridge,
         reach_internet: reachInternet,
         reachable_networks: Array.from(reachable),
-        admin_access: adminAccess,
+        services_access: servicesAccess,
+        admin_ui_access: adminUiAccess,
+        ssh_access: sshAccess,
+        expose_to_tailnet: exposeToTailnet,
+        tor_route_mode: torMode,
+        tor_dns_over_tor: torDnsOverTor,
+        tor_kill_switch: torKillSwitch,
       };
       return isEdit
         ? updateNetwork(initial!.slug, body)
@@ -299,27 +334,159 @@ function NetworkForm({
           )}
         </div>
 
-        {/* Admin / management plane */}
+        {/* Admin / management plane — split per service so guest
+            networks can keep DHCP/DNS without exposing LuCI or SSH. */}
         <div>
           <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
-            administration
+            administration · plan par service
           </div>
-          <label className="flex items-center gap-2 text-xs">
+
+          <label className="flex items-start gap-2 text-xs">
             <input
               type="checkbox"
-              checked={adminAccess}
-              onChange={(e) => setAdminAccess(e.target.checked)}
-              className="h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+              checked={servicesAccess}
+              onChange={(e) => setServicesAccess(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[color:var(--color-cyber-accent)]"
             />
             <span>
-              clients peuvent joindre le Slate (DHCP, DNS, UI admin)
-              {!adminAccess && (
+              <span className="inline-flex items-center gap-1.5">
+                <Settings2 className="h-3 w-3" />
+                services essentiels — DHCP · DNS · ICMP
+              </span>
+              {!servicesAccess && (
                 <span className="ml-2 text-[10px] text-red-300">
                   ⚠ sans ça, pas de DHCP — les clients n'auront pas d'IP
                 </span>
               )}
+              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+                ▸ dnsmasq + serveur DHCP local, ping vers la gateway
+              </span>
             </span>
           </label>
+
+          <label className="mt-2 flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={adminUiAccess}
+              onChange={(e) => setAdminUiAccess(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1.5">
+                <Shield className="h-3 w-3" />
+                UI admin — LuCI + GL.iNet UI (TCP 80/443)
+              </span>
+              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+                ▸ à activer uniquement pour les réseaux de confiance
+              </span>
+            </span>
+          </label>
+
+          <label className="mt-2 flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={sshAccess}
+              onChange={(e) => setSshAccess(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1.5">
+                <Terminal className="h-3 w-3" />
+                SSH — dropbear (TCP 22)
+              </span>
+              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+                ▸ opt-in explicite, ops uniquement
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {/* Tailnet subnet routing — orthogonal au plan admin. Met le
+            CIDR du réseau dans `tailscale --advertise-routes`, sans
+            ouvrir aucun port admin local. */}
+        <div className="mt-4 border-t border-[color:var(--color-cyber-border)] pt-3">
+          <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
+            tailnet · routage subnet
+          </div>
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={exposeToTailnet}
+              onChange={(e) => setExposeToTailnet(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[color:var(--color-cyber-accent)]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1.5">
+                <Share2 className="h-3 w-3" />
+                exposer ce réseau sur le tailnet
+              </span>
+              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+                ▸ ajoute le CIDR à `tailscale --advertise-routes`, joignable
+                depuis tes peers tailnet (téléphone, laptop…)
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {/* Per-network Tor. The global daemon switch + bridges live in
+            TorStatusCard at the top of the page; here we decide IF this
+            specific subnet is routed through Tor (and how). */}
+        <div className="mt-4 border-t border-purple-500/30 pt-3">
+          <div className="cyber-label !text-[9px] mb-1.5 text-purple-300">
+            tor · routage per-réseau
+          </div>
+          <select
+            value={torMode}
+            onChange={(e) => setTorMode(e.target.value as typeof torMode)}
+            className="cyber-input w-full text-xs"
+          >
+            <option value="off">off — pas de Tor pour ce réseau</option>
+            <option value="transparent">
+              transparent — tout le trafic via Tor (lent, anonyme)
+            </option>
+            <option value="socks_only">
+              socks_only — SOCKS5 sur la gateway, opt-in par app
+            </option>
+          </select>
+          {torMode === "transparent" && (
+            <div className="mt-2 space-y-1.5 rounded border border-purple-500/40 bg-purple-950/20 p-2 text-[11px]">
+              <p className="text-purple-200">
+                ⚠ Latence ↑ (250-800 ms), débit plafonné (~1-3 Mbps). Plein de
+                sites bloquent les exit IPs Tor.
+              </p>
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={torDnsOverTor}
+                  onChange={(e) => setTorDnsOverTor(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-purple-400"
+                />
+                <span>
+                  <strong>DNS-over-Tor</strong> — redirige les requêtes DNS
+                  via Tor (évite les fuites au resolver amont).
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={torKillSwitch}
+                  onChange={(e) => setTorKillSwitch(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-purple-400"
+                />
+                <span>
+                  <strong>Kill-switch</strong> — si le daemon Tor crashe,
+                  bloque la sortie WAN de ce réseau (fail-closed). Anti-fuite
+                  d'IP réelle.
+                </span>
+              </label>
+            </div>
+          )}
+          {torMode === "socks_only" && (
+            <p className="mt-2 text-[11px] text-purple-300">
+              ▸ Configure ton navigateur sur{" "}
+              <code>socks5://{gateway || "&lt;gateway&gt;"}:9050</code>
+            </p>
+          )}
         </div>
       </div>
 
@@ -436,9 +603,37 @@ function NetworkCard({
             {network.intra_bridge_isolation && (
               <span className="cyber-chip cyber-chip-warn">L2 cloisonné</span>
             )}
-            {!network.admin_access && (
-              <span className="cyber-chip cyber-chip-on" title="Pas d'accès au Slate">
-                no admin
+            {!network.services_access && (
+              <span
+                className="cyber-chip cyber-chip-on"
+                title="DHCP/DNS bloqués — clients sans IP"
+              >
+                no svc
+              </span>
+            )}
+            {network.admin_ui_access && (
+              <span
+                className="cyber-chip cyber-chip-warn"
+                title="LuCI / GL.iNet UI accessibles depuis ce réseau"
+              >
+                UI admin
+              </span>
+            )}
+            {network.ssh_access && (
+              <span
+                className="cyber-chip cyber-chip-warn"
+                title="SSH (dropbear) accessible depuis ce réseau"
+              >
+                SSH
+              </span>
+            )}
+            {network.expose_to_tailnet && (
+              <span
+                className="cyber-chip cyber-chip-ok"
+                title="CIDR annoncé sur le tailnet (tailscale --advertise-routes)"
+              >
+                <Share2 className="mr-1 inline h-2.5 w-2.5" />
+                tailnet
               </span>
             )}
             {!network.dhcp_enabled && (
@@ -465,7 +660,11 @@ function NetworkCard({
             <span>
               gw{" "}
               <span className="cyber-glow-soft font-mono">
-                {network.gateway_ip || "—"}
+                {network.gateway_ip ? (
+                  <ClickableHost value={network.gateway_ip} />
+                ) : (
+                  "—"
+                )}
               </span>
             </span>
             {network.ipv6_enabled && (
@@ -565,6 +764,12 @@ export default function Networks() {
         )}
       </header>
 
+      {/* Tor lives in its own section now — see /networks/tor (Réseau →
+          Tor) for the daemon status, install, bridges and the per-network
+          summary. The per-network routing toggle (off / transparent /
+          socks_only + DNS-over-Tor + kill-switch) stays in the network's
+          edit form below — that's where it belongs. */}
+
       {creating && <section className="mb-6">
         <NetworkForm
           allNetworks={networks.data ?? []}
@@ -578,8 +783,6 @@ export default function Networks() {
           onClose={closeForm}
         />
       </section>}
-
-      <NetworkDiagPanel />
 
       {networks.isLoading && (
         <p className="cyber-label cyber-cursor">chargement</p>

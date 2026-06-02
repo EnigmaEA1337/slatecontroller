@@ -12,6 +12,8 @@ import {
 import { getSlateStatus } from "@/api/slate";
 import type { SlateStatus } from "@/types/slate";
 import { cn } from "@/lib/utils";
+import NetworkHubMap from "@/components/NetworkHubMap";
+import SpeedtestCard from "@/components/SpeedtestCard";
 
 function formatUptime(seconds: number | null): string {
   if (seconds == null) return "—";
@@ -207,6 +209,18 @@ export default function Dashboard() {
               </div>
             </section>
           )}
+
+          {/* At-a-glance topology — Slate centre + WAN/Tor/Tailscale/
+              Networks/Radios satellites. Each subsystem polls
+              independently so the visual updates in real time. */}
+          <div className="mt-6">
+            <NetworkHubMap />
+          </div>
+
+          {/* Cloudflare-backed speedtest run FROM the Slate (ping + curl
+              download/upload). Spinner during ~25 s, then 3 metric
+              tiles. */}
+          <SpeedtestCard />
 
           <footer className="mt-6 flex items-center justify-end gap-2 text-[10px] uppercase tracking-[0.25em] text-[color:var(--color-cyber-dim)]">
             <Globe className="h-3 w-3" />
