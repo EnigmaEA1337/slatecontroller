@@ -131,6 +131,14 @@ _wifi_template_for_band() {
 # returned empty matches, leaving `used` empty.
 _wifi_alloc_ifname_index() {
   local prefix="$1"
+  # IFS guard : callers iterate bands with IFS=',' — without this reset,
+  # the `for ln in $(...)` below would treat the whole newline-separated
+  # pipeline output as ONE token (since ',' isn't in the output) →
+  # `used` stays empty → allocator returns 0 → every new SC_WL_<SLUG>
+  # section gets the OEM ifname → conflict (Bug F level 2, 2026-06-02).
+  local _oldifs="$IFS"
+  IFS='
+ 	'
   local used=" " ln idx
   for ln in $(uci show wireless 2>/dev/null \
               | grep "\\.ifname='${prefix}[0-9]" \
@@ -138,9 +146,54 @@ _wifi_alloc_ifname_index() {
               | sort -nu); do
     used="$used$ln "
   done
+  IFS="$_oldifs"
   for idx in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     case "$used" in *" $idx "*) continue ;; esac
     echo "$idx"; return 0
+  done
+  echo ""; return 1
+}
+
+# Row-exclusive allocator : return the lowest index 0..15 that is NOT
+# used by ANY ifname across ra/rai/rax. Gives "one row in the panel per
+# SSID" — a 2.4 GHz lone SSID won't sit on a row already owned by an
+# MLO group on 5/6 GHz. Same IFS guard as the per-prefix allocator.
+_wifi_alloc_row_index() {
+  local _oldifs="$IFS"
+  IFS='
+ 	'
+  local used=" " ln idx p
+  for p in ra rai rax; do
+    for ln in $(uci show wireless 2>/dev/null \
+                | grep "\\.ifname='${p}[0-9]" \
+                | sed "s/.*ifname='${p}\\([0-9]\\{1,\\}\\)'.*/\\1/" \
+                | sort -nu); do
+      used="$used$ln "
+    done
+  done
+  IFS="$_oldifs"
+  for idx in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    case "$used" in *" $idx "*) continue ;; esac
+    echo "$idx"; return 0
+  done
+  echo ""; return 1
+}
+
+# Echo the ifname index that the slug already uses on ANOTHER band, or
+# empty. When we provision SC_WL_TRON_5 right after SC_WL_TRON_2 (same
+# slug, different band), this lets us pin the same row index for both.
+_wifi_index_for_slug_other_band() {
+  local slug="$1"
+  local slug_env
+  slug_env=$(_wifi_slug_to_env "$slug")
+  local ifn p
+  for p in ra rai rax; do
+    # Look at any SC_WL_<SLUG>_<B> section's ifname matching this prefix.
+    ifn=$(uci show wireless 2>/dev/null \
+          | grep "^wireless\\.SC_WL_${slug_env}_[0-9]\\+\\.ifname='${p}[0-9]" \
+          | head -1 \
+          | sed "s/.*ifname='${p}\\([0-9]\\{1,\\}\\)'.*/\\1/")
+    [ -n "$ifn" ] && { echo "$ifn"; return 0; }
   done
   echo ""; return 1
 }
@@ -190,9 +243,15 @@ _wifi_ensure_dedicated_slot() {
     # cloned fields are already there).
     ifname_prefix=$(_wifi_ifname_prefix_for_band "$band")
     local idx alloc_ifname alloc_vifidx
-    idx=$(_wifi_alloc_ifname_index "$ifname_prefix")
+    # Prefer the row index already used by this slug on another band
+    # (alignment for multi-band SSIDs) ; fall back to row-exclusive
+    # allocation otherwise (one row per SSID in the panel).
+    idx=$(_wifi_index_for_slug_other_band "$slug")
     if [ -z "$idx" ]; then
-      echo "wifi: all 16 ifname slots on $ifname_prefix* in use — cannot heal $section" >&2
+      idx=$(_wifi_alloc_row_index)
+    fi
+    if [ -z "$idx" ]; then
+      echo "wifi: all 16 row slots in use — cannot heal $section" >&2
       echo ""; return 1
     fi
     alloc_ifname="${ifname_prefix}${idx}"
@@ -215,9 +274,16 @@ _wifi_ensure_dedicated_slot() {
     echo ""; return 1
   fi
   local idx alloc_ifname alloc_vifidx
-  idx=$(_wifi_alloc_ifname_index "$ifname_prefix")
+  # Multi-band alignment : if this slug already has a section on another
+  # band, reuse that row index so the panel shows the slug aligned. Else
+  # take the lowest GLOBALLY free row → one row per SSID, no visual
+  # collision with MLO groups or other singles.
+  idx=$(_wifi_index_for_slug_other_band "$slug")
   if [ -z "$idx" ]; then
-    echo "wifi: all 16 ifname slots on $ifname_prefix* in use — cannot create $section" >&2
+    idx=$(_wifi_alloc_row_index)
+  fi
+  if [ -z "$idx" ]; then
+    echo "wifi: all 16 row slots in use — cannot create $section" >&2
     echo ""; return 1
   fi
   alloc_ifname="${ifname_prefix}${idx}"
@@ -480,10 +546,11 @@ wifi_apply() {
 
   local errors=0
 
-  # ── 1) Build sorted (slug,index) pairs ───────────────────────────────
-  # Sorting by slug makes slot allocation deterministic across re-applies
-  # and across profiles : every catalog SSID always claims the same slot,
-  # so a profile switch only flips `disabled` and never reboots.
+  # ── 1) Build (slug,index) pairs in payload order ─────────────────────
+  # The controller's sync.py has already ordered the SSIDs (multi-band
+  # non-MLO first, then alphabetical) so that multi-band SSIDs claim
+  # the same low index on each of their bands → aligned slot rows in
+  # the panel. We just preserve that order here ; no extra sort.
   local pairs=""
   local i=0
   while [ "$i" -lt "$count" ]; do
@@ -494,7 +561,10 @@ wifi_apply() {
     i=$((i + 1))
   done
   local sorted
-  sorted=$(printf '%s' "$pairs" | grep -v '^$' | sort)
+  # Strip blanks but preserve payload order — sync.py picked the right
+  # multi-band-first ordering for slot-row alignment, re-sorting here
+  # would undo that work.
+  sorted=$(printf '%s' "$pairs" | grep -v '^$')
 
   # ── 2) Per-SSID provisioning (LAYOUT) + uci disabled (ACTIVATION) ────
   # Tracks (slug,ifname,want) tuples so we can ip-link-toggle later.
@@ -588,6 +658,9 @@ wifi_apply() {
         fi
         uci set "wireless.mld0.${_WIFI_MARK}=1"
         _wifi_set_disabled "mld0" "$want_disabled"
+        # Claim mld0 so the sweep (step 4) keeps it instead of dropping
+        # this MLO group entirely.
+        _wifi_claim "mld0"
         mlo_ssid_present=1
         echo "wifi: MLO '$name' → mld0 ($bands_csv) net=$network enabled=$enabled"
       fi
@@ -641,19 +714,72 @@ wifi_apply() {
     uci set "wireless.mld1.iface="
   fi
 
-  # ── 4) Disable unclaimed slots. ──────────────────────────────────────
-  # Walk EVERY wifi-iface section in uci (not a hardcoded list) so
-  # SC_WL_<SLUG>_<BAND> sections we created in this same apply, plus
-  # any orphaned slot from a previous catalog state, are all handled.
-  local sec
+  # ── 4) Sweep unclaimed sections.  ────────────────────────────────────
+  # Two outcomes :
+  #   - KEEP + disable : ra0/rai0/rax0 (clone templates) + wlanmld5g/6g +
+  #     mld0 when an MLO SSID exists in this catalog. These sections are
+  #     load-bearing — destroying them breaks the next clone or the
+  #     ongoing MLO group.
+  #   - DELETE : everything else (guest2g/5g/6g, wlanmld2g, wlanmldguest*,
+  #     mld1, leftover SC_WL_* from a previous catalog state). Their
+  #     ifnames free up at the next reboot, letting newly-created
+  #     SC_WL_<SLUG>_<BAND> sections claim lower indexes (ra1/2/3 instead
+  #     of ra4+). This is what users perceive as "the OEM ghost slots are
+  #     gone and I can fit more SSIDs".
+  local sec keep_pat
+  # Build the keep pattern. mld0 + per-band MLO links are conditional :
+  # they only stay if an MLO SSID claimed them in this apply.
+  keep_pat=" ra0 rai0 rax0 "
+  if _wifi_is_claimed "mld0"; then
+    keep_pat="${keep_pat}mld0 "
+  fi
+  if _wifi_is_claimed "wlanmld5g"; then
+    keep_pat="${keep_pat}wlanmld5g "
+  fi
+  if _wifi_is_claimed "wlanmld6g"; then
+    keep_pat="${keep_pat}wlanmld6g "
+  fi
+  if _wifi_is_claimed "wlanmld2g"; then
+    keep_pat="${keep_pat}wlanmld2g "
+  fi
   for sec in $(_wifi_all_iface_sections); do
     _wifi_is_claimed "$sec" && continue
-    uci set "wireless.$sec.${_WIFI_MARK}=1"
-    _wifi_set_disabled "$sec" 1
-    local ifn
-    ifn=$(uci -q get "wireless.$sec.ifname")
-    [ -n "$ifn" ] && link_plan="$link_plan$ifn:down:
+    case "$keep_pat" in
+      *" $sec "*)
+        # KEEP — just disable + mark managed. We need this section as a
+        # template (ra0/rai0/rax0) or as MLO infrastructure. Also blank
+        # the OEM-leaking ssid so the panel doesn't show
+        # "GL-BE10000-759" / "-MLO-Guest" on these reserved slots.
+        uci set "wireless.$sec.${_WIFI_MARK}=1"
+        uci set "wireless.$sec.ssid=_SC_RESERVED_"
+        uci set "wireless.$sec.hidden=1"
+        _wifi_set_disabled "$sec" 1
+        local ifn
+        ifn=$(uci -q get "wireless.$sec.ifname")
+        [ -n "$ifn" ] && link_plan="$link_plan$ifn:down:
 "
+        ;;
+      *)
+        # DELETE — frees the ifname slot at the next reboot.
+        echo "wifi: dropping unused section $sec (frees ifname slot)"
+        uci -q delete "wireless.$sec" 2>/dev/null
+        ;;
+    esac
+  done
+
+  # ── 4b) Drop unused MLD groups. ──────────────────────────────────────
+  # mld1 is the OEM "MLO-Guest" group — never used here. mld0 we keep
+  # only when an MLO SSID claimed it (see keep_pat above ; if not in
+  # keep_pat, it falls through to delete here). MLD groups are `mld`
+  # type, not `wifi-iface`, so the sweep above doesn't see them.
+  local mldgrp
+  for mldgrp in mld0 mld1; do
+    uci -q get "wireless.$mldgrp" >/dev/null 2>&1 || continue
+    case "$keep_pat" in
+      *" $mldgrp "*) continue ;;
+    esac
+    echo "wifi: dropping unused MLD group $mldgrp"
+    uci -q delete "wireless.$mldgrp" 2>/dev/null
   done
 
   # ── 5) Reboot decision : layout vs activation-only. ──────────────────

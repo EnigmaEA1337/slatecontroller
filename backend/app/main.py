@@ -28,7 +28,9 @@ from app.api.routes import slate as slate_routes
 from app.api.routes import tailscale as tailscale_routes
 from app.api.routes import tor as tor_routes
 from app.api.routes import vpn_configs as vpn_config_routes
+from app.api.routes import air_watch as air_watch_routes
 from app.api.routes import wifi as wifi_routes
+from app.api.routes import wifi_radio as wifi_radio_routes
 from app.config import get_settings
 from app.db.database import init_db, make_engine, make_session_factory
 from app.devices.store import DeviceStore
@@ -387,6 +389,8 @@ def create_app() -> FastAPI:
     app.include_router(proton_routes.router, prefix="/api")
     app.include_router(vpn_config_routes.router, prefix="/api")
     app.include_router(wifi_routes.router, prefix="/api")
+    app.include_router(wifi_radio_routes.router, prefix="/api")
+    app.include_router(air_watch_routes.router, prefix="/api")
     app.include_router(network_routes.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
     app.include_router(adguard_routes.router, prefix="/api")

@@ -691,3 +691,68 @@ class NetworkDnsProtectionRow(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+class RadioConfigRow(Base):
+    """Per-band radio (layer-1) configuration for a device.
+
+    One row per (device_slug, band) tuple. Stores the channel/htmode/
+    txpower/country the operator selected. Defaults are applied at the
+    Pydantic layer when a row is missing (see ``wifi/radio_config.py``).
+    """
+
+    __tablename__ = "radio_configs"
+    __table_args__ = (
+        UniqueConstraint("device_slug", "band", name="uq_radio_configs_device_band"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    band: Mapped[str] = mapped_column(String(2), nullable=False)
+    # 0 means "auto / ACS"; otherwise the operator-forced channel number.
+    channel: Mapped[int] = mapped_column(default=0, nullable=False)
+    htmode: Mapped[str] = mapped_column(String(16), default="EHT160", nullable=False)
+    txpower_percent: Mapped[int] = mapped_column(default=100, nullable=False)
+    country: Mapped[str] = mapped_column(String(2), default="FR", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class ThreatEventRow(Base):
+    """Persisted RF threat detection — one row per (kind, bssid, dismissed?).
+
+    The scanner emits ThreatEvent records that the route persists here so
+    the AUDIT → Air Watch page can list historical detections, let the
+    operator dismiss false positives, and surface counts in the AUDIT
+    score.
+    """
+
+    __tablename__ = "threat_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    bssid: Mapped[str] = mapped_column(String(17), nullable=False)
+    ssid: Mapped[str] = mapped_column(String(128), default="")
+    channel: Mapped[int] = mapped_column(default=0)
+    rssi_dbm: Mapped[int] = mapped_column(default=-100)
+    message: Mapped[str] = mapped_column(String(512), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    dismissed: Mapped[bool] = mapped_column(default=False)
+    dismissed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )

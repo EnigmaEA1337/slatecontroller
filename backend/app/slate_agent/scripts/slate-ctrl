@@ -170,7 +170,7 @@ cmd_apply() {
   # policies. Then firewall (default-deny + lockdown), then wifi (now
   # with target bridges ready), then VPN/Tor/AdGuard/Tailscale (which
   # may reference the new zones in their own rules), then wallpaper.
-  for subsystem in network firewall wifi vpn tor adguard tailscale wallpaper; do
+  for subsystem in network firewall wifi radio vpn tor adguard tailscale wallpaper; do
     if ! run_handler "$subsystem" "$profile_path"; then
       rc=3
     fi

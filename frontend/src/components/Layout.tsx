@@ -42,7 +42,10 @@ const networkChildren = [
   { to: "/networks/interfaces", label: "Interfaces" },
   { to: "/networks/diagnostic", label: "Diagnostic" },
   { to: "/networks", label: "Réseaux" },
-  { to: "/wifi", label: "Radio" },
+  { to: "/wifi", label: "SSIDs" },
+  // Radio = layer-1 config (channel / htmode / txpower / country) +
+  // channel scanner. Distinct from SSIDs (which is the layer-2 catalog).
+  { to: "/networks/radio", label: "Radio · RF" },
   // Tor = couche de routage par-réseau (per-bridge transparent / SOCKS),
   // donc sa place est ici à côté des autres surfaces réseau — pas dans
   // "Protection".
@@ -58,6 +61,9 @@ const auditChildren = [
   { to: "/security/vulnerabilities", label: "Vulnérabilités" },
   { to: "/security/tailscale", label: "Tailscale Audit" },
   { to: "/security/tor-audit", label: "Tor Audit" },
+  // Air Watch = audit RF : evil twins, deauth, WPS, voisins co-canal forts.
+  // Alimenté par les scans déclenchés depuis Réseau → Radio.
+  { to: "/security/air-watch", label: "Air Watch" },
 ];
 
 // Note : `/settings/connectivity` (controller callback URLs) is volontairement

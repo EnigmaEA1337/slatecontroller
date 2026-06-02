@@ -1,19 +1,34 @@
-"""SSH keypair generation + persistence for device admin channels.
+"""SSH keypair — the CONTROLLER's identity, controller-wide.
 
-Generates Ed25519 keys (modern, short, fast). The private key is stored
-Fernet-encrypted in the `device_secrets` table (keyed by `device_id` +
-`kind='ssh_keypair'`); the public key + fingerprint + deployment marker
-live in the same row's `metadata_json` blob.
+The keypair represents the controller's SSH client identity, exactly the
+same as `~/.ssh/id_ed25519` on a human's machine. It is *not* per-device :
+one identity authenticates to every adopted Slate, with the matching
+public key sitting in each device's `/etc/dropbear/authorized_keys`.
 
-Multi-device : every method takes a `device_slug` argument. The store
-resolves it to a `DeviceRow.id` to upsert/read the matching
-`device_secrets` row. There is no shared/global keypair anymore — each
-adopted device carries its own.
+Storage : Fernet-encrypted private key + metadata in
+`app_secrets[key='controller_ssh_keypair']`. The metadata blob carries
+the public OpenSSH line, fingerprint, creation date, and a per-device
+deployment ledger (`deployed_to: {slug: timestamp}`) so we know which
+adopted devices already have the public side and which still need it
+pushed.
 
-Legacy migration : the alembic step
-`f3a1c8d9e021_move_ssh_keypair_to_device_secrets` copies any pre-
-existing `app_secrets[key='slate_ssh_keypair']` row onto the default
-device, then drops the source row so we never read a stale one.
+**This survives device deletion / factory reset / re-adoption.** A
+Slate that gets factory-reset just needs the same public key re-pushed
+into its authorized_keys — the controller's private side never moves.
+
+Migration history :
+  - originally lived in `app_secrets[key='slate_ssh_keypair']`
+  - 2026-05-25 moved INCORRECTLY to `device_secrets[kind='ssh_keypair']`
+    on the assumption that multi-device meant per-device key — but it
+    just means many servers know the same public key
+  - 2026-06-02 moved back to `app_secrets[key='controller_ssh_keypair']`,
+    this time with explicit semantics (Bug I)
+
+The `device_slug` parameter on most methods is kept for API surface
+backwards compatibility but is effectively ignored : there is only one
+keypair, regardless of which device the caller is asking about. Routes
+that probe a specific device's deployment status read the per-device
+flag from the metadata ledger.
 """
 
 from __future__ import annotations
@@ -29,12 +44,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import DeviceRow, DeviceSecretRow
+from app.db.models import AppSecretRow
 from app.exceptions import SlateError
 from app.vpn.crypto import VPNCryptoError, decrypt, encrypt
 
-# device_secrets.kind value. Kept in sync with `app/devices/store.py`.
-SSH_KEYPAIR_SECRET_KIND = "ssh_keypair"
+# Single app_secrets row that holds the controller's SSH client identity.
+APP_SECRET_KEY = "controller_ssh_keypair"
 
 
 class SSHKeyError(SlateError):
@@ -56,8 +71,9 @@ class SSHKeypairStatus:
     public_openssh: str | None
     fingerprint_sha256: str | None
     created_at: datetime | None
-    deployed_to_slate: bool
-    deployed_at: datetime | None
+    deployed_to_slate: bool   # True iff this specific device slug is in
+                              # the deployment ledger
+    deployed_at: datetime | None  # the timestamp for *that* slug
 
 
 def _generate_keypair(comment: str = "slate-controller") -> SSHKeypair:
@@ -76,8 +92,6 @@ def _generate_keypair(comment: str = "slate-controller") -> SSHKeypair:
         format=serialization.PublicFormat.OpenSSH,
     ).decode("ascii") + f" {comment}"
 
-    # Fingerprint per OpenSSH convention: sha256 over the raw public key blob
-    # (the base64 chunk in the middle of the OpenSSH text format).
     raw_pub_blob = base64.b64decode(public_openssh.split()[1])
     digest = hashlib.sha256(raw_pub_blob).digest()
     fingerprint = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
@@ -90,44 +104,27 @@ def _generate_keypair(comment: str = "slate-controller") -> SSHKeypair:
 
 
 class SSHKeypairStore:
-    """Per-device SSH keypair store.
+    """Controller-wide SSH keypair store.
 
-    Every method takes a `device_slug` (the human-friendly identifier
-    visible in the UI) and operates on the device's row in
-    `device_secrets` where `kind = 'ssh_keypair'`.
-
-    On miss (device exists, no keypair yet) `get_status` returns a
-    `generated=False` snapshot ; `generate_and_store` creates the row ;
-    `mark_deployed` requires the row to exist.
-
-    If the device slug itself doesn't resolve, methods raise
-    `SSHKeyError` rather than silently returning a fresh-state snapshot,
-    so a typo in a route doesn't masquerade as "device has no key".
+    All read/write hit a single `app_secrets[key='controller_ssh_keypair']`
+    row. Per-device deployment status is tracked inside the metadata's
+    `deployed_to` dict.
     """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
-    async def _load_secret(
-        self, session: AsyncSession, device_slug: str,
-    ) -> tuple[DeviceRow, DeviceSecretRow | None]:
-        device = await session.scalar(
-            select(DeviceRow).where(DeviceRow.slug == device_slug),
+    async def _load(
+        self, session: AsyncSession,
+    ) -> AppSecretRow | None:
+        return await session.scalar(
+            select(AppSecretRow).where(AppSecretRow.key == APP_SECRET_KEY),
         )
-        if device is None:
-            raise SSHKeyError(f"unknown device slug {device_slug!r}")
-        secret = await session.scalar(
-            select(DeviceSecretRow).where(
-                DeviceSecretRow.device_id == device.id,
-                DeviceSecretRow.kind == SSH_KEYPAIR_SECRET_KIND,
-            ),
-        )
-        return device, secret
 
-    async def get_status(self, device_slug: str) -> SSHKeypairStatus:
-        async with self._sf() as session:
-            _device, secret = await self._load_secret(session, device_slug)
-        if secret is None:
+    def _status_from_row(
+        self, row: AppSecretRow | None, device_slug: str,
+    ) -> SSHKeypairStatus:
+        if row is None:
             return SSHKeypairStatus(
                 generated=False,
                 public_openssh=None,
@@ -136,8 +133,9 @@ class SSHKeypairStore:
                 deployed_to_slate=False,
                 deployed_at=None,
             )
-        meta = secret.metadata_json or {}
-        deployed_at_raw = meta.get("deployed_at")
+        meta = row.metadata_json or {}
+        deployed_to: dict = meta.get("deployed_to") or {}
+        deployed_at_raw = deployed_to.get(device_slug)
         deployed_at = (
             datetime.fromisoformat(deployed_at_raw) if deployed_at_raw else None
         )
@@ -145,69 +143,128 @@ class SSHKeypairStore:
             generated=True,
             public_openssh=meta.get("public_openssh"),
             fingerprint_sha256=meta.get("fingerprint_sha256"),
-            created_at=secret.created_at,
-            deployed_to_slate=bool(meta.get("deployed_at")),
+            created_at=row.created_at,
+            deployed_to_slate=deployed_at is not None,
             deployed_at=deployed_at,
         )
 
-    async def get_private_pem(self, device_slug: str) -> str | None:
-        """Decrypt and return the stored private key, or None if not generated."""
+    async def get_status(self, device_slug: str) -> SSHKeypairStatus:
+        """Return the status from THIS device's perspective.
+
+        The `generated` / `public_openssh` / `fingerprint_sha256` fields
+        are global (same regardless of slug). The `deployed_to_slate`
+        and `deployed_at` fields reflect whether the public side has
+        been pushed to the named device's authorized_keys.
+        """
         async with self._sf() as session:
-            _device, secret = await self._load_secret(session, device_slug)
-        if secret is None:
+            row = await self._load(session)
+        return self._status_from_row(row, device_slug)
+
+    async def get_private_pem(self, device_slug: str = "") -> str | None:  # noqa: ARG002
+        """Decrypt and return the stored private key, or None if not generated.
+
+        `device_slug` is ignored — there is only one keypair.
+        """
+        async with self._sf() as session:
+            row = await self._load(session)
+        if row is None:
             return None
         try:
-            return decrypt(secret.encrypted_value)
+            return decrypt(row.encrypted_value)
         except VPNCryptoError as exc:
             raise SSHKeyError(
-                f"Cannot decrypt SSH private key for {device_slug!r}: {exc}"
+                f"Cannot decrypt controller SSH private key: {exc}",
             ) from exc
 
-    async def generate_and_store(self, device_slug: str) -> SSHKeypair:
-        """Replaces any existing keypair for this device. Caller is
-        responsible for re-deploying the new public key to the Slate."""
+    async def generate_and_store(self, device_slug: str = "") -> SSHKeypair:  # noqa: ARG002
+        """Generate a fresh keypair and replace any existing one.
+
+        Wipes the per-device deployment ledger : a brand-new key has not
+        been deployed to anyone yet, regardless of past state. The caller
+        is responsible for re-deploying to every adopted device that
+        wants to keep working.
+
+        `device_slug` is ignored — the keypair is global. The parameter
+        is kept for backwards-compatible route signatures.
+        """
         keypair = await asyncio.to_thread(_generate_keypair)
         encrypted = encrypt(keypair.private_pem)
         metadata: dict = {
             "public_openssh": keypair.public_openssh,
             "fingerprint_sha256": keypair.fingerprint_sha256,
-            # Note: NOT setting deployed_at — generation alone doesn't deploy.
+            "deployed_to": {},  # slug → ISO timestamp
         }
         async with self._sf() as session:
-            device, secret = await self._load_secret(session, device_slug)
-            if secret is None:
+            row = await self._load(session)
+            if row is None:
                 session.add(
-                    DeviceSecretRow(
-                        device_id=device.id,
-                        kind=SSH_KEYPAIR_SECRET_KIND,
+                    AppSecretRow(
+                        key=APP_SECRET_KEY,
                         encrypted_value=encrypted,
                         metadata_json=metadata,
-                    )
+                    ),
                 )
             else:
-                secret.encrypted_value = encrypted
-                secret.metadata_json = metadata
+                row.encrypted_value = encrypted
+                row.metadata_json = metadata
+                row.updated_at = datetime.now(UTC)
             await session.commit()
         return keypair
 
     async def mark_deployed(self, device_slug: str) -> None:
+        """Record that the public key was successfully pushed to <device_slug>.
+
+        Per-device : only updates this slug's entry in the deployment
+        ledger. Other devices' entries stay as-is.
+        """
         async with self._sf() as session:
-            _device, secret = await self._load_secret(session, device_slug)
-            if secret is None:
+            row = await self._load(session)
+            if row is None:
                 raise SSHKeyError(
-                    f"no keypair to mark deployed for {device_slug!r}",
+                    "no controller keypair to mark deployed",
                 )
-            meta = dict(secret.metadata_json or {})
-            meta["deployed_at"] = datetime.now(UTC).isoformat()
-            secret.metadata_json = meta
+            meta = dict(row.metadata_json or {})
+            deployed_to: dict = dict(meta.get("deployed_to") or {})
+            deployed_to[device_slug] = datetime.now(UTC).isoformat()
+            meta["deployed_to"] = deployed_to
+            row.metadata_json = meta
+            row.updated_at = datetime.now(UTC)
             await session.commit()
 
-    async def revoke(self, device_slug: str) -> bool:
-        """Delete the keypair from storage. Returns True if something was deleted."""
+    async def revoke(self, device_slug: str = "") -> bool:  # noqa: ARG002
+        """Delete the global keypair from storage. Returns True if something
+        was deleted.
+
+        ⚠ Caller-beware : every adopted device that authenticated via this
+        key will need a fresh keypair pushed to its authorized_keys.
+
+        `device_slug` is ignored — revocation is global. The parameter is
+        kept for backwards-compatible route signatures. If a route wants
+        to only forget that a specific device was deployed (without
+        nuking the keypair), it should call `forget_device_deployment`.
+        """
         async with self._sf() as session:
-            _device, secret = await self._load_secret(session, device_slug)
-            if secret is None:
+            row = await self._load(session)
+            if row is None:
                 return False
-            await session.delete(secret)
+            await session.delete(row)
             await session.commit()
             return True
+
+    async def forget_device_deployment(self, device_slug: str) -> None:
+        """Remove `device_slug` from the deployment ledger without touching
+        the keypair itself. Call this when deleting a device — its row in
+        `deployed_to` is now meaningless, but the controller's identity
+        stays intact for every other adopted Slate."""
+        async with self._sf() as session:
+            row = await self._load(session)
+            if row is None:
+                return
+            meta = dict(row.metadata_json or {})
+            deployed_to: dict = dict(meta.get("deployed_to") or {})
+            if device_slug in deployed_to:
+                deployed_to.pop(device_slug)
+                meta["deployed_to"] = deployed_to
+                row.metadata_json = meta
+                row.updated_at = datetime.now(UTC)
+                await session.commit()

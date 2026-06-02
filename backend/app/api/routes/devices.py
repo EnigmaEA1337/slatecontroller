@@ -244,6 +244,7 @@ async def delete_device(
     slug: str,
     _user: Annotated[User, Depends(get_current_user)],
     store: Annotated[DeviceStore, Depends(get_device_store)],
+    keypair_store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store_from_app)],
     registry: Annotated[
         DeviceConnectionsRegistry, Depends(get_device_registry),
     ],
@@ -262,6 +263,10 @@ async def delete_device(
     # Drop the cached connections so we don't keep a dangling SSH/HTTP
     # session for a device that no longer exists.
     await registry.invalidate(slug)
+    # Bug I — the keypair is the controller's identity, not the
+    # device's. Forget the per-device deployment entry but keep the
+    # private key intact for the next device we adopt.
+    await keypair_store.forget_device_deployment(slug)
 
 
 @router.post("/{slug}/probe", response_model=DevicePublic)

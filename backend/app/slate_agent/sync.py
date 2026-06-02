@@ -69,6 +69,7 @@ def _profile_to_agent_payload(
     tor_use_bridges: bool = False,
     tor_bridge_lines: list[str] | None = None,
     tor_exit_country_code: str = "",
+    radio_configs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Transform a Pydantic Profile into the on-Slate JSON shape.
 
@@ -122,6 +123,28 @@ def _profile_to_agent_payload(
             "hidden": catalog.hidden,
             "enabled": enabled,
         })
+    # Processing-order policy for slot-row exclusivity in the panel :
+    #   1. multi-band non-MLO  → claim aligned indexes across their bands
+    #      before single-band SSIDs take the low free slots
+    #   2. MLO                 → uses fixed mld0/wlanmld* sections, slot
+    #      2 is mechanical on this firmware
+    #   3. single-band 5 GHz   → most contended band, eat the next free
+    #      slot first
+    #   4. single-band 6 GHz   → medium contention
+    #   5. single-band 2.4 GHz → least contended, fall to the high
+    #      indexes so the visual row exclusivity holds (e.g. a lone
+    #      2.4 GHz SSID never piggy-backs on a row already owned by an
+    #      MLO group on 5/6 GHz)
+    # Within each group : alphabetical slug for determinism.
+    def _sort_key(s: dict[str, Any]) -> tuple[int, str]:
+        bands = s["bands"]
+        if s["mlo"]:
+            return (1, s["slug"])
+        if len(bands) > 1:
+            return (0, s["slug"])
+        contention = {"5": 2, "6": 3, "2": 4}.get(bands[0] if bands else "", 5)
+        return (contention, s["slug"])
+    resolved_ssids.sort(key=_sort_key)
     payload["wifi"] = {"ssids": resolved_ssids}
 
     # Network block — materialize the catalog so the `network.sh`
@@ -164,6 +187,14 @@ def _profile_to_agent_payload(
             "tor_kill_switch": net.tor_kill_switch,
         })
     payload["network"] = {"items": resolved_nets}
+
+    # Radio (layer-1) block — per-band channel/htmode/txpower/country.
+    # Optional : when omitted, the radio.sh handler is a no-op and the
+    # MTK driver keeps whatever ACS/EHT defaults it had. We pass the
+    # 3 standard bands (2/5/6) every time so any drift between profile
+    # applies converges to the stored config.
+    if radio_configs is not None:
+        payload["radio"] = {"bands": list(radio_configs)}
 
     # AdGuard enrichment removed — there is no per-profile AdGuard
     # block anymore. All filtering / blocklists are driven by the
@@ -279,6 +310,7 @@ async def sync_profiles(
     wallpaper_store: WallpaperStore | None = None,
     tor_settings_store: Any | None = None,
     tor_bridge_store: Any | None = None,
+    radio_configs: list[dict[str, Any]] | None = None,
 ) -> SyncReport:
     """Push every profile's JSON to the Slate.
 
@@ -369,6 +401,7 @@ async def sync_profiles(
                 tor_use_bridges=tor_use_bridges,
                 tor_bridge_lines=tor_bridge_lines,
                 tor_exit_country_code=tor_exit_country_code,
+                radio_configs=radio_configs,
             )
             kinds_present = {
                 kind for (pname, kind) in wallpaper_index
