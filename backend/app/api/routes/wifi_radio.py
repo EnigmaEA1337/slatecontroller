@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.deps import get_device_connections, get_slate_ssh
 from app.auth import User, get_current_user
-from app.db.models import ThreatEventRow
+from app.db.models import ScanHistoryRow, ScanNeighborRow, ThreatEventRow
+from app.devices.locations import DeviceLocationStore
 from app.devices.registry import DeviceConnections
 from app.slate.ssh import SlateSSH
 from app.wifi.models import WifiBand
@@ -212,6 +213,22 @@ async def scan_radio(
     conn: Annotated[DeviceConnections, Depends(get_device_connections)],
     user: Annotated[User, Depends(get_current_user)],
     iface: Annotated[str | None, Query(description="Iface override")] = None,
+    override_lat: Annotated[
+        float | None,
+        Query(alias="lat", description="Override location lat (else uses device current)", ge=-90, le=90),
+    ] = None,
+    override_lon: Annotated[
+        float | None,
+        Query(alias="lon", description="Override location lon", ge=-180, le=180),
+    ] = None,
+    override_accuracy_m: Annotated[
+        float | None,
+        Query(alias="accuracy_m", description="Override accuracy in metres", ge=0),
+    ] = None,
+    override_source: Annotated[
+        str | None,
+        Query(alias="source", description="Override location source label"),
+    ] = None,
 ) -> ScanResponse:
     """Run a live scan on the given band and return AP list + channel scores.
 
@@ -291,11 +308,70 @@ async def scan_radio(
     except Exception as exc:  # noqa: BLE001
         logger.warning("wifi.scan.threat_persist_failed", error=str(exc))
 
+    # Resolve the geolocation context for this scan run.
+    #   1. Explicit query-string override wins (caller supplied a one-shot
+    #      lat/lon — eg. the operator pinned a manual position before
+    #      clicking SCAN).
+    #   2. Otherwise fall back to the device's CURRENT location entry
+    #      (most-recent row in `device_locations`).
+    #   3. Otherwise no geo stamp (lat/lon = None).
+    scan_lat: float | None = None
+    scan_lon: float | None = None
+    scan_accuracy: float | None = None
+    scan_source: str = ""
+    if override_lat is not None and override_lon is not None:
+        scan_lat = override_lat
+        scan_lon = override_lon
+        scan_accuracy = override_accuracy_m
+        scan_source = override_source or "manual"
+    else:
+        sf: async_sessionmaker = request.app.state.db_session_factory
+        loc_store = DeviceLocationStore(sf)
+        cur_loc = await loc_store.current(conn.slug)
+        if cur_loc is not None:
+            scan_lat = cur_loc.lat
+            scan_lon = cur_loc.lon
+            scan_accuracy = cur_loc.accuracy_m
+            scan_source = cur_loc.source
+
+    # Persist scan run + its neighbour list so the History tab and the
+    # map view have data to render. Best-effort — failure here doesn't
+    # fail the user-visible scan.
+    try:
+        sf: async_sessionmaker = request.app.state.db_session_factory
+        from datetime import UTC as _UTC, datetime as _dt
+        async with sf() as s:
+            run = ScanHistoryRow(
+                device_slug=conn.slug,
+                band=band, iface=result.iface,
+                started_at=_dt.fromtimestamp(result.started_at, tz=_UTC),
+                duration_s=result.duration_s,
+                lat=scan_lat, lon=scan_lon, accuracy_m=scan_accuracy,
+                source=scan_source,
+                neighbors_count=len(result.neighbors),
+                threats_count=len(threats),
+                recommended_channel=result.recommended_channel,
+                current_channel=result.current_channel,
+            )
+            s.add(run)
+            await s.flush()
+            for n in result.neighbors:
+                s.add(ScanNeighborRow(
+                    scan_id=run.id, bssid=n.bssid, ssid=n.ssid,
+                    hidden=n.hidden, channel=n.channel, band=n.band,
+                    rssi_dbm=n.rssi_dbm, security=n.security,
+                    ht_mode=n.ht_mode, is_wps_enabled=n.is_wps_enabled,
+                ))
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wifi.scan.history_persist_failed", error=str(exc))
+
     logger.info(
         "wifi.scan",
         username=user.username, device=conn.slug,
         band=band, neighbors=len(result.neighbors),
         threats=len(threats), duration_s=round(result.duration_s, 2),
+        lat=scan_lat, lon=scan_lon, source=scan_source,
     )
 
     return ScanResponse(

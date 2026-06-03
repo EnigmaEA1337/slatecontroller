@@ -42,6 +42,9 @@ const ProtectionFirewall = lazy(
 // protection — it sits next to Interfaces / Diagnostic / Réseaux / Radio.
 const NetworksTor = lazy(() => import("./pages/networks/Tor"));
 const NetworksRadio = lazy(() => import("./pages/networks/Radio"));
+const NetworksRadioHistory = lazy(
+  () => import("./pages/networks/RadioHistory"),
+);
 const SecurityAirWatch = lazy(() => import("./pages/security/AirWatch"));
 const SettingsAppearance = lazy(() => import("./pages/settings/Appearance"));
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
@@ -106,6 +109,10 @@ export default function App() {
           />
           <Route path="/networks/tor" element={<NetworksTor />} />
           <Route path="/networks/radio" element={<NetworksRadio />} />
+          <Route
+            path="/networks/radio/history"
+            element={<NetworksRadioHistory />}
+          />
           <Route path="/security/air-watch" element={<SecurityAirWatch />} />
           <Route path="/settings/appearance" element={<SettingsAppearance />} />
           <Route path="/settings" element={<SettingsHub />} />

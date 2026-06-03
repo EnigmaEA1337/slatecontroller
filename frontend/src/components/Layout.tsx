@@ -46,6 +46,7 @@ const networkChildren = [
   // Radio = layer-1 config (channel / htmode / txpower / country) +
   // channel scanner. Distinct from SSIDs (which is the layer-2 catalog).
   { to: "/networks/radio", label: "Radio · RF" },
+  { to: "/networks/radio/history", label: "Radio · Historique" },
   // Tor = couche de routage par-réseau (per-bridge transparent / SOCKS),
   // donc sa place est ici à côté des autres surfaces réseau — pas dans
   // "Protection".

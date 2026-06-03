@@ -756,3 +756,120 @@ class ThreatEventRow(Base):
     dismissed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+
+
+class ScanHistoryRow(Base):
+    """One persisted scan run — per (device, band, started_at).
+
+    Stores the high-level outcome (neighbour count, threats, recommended
+    channel) plus optional geolocation : ``lat`` / ``lon`` / ``accuracy_m``
+    when the operator (or the wardrive daemon) tagged the scan with a
+    position. ``source`` records who provided that fix so the UI can
+    show "📱 phone GPS" vs "🛰 slate GPS" vs "📌 manual pin" provenance.
+    """
+
+    __tablename__ = "scan_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    band: Mapped[str] = mapped_column(String(2), nullable=False)
+    iface: Mapped[str] = mapped_column(String(16), default="")
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True,
+    )
+    duration_s: Mapped[float] = mapped_column(default=0.0)
+
+    # Geolocation : NULL when the scan wasn't tagged with a position.
+    # Lat / lon stored as float ; accuracy in metres ; source descriptor
+    # is one of "browser" / "gps_slate" / "manual" / "wardrive".
+    lat: Mapped[float | None] = mapped_column(nullable=True)
+    lon: Mapped[float | None] = mapped_column(nullable=True)
+    accuracy_m: Mapped[float | None] = mapped_column(nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="")
+
+    neighbors_count: Mapped[int] = mapped_column(default=0)
+    threats_count: Mapped[int] = mapped_column(default=0)
+    recommended_channel: Mapped[int | None] = mapped_column(nullable=True)
+    current_channel: Mapped[int | None] = mapped_column(nullable=True)
+
+    # Free-text note the operator can attach ("client mission, point A").
+    note: Mapped[str] = mapped_column(String(256), default="")
+
+
+class ScanNeighborRow(Base):
+    """One BSSID seen during a scan run. Many per ``ScanHistoryRow``."""
+
+    __tablename__ = "scan_neighbors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scan_history.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    bssid: Mapped[str] = mapped_column(String(17), nullable=False, index=True)
+    ssid: Mapped[str] = mapped_column(String(128), default="")
+    hidden: Mapped[bool] = mapped_column(default=False)
+    channel: Mapped[int] = mapped_column(default=0)
+    band: Mapped[str] = mapped_column(String(2), default="")
+    rssi_dbm: Mapped[int] = mapped_column(default=-100)
+    security: Mapped[str] = mapped_column(String(32), default="")
+    ht_mode: Mapped[str] = mapped_column(String(16), default="")
+    is_wps_enabled: Mapped[bool] = mapped_column(default=False)
+
+
+class BssidWigleCacheRow(Base):
+    """Local cache of WiGLE.net lookups so we don't burn quota every scan.
+
+    One row per BSSID we've ever asked WiGLE about. NULL ``lat``/``lon``
+    means "WiGLE didn't have a fix for this BSSID" — we still keep the
+    row to avoid re-querying within the TTL window.
+    """
+
+    __tablename__ = "bssid_wigle_cache"
+
+    bssid: Mapped[str] = mapped_column(String(17), primary_key=True)
+    lat: Mapped[float | None] = mapped_column(nullable=True)
+    lon: Mapped[float | None] = mapped_column(nullable=True)
+    qos: Mapped[int] = mapped_column(default=0)   # WiGLE quality 0-7
+    first_seen_at: Mapped[str] = mapped_column(String(32), default="")
+    last_seen_at: Mapped[str] = mapped_column(String(32), default="")
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC),
+    )
+    not_found: Mapped[bool] = mapped_column(default=False)
+
+
+class DeviceLocationRow(Base):
+    """Per-device location entries, kept as a history timeline.
+
+    A device (Slate) is mobile — it can be at the office in the morning,
+    on a mission in the afternoon, back home in the evening. Each
+    location entry captures one such point with a label and an optional
+    note. The MOST RECENT entry is the device's "current" location and
+    is what gets stamped onto fresh scans (unless the operator explicitly
+    overrides at scan-time with the browser GPS or a different pin).
+
+    ``source`` mirrors the scan source vocabulary :
+        "manual"     operator typed in coords
+        "browser"    captured from browser geolocation
+        "gps_slate"  came from the Slate's USB GPS dongle (via gpsd)
+        "wardrive"   recorded automatically during a wardrive run
+    """
+
+    __tablename__ = "device_locations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    lat: Mapped[float] = mapped_column(nullable=False)
+    lon: Mapped[float] = mapped_column(nullable=False)
+    accuracy_m: Mapped[float | None] = mapped_column(nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="manual")
+    label: Mapped[str] = mapped_column(String(64), default="")
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC), index=True,
+    )

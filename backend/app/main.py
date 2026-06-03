@@ -29,6 +29,8 @@ from app.api.routes import tailscale as tailscale_routes
 from app.api.routes import tor as tor_routes
 from app.api.routes import vpn_configs as vpn_config_routes
 from app.api.routes import air_watch as air_watch_routes
+from app.api.routes import device_locations as device_locations_routes
+from app.api.routes import scan_history as scan_history_routes
 from app.api.routes import wifi as wifi_routes
 from app.api.routes import wifi_radio as wifi_radio_routes
 from app.config import get_settings
@@ -391,9 +393,13 @@ def create_app() -> FastAPI:
     # IMPORTANT : wifi_radio must register BEFORE wifi_routes — both share
     # the /wifi prefix, and wifi_routes has a catch-all `GET /wifi/{slug}`
     # for SSID lookup that would shadow `/wifi/radios` otherwise.
+    # Same shadow concern as wifi_radio : scan_history's /wifi/scan-history
+    # must register BEFORE wifi_routes' /wifi/{slug}.
     app.include_router(wifi_radio_routes.router, prefix="/api")
+    app.include_router(scan_history_routes.router, prefix="/api")
     app.include_router(wifi_routes.router, prefix="/api")
     app.include_router(air_watch_routes.router, prefix="/api")
+    app.include_router(device_locations_routes.router, prefix="/api")
     app.include_router(network_routes.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")
     app.include_router(adguard_routes.router, prefix="/api")

@@ -29,6 +29,7 @@ import {
   scanRadio,
   updateRadioConfig,
 } from "@/api/wifi-radio";
+import DeviceLocationPanel from "@/components/DeviceLocationPanel";
 import { errorMessage } from "@/lib/error-utils";
 import { cn } from "@/lib/utils";
 import type { WifiBand } from "@/types/wifi";
@@ -119,6 +120,8 @@ export default function NetworksRadio() {
           Config layer-1 + scanner channel · MTK MT7990 Wi-Fi 7
         </p>
       </header>
+
+      <DeviceLocationPanel />
 
       {configs.isError && (
         <div className="cyber-chip cyber-chip-on px-3 py-2 text-xs">
