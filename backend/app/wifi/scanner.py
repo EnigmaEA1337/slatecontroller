@@ -92,7 +92,10 @@ class NeighborAP:
     security: str        # WPA3 / WPA2 / WPA / WEP / open / mixed
     ht_mode: str         # HT20 / HT40 / VHT80 / HE160 / EHT320 / ...
     is_wps_enabled: bool
-    is_ours: bool = False  # set later if BSSID matches our own MAC list
+    is_ours: bool = False        # set later if BSSID matches our own MAC list
+    vendor: str = ""             # resolved from OUI registry, "" if unknown
+    vendor_slug: str = ""        # curated slug for logo display ("apple", …)
+    is_randomized: bool = False  # locally-administered MAC (privacy random.)
 
 
 @dataclass(frozen=True)
@@ -219,8 +222,11 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
 
     iw's output is verbose and per-BSS multi-line. We split on the
     "BSS <mac>(...)" headers, accumulate each block's lines, then
-    extract the salient fields.
+    extract the salient fields. Each neighbour is also enriched with
+    OUI-resolved vendor info (best-effort — empty string when the
+    OUI registry isn't loaded yet).
     """
+    from app.wifi.oui import lookup as _oui_lookup
     blocks: list[list[str]] = []
     current: list[str] = []
     for line in raw.splitlines():
@@ -286,6 +292,7 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             band = _band_for_channel(ch)
         except Exception:  # noqa: BLE001
             band = "5"
+        oui = _oui_lookup(bssid)
         out.append(NeighborAP(
             bssid=bssid,
             ssid=ssid,
@@ -296,6 +303,9 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             security=security,
             ht_mode=ht_mode,
             is_wps_enabled=wps,
+            vendor=oui.vendor,
+            vendor_slug=oui.vendor_slug,
+            is_randomized=oui.is_randomized,
         ))
     return out
 

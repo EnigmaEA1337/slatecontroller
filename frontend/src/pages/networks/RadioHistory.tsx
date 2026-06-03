@@ -23,6 +23,12 @@ import {
   type ScanHistoryRow,
 } from "@/api/scan-history";
 import { errorMessage } from "@/lib/error-utils";
+import {
+  bucketColor,
+  bucketFromRssi,
+  bucketLabel,
+  bucketRangeM,
+} from "@/lib/rssi-distance";
 import { cn } from "@/lib/utils";
 import type { WifiBand } from "@/types/wifi";
 
@@ -224,30 +230,42 @@ function DetailView({
             <th className="px-1 py-0.5">BSSID</th>
             <th className="px-1 py-0.5">ch</th>
             <th className="px-1 py-0.5">RSSI</th>
+            <th className="px-1 py-0.5">dist</th>
             <th className="px-1 py-0.5">sec</th>
           </tr>
         </thead>
         <tbody>
-          {detail.neighbors.map((n) => (
-            <tr
-              key={n.bssid}
-              className="border-t border-[color:var(--color-cyber-border)]/30"
-            >
-              <td className="px-1 py-0.5">
-                {n.hidden ? (
-                  <span className="italic text-[color:var(--color-cyber-muted)]">
-                    &lt;hidden&gt;
-                  </span>
-                ) : (
-                  n.ssid
-                )}
-              </td>
-              <td className="px-1 py-0.5 text-[10px]">{n.bssid}</td>
-              <td className="px-1 py-0.5">{n.channel}</td>
-              <td className="px-1 py-0.5">{n.rssi_dbm}</td>
-              <td className="px-1 py-0.5">{n.security}</td>
-            </tr>
-          ))}
+          {detail.neighbors.map((n) => {
+            const b = bucketFromRssi(n.rssi_dbm);
+            const c = bucketColor(b);
+            return (
+              <tr
+                key={n.bssid}
+                className="border-t border-[color:var(--color-cyber-border)]/30"
+              >
+                <td className="px-1 py-0.5">
+                  {n.hidden ? (
+                    <span className="italic text-[color:var(--color-cyber-muted)]">
+                      &lt;hidden&gt;
+                    </span>
+                  ) : (
+                    n.ssid
+                  )}
+                </td>
+                <td className="px-1 py-0.5 text-[10px]">{n.bssid}</td>
+                <td className="px-1 py-0.5">{n.channel}</td>
+                <td className="px-1 py-0.5">{n.rssi_dbm}</td>
+                <td
+                  className="px-1 py-0.5 text-[10px]"
+                  style={{ color: c }}
+                  title={bucketRangeM(b)}
+                >
+                  {bucketLabel(b)}
+                </td>
+                <td className="px-1 py-0.5">{n.security}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -328,6 +328,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             reason="no adopted device — watchdog + CVE warmup deferred",
         )
 
+    # OUI registry refresh — fire-and-forget so it doesn't delay startup.
+    # The scanner only enriches when the registry is loaded ; otherwise
+    # neighbour.vendor stays empty and the UI shows a "?" cell. Re-runs
+    # every REFRESH_INTERVAL_S (a week) checked at each call.
+    try:
+        from app.wifi.oui import refresh_async as _oui_refresh
+        import asyncio as _aio
+        _aio.create_task(_oui_refresh())
+    except Exception as exc:  # noqa: BLE001 — boot must keep going
+        logger.warning("wifi.oui.boot_task_failed", error=str(exc))
+
     try:
         yield
     finally:

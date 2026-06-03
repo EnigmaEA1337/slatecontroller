@@ -35,6 +35,9 @@ export interface NeighborAPView {
   ht_mode: string;
   is_wps_enabled: boolean;
   is_ours: boolean;
+  vendor: string;
+  vendor_slug: string;
+  is_randomized: boolean;
 }
 
 export interface ChannelScoreView {

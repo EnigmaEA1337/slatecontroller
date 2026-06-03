@@ -31,6 +31,12 @@ import {
 } from "@/api/wifi-radio";
 import DeviceLocationPanel from "@/components/DeviceLocationPanel";
 import { errorMessage } from "@/lib/error-utils";
+import {
+  bucketColor,
+  bucketLabel,
+  bucketRangeM,
+  bucketFromRssi,
+} from "@/lib/rssi-distance";
 import { cn } from "@/lib/utils";
 import type { WifiBand } from "@/types/wifi";
 import type {
@@ -538,8 +544,10 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
           <tr className="text-[color:var(--color-cyber-muted)] text-left">
             <th className="px-2 py-1">SSID</th>
             <th className="px-2 py-1">BSSID</th>
+            <th className="px-2 py-1">vendor</th>
             <th className="px-2 py-1">ch</th>
             <th className="px-2 py-1">RSSI</th>
+            <th className="px-2 py-1">distance</th>
             <th className="px-2 py-1">security</th>
             <th className="px-2 py-1">mode</th>
             <th className="px-2 py-1">flags</th>
@@ -571,6 +579,13 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
                 )}
               </td>
               <td className="px-2 py-1 text-[10px]">{n.bssid}</td>
+              <td className="px-2 py-1 text-[10px]">
+                <VendorBadge
+                  vendor={n.vendor}
+                  vendorSlug={n.vendor_slug}
+                  isRandomized={n.is_randomized}
+                />
+              </td>
               <td className="px-2 py-1">{n.channel}</td>
               <td
                 className={cn(
@@ -584,6 +599,9 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
               >
                 {n.rssi_dbm} dBm
               </td>
+              <td className="px-2 py-1">
+                <DistanceBadge rssi_dbm={n.rssi_dbm} />
+              </td>
               <td className="px-2 py-1">{n.security}</td>
               <td className="px-2 py-1">{n.ht_mode}</td>
               <td className="px-2 py-1 text-[10px]">
@@ -596,5 +614,59 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function VendorBadge({
+  vendor,
+  vendorSlug,
+  isRandomized,
+}: {
+  vendor: string;
+  vendorSlug: string;
+  isRandomized: boolean;
+}) {
+  if (isRandomized) {
+    return (
+      <span
+        title="MAC locally administered (U/L bit) — typique randomisation iOS/Android/Pwnagotchi"
+        className="text-amber-300"
+      >
+        🎭 random
+      </span>
+    );
+  }
+  if (!vendor) {
+    return (
+      <span className="text-[color:var(--color-cyber-muted)]" title="OUI inconnu (registre IEEE non chargé ou OUI non répertorié)">
+        ?
+      </span>
+    );
+  }
+  // Truncate long vendor names ; keep slug as a data attribute for
+  // future logo placement.
+  const display = vendor.length > 18 ? vendor.slice(0, 16) + "…" : vendor;
+  return (
+    <span title={vendor} data-vendor-slug={vendorSlug}>
+      {display}
+    </span>
+  );
+}
+
+function DistanceBadge({ rssi_dbm }: { rssi_dbm: number }) {
+  const b = bucketFromRssi(rssi_dbm);
+  const color = bucketColor(b);
+  return (
+    <span
+      title={`Estimation grossière depuis RSSI · ${bucketRangeM(b)}`}
+      className="inline-flex items-center gap-1 text-[10px] font-mono"
+      style={{ color }}
+    >
+      <span
+        className="inline-block h-2 w-2 rounded-full"
+        style={{ background: color, boxShadow: `0 0 6px ${color}` }}
+      />
+      {bucketLabel(b)}
+    </span>
   );
 }
