@@ -45,6 +45,7 @@ const NetworksRadio = lazy(() => import("./pages/networks/Radio"));
 const NetworksRadioHistory = lazy(
   () => import("./pages/networks/RadioHistory"),
 );
+const NetworksRadioMap = lazy(() => import("./pages/networks/RadioMap"));
 const SecurityAirWatch = lazy(() => import("./pages/security/AirWatch"));
 const SettingsAppearance = lazy(() => import("./pages/settings/Appearance"));
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
@@ -113,6 +114,7 @@ export default function App() {
             path="/networks/radio/history"
             element={<NetworksRadioHistory />}
           />
+          <Route path="/networks/radio/map" element={<NetworksRadioMap />} />
           <Route path="/security/air-watch" element={<SecurityAirWatch />} />
           <Route path="/settings/appearance" element={<SettingsAppearance />} />
           <Route path="/settings" element={<SettingsHub />} />
