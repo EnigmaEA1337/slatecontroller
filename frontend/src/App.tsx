@@ -43,6 +43,7 @@ const ProtectionFirewall = lazy(
 const NetworksTor = lazy(() => import("./pages/networks/Tor"));
 const NetworksRadio = lazy(() => import("./pages/networks/Radio"));
 const SecurityAirWatch = lazy(() => import("./pages/security/AirWatch"));
+const SettingsAppearance = lazy(() => import("./pages/settings/Appearance"));
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
 const SettingsSshKey = lazy(() => import("./pages/settings/SshKey"));
 const SettingsConnectivity = lazy(
@@ -106,6 +107,7 @@ export default function App() {
           <Route path="/networks/tor" element={<NetworksTor />} />
           <Route path="/networks/radio" element={<NetworksRadio />} />
           <Route path="/security/air-watch" element={<SecurityAirWatch />} />
+          <Route path="/settings/appearance" element={<SettingsAppearance />} />
           <Route path="/settings" element={<SettingsHub />} />
           <Route path="/settings/ssh-key" element={<SettingsSshKey />} />
           <Route path="/settings/connectivity" element={<SettingsConnectivity />} />

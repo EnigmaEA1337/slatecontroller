@@ -45,6 +45,68 @@
     color-scheme: dark;
   }
 
+  /* ---------------------------------------------------------------------
+   * DAY theme — "cyberpunk daylight" : white-on-blue, electric-blue
+   * accent. Selected from the Settings → Apparence page, persisted in
+   * localStorage. The default (no data-theme attribute) is the night
+   * theme defined above. Variables only — every cyber-* component
+   * resolves through them, so layout and components stay identical.
+   * --------------------------------------------------------------------- */
+  html[data-theme="day"] {
+    color-scheme: light;
+
+    /* Surfaces : white with a subtle cool-blue tint so it doesn't look
+     * like printer paper. Cards are pure white to stand out. */
+    --color-cyber-bg: #f4f7fb;
+    --color-cyber-bg-2: #e8eef5;
+    --color-cyber-surface: #ffffff;
+    --color-cyber-surface-2: #f0f4fa;
+    --color-cyber-border: #c5d3e8;
+    --color-cyber-border-strong: #7a93b8;
+
+    /* Accent : electric cyan-blue. #0066ff at full saturation reads
+     * "Tron / Blade Runner exterior daylight" and works well on white. */
+    --color-cyber-accent: #0066ff;
+    --color-cyber-accent-dim: #0052cc;
+    --color-cyber-accent-soft: #4d8fff;
+
+    /* Status : tuned for visibility on white. */
+    --color-cyber-ok: #009358;
+    --color-cyber-warn: #c2410c;
+    --color-cyber-danger: #dc2626;
+
+    /* Text : deep slate-navy that keeps the cyber feel without being
+     * pure black (which clashes with the cool accent). */
+    --color-cyber-fg: #0d1b2a;
+    --color-cyber-muted: #5b6b80;
+    --color-cyber-dim: #95a3b8;
+  }
+
+  /* AUTO mode : follow the OS preference. When the system says light,
+   * apply the same day overrides ; otherwise leave the night defaults
+   * in place. Setting data-theme="auto" (or no attribute at all) is the
+   * only way to get this behaviour. */
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] {
+      color-scheme: light;
+      --color-cyber-bg: #f4f7fb;
+      --color-cyber-bg-2: #e8eef5;
+      --color-cyber-surface: #ffffff;
+      --color-cyber-surface-2: #f0f4fa;
+      --color-cyber-border: #c5d3e8;
+      --color-cyber-border-strong: #7a93b8;
+      --color-cyber-accent: #0066ff;
+      --color-cyber-accent-dim: #0052cc;
+      --color-cyber-accent-soft: #4d8fff;
+      --color-cyber-ok: #009358;
+      --color-cyber-warn: #c2410c;
+      --color-cyber-danger: #dc2626;
+      --color-cyber-fg: #0d1b2a;
+      --color-cyber-muted: #5b6b80;
+      --color-cyber-dim: #95a3b8;
+    }
+  }
+
   html,
   body,
   #root {
@@ -68,6 +130,36 @@
       ),
       var(--color-cyber-bg);
     background-attachment: fixed;
+  }
+
+  /* Body background overrides for the DAY theme (and AUTO when system
+   * is light). The night gradient/grid SVG is hardcoded to the red
+   * accent, so we swap the WHOLE background here to match the electric
+   * blue palette. */
+  html[data-theme="day"] body,
+  html[data-theme="day"] body[data-theme] {
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><path d='M24 21v6M21 24h6' stroke='%230066ff' stroke-width='0.6' opacity='0.15'/></svg>"),
+      radial-gradient(
+        ellipse 800px 400px at 50% 0%,
+        rgba(0, 102, 255, 0.08) 0%,
+        transparent 70%
+      ),
+      var(--color-cyber-bg);
+    background-attachment: fixed;
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] body {
+      background:
+        url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><path d='M24 21v6M21 24h6' stroke='%230066ff' stroke-width='0.6' opacity='0.15'/></svg>"),
+        radial-gradient(
+          ellipse 800px 400px at 50% 0%,
+          rgba(0, 102, 255, 0.08) 0%,
+          transparent 70%
+        ),
+        var(--color-cyber-bg);
+      background-attachment: fixed;
+    }
   }
 
   /* PCB-style decorative traces in the viewport corners */

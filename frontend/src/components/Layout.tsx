@@ -79,6 +79,9 @@ const settingsChildren = [
   { to: "/settings/tailnet-admin", label: "Tailnet admin" },
   { to: "/settings/communication", label: "Communication" },
   { to: "/settings/agent", label: "Agent local" },
+  // Pure client-side preference — palette day / night / auto. Saved in
+  // localStorage, no controller call.
+  { to: "/settings/appearance", label: "Apparence" },
 ];
 
 const vpnChildren = [
