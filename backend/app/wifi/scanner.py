@@ -256,13 +256,25 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
         sig_match = re.search(r"signal:\s*(-?\d+(?:\.\d+)?)\s*dBm", text)
         if sig_match:
             rssi = int(float(sig_match.group(1)))
-        # SSID (handle hidden)
+        # SSID (handle hidden). `iw scan` emits an SSID line at every
+        # nesting level (top-level BSS field, IE dump from Probe Response,
+        # IE dump from Beacon, …). The top-level entry has a single tab
+        # of indent ; the IE-nested ones have two-or-more. Restrict the
+        # match to the single-tab case to avoid grabbing garbage like
+        # ``RSN: * Version: 1`` from an IE block.
         ssid = ""
         hidden = False
-        ssid_match = re.search(r"^\s*SSID:\s*(.*)$", text, re.MULTILINE)
+        # NB : `\s*` would match newlines too — re.MULTILINE only changes
+        # `^` and `$` anchors, not the meaning of `\s`. Without the
+        # non-newline-restricted whitespace, an empty `\tSSID: ` would
+        # silently capture the NEXT line's content (typically the IE
+        # dump `RSN:` line). Restrict to space-or-tab.
+        ssid_match = re.search(r"^\tSSID:[ \t]*(.*)$", text, re.MULTILINE)
         if ssid_match:
             ssid = ssid_match.group(1).strip()
-            if not ssid or all(b == "\\x00" for b in ssid.split()):
+            # SSID may be all null-bytes encoded as \\x00 — that's how
+            # iw shows hidden / cloaked SSIDs.
+            if not ssid or all(p == "\\x00" for p in ssid.split()):
                 hidden = True
                 ssid = ""
         else:
@@ -382,9 +394,15 @@ def score_channels(
 def best_channel(scores: list[ChannelScore]) -> int | None:
     if not scores:
         return None
-    # Highest score wins ; tiebreak by lowest channel number (stable
-    # behaviour across reboots).
-    sorted_scores = sorted(scores, key=lambda s: (-s.score, s.channel))
+    # Highest score wins ; on tie, prefer THE CURRENT channel so we
+    # don't recommend swapping for a cosmetically-lower index when the
+    # operator is already sitting on an equally-good slot (saves a
+    # `wifi reload` glitch). Final tiebreak by lowest channel number
+    # for stable behaviour across reboots.
+    sorted_scores = sorted(
+        scores,
+        key=lambda s: (-s.score, 0 if s.is_current else 1, s.channel),
+    )
     return sorted_scores[0].channel
 
 
@@ -478,12 +496,16 @@ def detect_threats(
 
 # ---------------------------- scan orchestration ---------------------------- #
 
-# Per-band default scan iface. These are the OEM template sections we
-# keep alive in the catalog-driven layout (ra0/rai0/rax0).
+# Per-band default scan iface. GL.iNet's MTK firmware exposes dedicated
+# "ra15 / rai15 / rax15" interfaces per band specifically for site
+# survey — they're always up, channel-scanning, and decoupled from any
+# Master-mode VAP. Using them keeps the scan from touching the user's
+# broadcasted SSIDs (in particular avoids any disruption to MLO links
+# rai2/rax2 used by NEXUS-7 in the operator's catalog).
 DEFAULT_SCAN_IFACE: dict[WifiBand, str] = {
-    "2": "ra0",
-    "5": "rai0",
-    "6": "rax0",
+    "2": "ra15",
+    "5": "rai15",
+    "6": "rax15",
 }
 
 
