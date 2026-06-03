@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Ubuntu+Sans+Mono:wght@400;500;700&display=swap");
 
 /* =====================================================================
  * Cyberpunk HUD theme - "Visey" reference
@@ -34,10 +34,12 @@
   --color-cyber-muted: #7a7d96;
   --color-cyber-dim: #4d4f6b;
 
-  /* Fonts */
-  --font-mono: "JetBrains Mono", "IBM Plex Mono", "Fira Code", ui-monospace,
-    SFMono-Regular, Menlo, monospace;
-  --font-display: "Orbitron", "JetBrains Mono", ui-monospace, monospace;
+  /* Fonts — Ubuntu Sans Mono is the "humanist mono" Wireshark uses on
+   * their tools pages (round 0/g/9, generous spacing). Easier to read
+   * for long sessions than JetBrains' tighter techy default. */
+  --font-mono: "Ubuntu Sans Mono", "JetBrains Mono", "IBM Plex Mono",
+    "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Orbitron", "Ubuntu Sans Mono", ui-monospace, monospace;
 }
 
 @layer base {
