@@ -172,7 +172,7 @@ function StatCard({
     dim: "text-[color:var(--color-cyber-muted)]",
   }[accent];
   return (
-    <div className="cyber-panel p-3">
+    <div className="cyber-card p-3">
       <div className="cyber-label text-[9px]">{label}</div>
       <div className={cn("cyber-glow font-mono text-2xl", color)}>{value}</div>
     </div>
@@ -198,7 +198,7 @@ function ThreatList({
         <div
           key={e.id}
           className={cn(
-            "cyber-panel border p-3 flex items-start gap-3",
+            "cyber-card border p-3 flex items-start gap-3",
             LEVEL_STYLE[e.level],
             dimmed && "opacity-50",
           )}

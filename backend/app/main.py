@@ -388,8 +388,11 @@ def create_app() -> FastAPI:
     app.include_router(slate_routes.router, prefix="/api")
     app.include_router(proton_routes.router, prefix="/api")
     app.include_router(vpn_config_routes.router, prefix="/api")
-    app.include_router(wifi_routes.router, prefix="/api")
+    # IMPORTANT : wifi_radio must register BEFORE wifi_routes — both share
+    # the /wifi prefix, and wifi_routes has a catch-all `GET /wifi/{slug}`
+    # for SSID lookup that would shadow `/wifi/radios` otherwise.
     app.include_router(wifi_radio_routes.router, prefix="/api")
+    app.include_router(wifi_routes.router, prefix="/api")
     app.include_router(air_watch_routes.router, prefix="/api")
     app.include_router(network_routes.router, prefix="/api")
     app.include_router(settings_routes.router, prefix="/api")

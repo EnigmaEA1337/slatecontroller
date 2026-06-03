@@ -209,7 +209,7 @@ function BandPanel({
   return (
     <div className="space-y-4">
       {/* Config card */}
-      <section className="cyber-panel p-4">
+      <section className="cyber-card p-4">
         <header className="cyber-label text-[10px] mb-3 flex items-center gap-2">
           <RadioTower className="h-3 w-3" /> config radio · {BAND_LABEL[band]}
         </header>
@@ -264,7 +264,7 @@ function BandPanel({
       </section>
 
       {/* Scanner card */}
-      <section className="cyber-panel p-4">
+      <section className="cyber-card p-4">
         <header className="mb-3 flex items-center justify-between">
           <div className="cyber-label text-[10px] flex items-center gap-2">
             <Zap className="h-3 w-3" /> scanner channel · {BAND_LABEL[band]}
@@ -357,7 +357,7 @@ function ScanResultsView({
       </div>
 
       {result.threats.length > 0 && (
-        <div className="cyber-panel cyber-panel-warn p-3 space-y-1">
+        <div className="cyber-card cyber-card-accent p-3 space-y-1">
           {result.threats.map((t, i) => (
             <div
               key={i}
@@ -407,7 +407,7 @@ function ChannelHeatmap({
   applyDisabled: boolean;
 }) {
   return (
-    <div className="cyber-panel p-3">
+    <div className="cyber-card p-3">
       <header className="cyber-label text-[10px] mb-2">
         occupation channels
       </header>
@@ -520,13 +520,13 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
   );
   if (sorted.length === 0) {
     return (
-      <div className="cyber-panel p-3 text-xs text-[color:var(--color-cyber-muted)]">
+      <div className="cyber-card p-3 text-xs text-[color:var(--color-cyber-muted)]">
         Aucun AP voisin détecté sur cette bande.
       </div>
     );
   }
   return (
-    <div className="cyber-panel p-3">
+    <div className="cyber-card p-3">
       <header className="cyber-label text-[10px] mb-2">
         AP voisins ({sorted.length})
       </header>
