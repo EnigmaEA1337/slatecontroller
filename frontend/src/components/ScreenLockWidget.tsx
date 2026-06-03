@@ -29,14 +29,14 @@ import { errorMessage } from "@/lib/error-utils";
  * Compact widget for the device card : shows PIN screen-lock state with a
  * one-line summary + a button to open the configuration modal.
  *
- * In V1 the controller's screen-lock endpoints target the default device
- * only (singleton SlateSSH). If the device on this card is not the default
- * we render nothing — there's no per-device SSH multiplexer yet.
+ * The screen-lock route used to be gated on the default device only,
+ * because it depended on the singleton SlateSSH. The backend has since
+ * moved to the device registry so any adopted device can be targeted
+ * directly. The ``isDefault`` prop is kept for callsite back-compat but
+ * is no longer used.
  */
-export default function ScreenLockWidget({
-  isDefault,
-}: {
-  isDefault: boolean;
+export default function ScreenLockWidget(_props: {
+  isDefault?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const qc = useQueryClient();
@@ -44,11 +44,9 @@ export default function ScreenLockWidget({
   const status = useQuery({
     queryKey: ["slate", "screen-lock"],
     queryFn: getScreenLock,
-    enabled: isDefault,
     staleTime: 30_000,
   });
 
-  if (!isDefault) return null;
   if (status.isLoading) {
     return (
       <div className="mt-3 flex items-center gap-2 rounded border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)] px-3 py-2 text-xs text-[color:var(--color-cyber-muted)]">
