@@ -38,6 +38,21 @@ export interface NeighborAPView {
   vendor: string;
   vendor_slug: string;
   is_randomized: boolean;
+  ap_root: string;
+}
+
+export interface PhysicalAPGroupView {
+  ap_root: string;
+  channel: number;
+  rssi_dbm: number;
+  vendor: string;
+  vendor_slug: string;
+  is_all_randomized: boolean;
+  has_wps: boolean;
+  ssids: string[];
+  hidden_count: number;
+  member_count: number;
+  bssids: string[];
 }
 
 export interface ChannelScoreView {
@@ -73,6 +88,7 @@ export interface ScanResponse {
   recommended_channel: number | null;
   current_channel: number | null;
   threats: ThreatEventView[];
+  physical_aps: PhysicalAPGroupView[];
 }
 
 // Persisted threat events (Air Watch).

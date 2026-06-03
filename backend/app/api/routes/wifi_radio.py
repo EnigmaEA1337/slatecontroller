@@ -33,6 +33,7 @@ from app.wifi.scanner import (
     ScanResult,
     ThreatEvent,
     detect_threats,
+    group_by_physical_ap,
     scan_band,
 )
 from app.wifi.store import WifiSsidStore
@@ -89,6 +90,7 @@ class NeighborAPView(BaseModel):
     vendor: str
     vendor_slug: str
     is_randomized: bool
+    ap_root: str
 
     @classmethod
     def from_neighbor(cls, n: NeighborAP) -> "NeighborAPView":
@@ -99,7 +101,24 @@ class NeighborAPView(BaseModel):
             is_wps_enabled=n.is_wps_enabled, is_ours=n.is_ours,
             vendor=n.vendor, vendor_slug=n.vendor_slug,
             is_randomized=n.is_randomized,
+            ap_root=n.ap_root,
         )
+
+
+class PhysicalAPGroupView(BaseModel):
+    """Cluster of VAPs that share a physical radio."""
+
+    ap_root: str
+    channel: int
+    rssi_dbm: int
+    vendor: str
+    vendor_slug: str
+    is_all_randomized: bool
+    has_wps: bool
+    ssids: list[str]
+    hidden_count: int
+    member_count: int
+    bssids: list[str]
 
 
 class ChannelScoreView(BaseModel):
@@ -140,6 +159,7 @@ class ScanResponse(BaseModel):
     recommended_channel: int | None
     current_channel: int | None
     threats: list[ThreatEventView]
+    physical_aps: list[PhysicalAPGroupView]
 
 
 # ---------------------------- helpers ---------------------------- #
@@ -366,6 +386,9 @@ async def scan_radio(
                     hidden=n.hidden, channel=n.channel, band=n.band,
                     rssi_dbm=n.rssi_dbm, security=n.security,
                     ht_mode=n.ht_mode, is_wps_enabled=n.is_wps_enabled,
+                    ap_root=n.ap_root, vendor=n.vendor,
+                    vendor_slug=n.vendor_slug,
+                    is_randomized=n.is_randomized,
                 ))
             await s.commit()
     except Exception as exc:  # noqa: BLE001
@@ -378,6 +401,8 @@ async def scan_radio(
         threats=len(threats), duration_s=round(result.duration_s, 2),
         lat=scan_lat, lon=scan_lon, source=scan_source,
     )
+
+    physical_aps = group_by_physical_ap(result.neighbors)
 
     return ScanResponse(
         band=result.band,
@@ -396,4 +421,15 @@ async def scan_radio(
         recommended_channel=result.recommended_channel,
         current_channel=result.current_channel,
         threats=[ThreatEventView.from_event(t) for t in threats],
+        physical_aps=[
+            PhysicalAPGroupView(
+                ap_root=g.ap_root, channel=g.channel, rssi_dbm=g.rssi_dbm,
+                vendor=g.vendor, vendor_slug=g.vendor_slug,
+                is_all_randomized=g.is_all_randomized, has_wps=g.has_wps,
+                ssids=g.ssids, hidden_count=g.hidden_count,
+                member_count=len(g.members),
+                bssids=[m.bssid for m in g.members],
+            )
+            for g in physical_aps
+        ],
     )

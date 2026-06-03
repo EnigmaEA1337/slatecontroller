@@ -348,8 +348,22 @@ function ScanResultsView({
           <span className="font-mono">{result.duration_s.toFixed(1)}s</span>
         </div>
         <div>
-          <span className="cyber-label">AP détectés:</span>{" "}
+          <span className="cyber-label">SSIDs détectés:</span>{" "}
           <span className="font-mono">{result.neighbors.length}</span>
+          {result.physical_aps.length > 0 && (
+            <>
+              {" "}
+              <span className="text-[color:var(--color-cyber-muted)]">
+                sur
+              </span>{" "}
+              <span className="font-mono text-[color:var(--color-cyber-accent)]">
+                {result.physical_aps.length}
+              </span>{" "}
+              <span className="text-[color:var(--color-cyber-muted)]">
+                AP physique{result.physical_aps.length > 1 ? "s" : ""}
+              </span>
+            </>
+          )}
         </div>
         <div>
           <span className="cyber-label">canal actuel:</span>{" "}
@@ -522,11 +536,43 @@ function ChannelHeatmap({
   );
 }
 
+// Distinct color per ap_root group so the operator visually clusters
+// VAPs of the same physical radio at a glance. Returns a stable hash
+// → hue so the same ap_root always paints in the same shade.
+function colorForApRoot(apRoot: string): string {
+  if (!apRoot) return "transparent";
+  let h = 0;
+  for (let i = 0; i < apRoot.length; i++) {
+    h = (h * 31 + apRoot.charCodeAt(i)) >>> 0;
+  }
+  const hue = h % 360;
+  return `hsl(${hue} 70% 55%)`;
+}
+
 function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
+  // Sort by ap_root first (so VAPs of the same radio sit together),
+  // then by RSSI descending within each cluster.
   const sorted = useMemo(
-    () => [...neighbors].sort((a, b) => b.rssi_dbm - a.rssi_dbm),
+    () =>
+      [...neighbors].sort((a, b) => {
+        if (a.ap_root !== b.ap_root) {
+          return a.ap_root.localeCompare(b.ap_root);
+        }
+        return b.rssi_dbm - a.rssi_dbm;
+      }),
     [neighbors],
   );
+  // Short labels per group : G1, G2, ... in order of appearance.
+  const groupLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    let i = 1;
+    for (const n of sorted) {
+      if (n.ap_root && !map.has(n.ap_root)) {
+        map.set(n.ap_root, `G${i++}`);
+      }
+    }
+    return map;
+  }, [sorted]);
   if (sorted.length === 0) {
     return (
       <div className="cyber-card p-3 text-xs text-[color:var(--color-cyber-muted)]">
@@ -542,6 +588,7 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
       <table className="w-full font-mono text-xs">
         <thead>
           <tr className="text-[color:var(--color-cyber-muted)] text-left">
+            <th className="px-2 py-1">AP</th>
             <th className="px-2 py-1">SSID</th>
             <th className="px-2 py-1">BSSID</th>
             <th className="px-2 py-1">vendor</th>
@@ -554,14 +601,32 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
           </tr>
         </thead>
         <tbody>
-          {sorted.map((n) => (
+          {sorted.map((n) => {
+            const color = colorForApRoot(n.ap_root);
+            const label = groupLabel.get(n.ap_root) ?? "";
+            return (
             <tr
               key={n.bssid}
               className={cn(
                 "border-t border-[color:var(--color-cyber-border)]/30",
                 n.is_ours && "bg-cyan-500/5",
               )}
+              style={
+                n.ap_root
+                  ? { borderLeft: `3px solid ${color}` }
+                  : undefined
+              }
             >
+              <td className="px-2 py-1 text-[10px]" title={n.ap_root}>
+                {label && (
+                  <span
+                    className="px-1.5 py-0.5 rounded font-mono font-bold"
+                    style={{ background: color, color: "white" }}
+                  >
+                    {label}
+                  </span>
+                )}
+              </td>
               <td className="px-2 py-1">
                 {n.hidden ? (
                   <span className="text-[color:var(--color-cyber-muted)] italic">
@@ -610,7 +675,8 @@ function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
                 )}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -52,6 +52,10 @@ class ScanNeighborView(BaseModel):
     security: str
     ht_mode: str
     is_wps_enabled: bool
+    ap_root: str
+    vendor: str
+    vendor_slug: str
+    is_randomized: bool
 
 
 class ScanHistoryDetailView(ScanHistoryView):
@@ -116,6 +120,9 @@ async def get_history(
                 channel=n.channel, band=n.band, rssi_dbm=n.rssi_dbm,
                 security=n.security, ht_mode=n.ht_mode,
                 is_wps_enabled=n.is_wps_enabled,
+                ap_root=n.ap_root, vendor=n.vendor,
+                vendor_slug=n.vendor_slug,
+                is_randomized=n.is_randomized,
             )
             for n in neighbors
         ],

@@ -816,6 +816,12 @@ class ScanNeighborRow(Base):
     security: Mapped[str] = mapped_column(String(32), default="")
     ht_mode: Mapped[str] = mapped_column(String(16), default="")
     is_wps_enabled: Mapped[bool] = mapped_column(default=False)
+    # Physical-AP cluster identifier (shared 5-byte suffix + channel).
+    # Empty string for rows persisted before this column existed.
+    ap_root: Mapped[str] = mapped_column(String(32), default="", index=True)
+    vendor: Mapped[str] = mapped_column(String(128), default="")
+    vendor_slug: Mapped[str] = mapped_column(String(32), default="")
+    is_randomized: Mapped[bool] = mapped_column(default=False)
 
 
 class BssidWigleCacheRow(Base):

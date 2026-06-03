@@ -66,6 +66,32 @@ NON_OVERLAP_24: tuple[frozenset[int], ...] = (
 )
 
 
+def _ap_root_for(bssid: str, channel: int) -> str:
+    """Compute the physical-AP identifier for a (BSSID, channel) pair.
+
+    Almost every multi-SSID-capable AP firmware (UniFi, Aruba, Cisco
+    Meraki, GL.iNet, Ruckus, …) assigns its VAPs a BSSID whose lower
+    5 bytes match the radio's "anchor" MAC ; only the first byte
+    varies (incremented +1 / +2 / …, sometimes with the U/L bit
+    flipped on the extras). So grouping by ``<5-byte suffix>@<channel>``
+    yields one cluster per physical radio.
+
+    Channel is part of the key so a dual-radio AP that broadcasts the
+    same VAPs on 5 GHz AND 6 GHz (rare but possible) is rendered as
+    two clusters (one per radio) — which matches reality (different
+    PHY, different beacon stream).
+
+    Output is lowercase + colon-separated for human readability in the
+    UI : ``"78:48:dc:20:fe@36"``.
+    """
+    norm = bssid.lower().strip()
+    parts = norm.split(":")
+    if len(parts) != 6:
+        return f"{norm}@{channel}"
+    suffix = ":".join(parts[1:])
+    return f"{suffix}@{channel}"
+
+
 def _band_for_channel(ch: int) -> WifiBand:
     if 1 <= ch <= 14:
         return "2"
@@ -81,7 +107,9 @@ ThreatLevel = Literal["info", "warn", "alert"]
 
 @dataclass(frozen=True)
 class NeighborAP:
-    """One AP seen by the scan."""
+    """One BSS (= one VAP / one SSID broadcast). A single physical AP
+    typically advertises several BSSes that share the lower 5 bytes of
+    their BSSID (vendor convention) — see ``ap_root`` below."""
 
     bssid: str
     ssid: str            # may be "" for hidden / cloaked
@@ -96,6 +124,13 @@ class NeighborAP:
     vendor: str = ""             # resolved from OUI registry, "" if unknown
     vendor_slug: str = ""        # curated slug for logo display ("apple", …)
     is_randomized: bool = False  # locally-administered MAC (privacy random.)
+    # Deterministic identifier shared by every VAP of the same physical
+    # radio. Constructed as ``<lower-5-bytes>@<channel>`` so two BSSIDs
+    # that differ only on their first octet (the common multi-SSID
+    # pattern : ``84:78:48:…``, ``8a:78:48:…``, ``8e:78:48:…``, …)
+    # cluster together. Falls back to the BSSID itself when the suffix
+    # can't be computed (parser edge cases).
+    ap_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -306,7 +341,64 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             vendor=oui.vendor,
             vendor_slug=oui.vendor_slug,
             is_randomized=oui.is_randomized,
+            ap_root=_ap_root_for(bssid, ch),
         ))
+    return out
+
+
+@dataclass(frozen=True)
+class PhysicalAPGroup:
+    """A cluster of NeighborAP records that share the same physical radio."""
+
+    ap_root: str
+    channel: int
+    members: list[NeighborAP]
+    ssids: list[str]              # distinct, non-hidden SSIDs broadcast
+    hidden_count: int             # how many member VAPs are hidden
+    rssi_dbm: int                 # representative RSSI (mean / median)
+    vendor: str                   # vendor of the FIRST non-randomised member
+    vendor_slug: str
+    is_all_randomized: bool       # true iff every member has U/L bit set
+    has_wps: bool                 # at least one member exposes WPS
+
+
+def group_by_physical_ap(neighbors: list[NeighborAP]) -> list[PhysicalAPGroup]:
+    """Cluster a flat neighbour list by physical radio.
+
+    Returns groups sorted by strongest RSSI first (closest physical AP),
+    which matches the operator's natural reading order.
+    """
+    buckets: dict[str, list[NeighborAP]] = {}
+    for n in neighbors:
+        buckets.setdefault(n.ap_root or n.bssid, []).append(n)
+    out: list[PhysicalAPGroup] = []
+    for key, members in buckets.items():
+        ssids = sorted({m.ssid for m in members if m.ssid})
+        hidden = sum(1 for m in members if m.hidden)
+        rssis = sorted(m.rssi_dbm for m in members)
+        median = rssis[len(rssis) // 2]
+        # Vendor : prefer a member whose MAC isn't randomised — that's
+        # the "anchor" MAC the OUI registry actually knows.
+        vendor = ""
+        vendor_slug = ""
+        for m in members:
+            if not m.is_randomized and m.vendor:
+                vendor = m.vendor
+                vendor_slug = m.vendor_slug
+                break
+        out.append(PhysicalAPGroup(
+            ap_root=key,
+            channel=members[0].channel,
+            members=members,
+            ssids=ssids,
+            hidden_count=hidden,
+            rssi_dbm=median,
+            vendor=vendor,
+            vendor_slug=vendor_slug,
+            is_all_randomized=all(m.is_randomized for m in members),
+            has_wps=any(m.is_wps_enabled for m in members),
+        ))
+    out.sort(key=lambda g: -g.rssi_dbm)
     return out
 
 
