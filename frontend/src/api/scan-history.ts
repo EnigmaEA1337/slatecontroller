@@ -31,6 +31,10 @@ export interface ScanHistoryNeighbor {
   security: string;
   ht_mode: string;
   is_wps_enabled: boolean;
+  ap_root: string;
+  vendor: string;
+  vendor_slug: string;
+  is_randomized: boolean;
 }
 
 export interface ScanHistoryDetail extends ScanHistoryRow {

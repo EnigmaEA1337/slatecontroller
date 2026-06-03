@@ -19,9 +19,15 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
+  Clock,
+  History,
+  MapPin,
   RadioTower,
   RefreshCw,
+  Trash2,
   Zap,
 } from "lucide-react";
 import {
@@ -29,6 +35,13 @@ import {
   scanRadio,
   updateRadioConfig,
 } from "@/api/wifi-radio";
+import {
+  deleteScanHistory,
+  getScanHistoryDetail,
+  listScanHistory,
+  type ScanHistoryDetail,
+  type ScanHistoryRow,
+} from "@/api/scan-history";
 import DeviceLocationPanel from "@/components/DeviceLocationPanel";
 import { errorMessage } from "@/lib/error-utils";
 import {
@@ -42,6 +55,7 @@ import type { WifiBand } from "@/types/wifi";
 import type {
   ChannelScoreView,
   NeighborAPView,
+  PhysicalAPGroupView,
   ScanResponse,
 } from "@/types/wifi-radio";
 
@@ -59,6 +73,17 @@ const BAND_ICON: Record<WifiBand, string> = {
 
 const BANDS: WifiBand[] = ["2", "5", "6"];
 
+// State of a displayed scan : may be a fresh run that we just launched,
+// or a past run loaded from scan_history. The shape is the same — only
+// difference is the optional ``loadedFromId`` marker so the UI can show
+// "scan rechargé · 03/06 14:32" instead of pretending it's a live run.
+interface DisplayedScan {
+  result: ScanResponse;
+  loadedFromId?: number;
+  loadedAt?: string;       // ISO timestamp of the original scan
+  loadedNote?: string;
+}
+
 export default function NetworksRadio() {
   const qc = useQueryClient();
   const configs = useQuery({
@@ -66,8 +91,8 @@ export default function NetworksRadio() {
     queryFn: getRadioConfigs,
   });
   const [activeBand, setActiveBand] = useState<WifiBand>("5");
-  const [scanResults, setScanResults] = useState<
-    Partial<Record<WifiBand, ScanResponse>>
+  const [displayed, setDisplayed] = useState<
+    Partial<Record<WifiBand, DisplayedScan>>
   >({});
 
   const scanMut = useMutation({
@@ -76,7 +101,8 @@ export default function NetworksRadio() {
       return { band, res };
     },
     onSuccess: ({ band, res }) => {
-      setScanResults((prev) => ({ ...prev, [band]: res }));
+      setDisplayed((prev) => ({ ...prev, [band]: { result: res } }));
+      qc.invalidateQueries({ queryKey: ["scan-history"] });
     },
   });
 
@@ -157,8 +183,14 @@ export default function NetworksRadio() {
         <BandPanel
           band={activeBand}
           config={configs.data.bands[activeBand]}
-          scanResult={scanResults[activeBand]}
+          displayed={displayed[activeBand]}
           onScan={() => scanMut.mutate(activeBand)}
+          onLoadScan={(loaded) =>
+            setDisplayed((prev) => ({ ...prev, [activeBand]: loaded }))
+          }
+          onClearLoaded={() =>
+            setDisplayed((prev) => ({ ...prev, [activeBand]: undefined }))
+          }
           scanning={scanMut.isPending && scanMut.variables === activeBand}
           onApplyChannel={(ch) =>
             applyMut.mutate({ band: activeBand, channel: ch })
@@ -189,8 +221,10 @@ export default function NetworksRadio() {
 function BandPanel({
   band,
   config,
-  scanResult,
+  displayed,
   onScan,
+  onLoadScan,
+  onClearLoaded,
   scanning,
   onApplyChannel,
   onUpdateTx,
@@ -206,8 +240,10 @@ function BandPanel({
     country: string;
     available_htmodes: string[];
   };
-  scanResult?: ScanResponse;
+  displayed?: DisplayedScan;
   onScan: () => void;
+  onLoadScan: (d: DisplayedScan) => void;
+  onClearLoaded: () => void;
   scanning: boolean;
   onApplyChannel: (ch: number) => void;
   onUpdateTx: (p: number) => void;
@@ -215,6 +251,7 @@ function BandPanel({
   onUpdateCountry: (c: string) => void;
   mutationsPending: boolean;
 }) {
+  const scanResult = displayed?.result;
   return (
     <div className="space-y-4">
       {/* Config card */}
@@ -278,25 +315,61 @@ function BandPanel({
           <div className="cyber-label text-[10px] flex items-center gap-2">
             <Zap className="h-3 w-3" /> scanner channel · {BAND_LABEL[band]}
           </div>
-          <button
-            onClick={onScan}
-            disabled={scanning}
-            className="cyber-button px-4 py-2 text-xs"
-          >
-            {scanning ? (
-              <>
-                <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
-                scan en cours…
-              </>
-            ) : (
-              <>▶ START SCAN</>
-            )}
-          </button>
+          <div className="flex items-center gap-2">
+            <ScanPicker
+              band={band}
+              onLoad={onLoadScan}
+              activeLoadedId={displayed?.loadedFromId}
+            />
+            <button
+              onClick={onScan}
+              disabled={scanning}
+              className="cyber-button px-4 py-2 text-xs"
+            >
+              {scanning ? (
+                <>
+                  <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+                  scan en cours…
+                </>
+              ) : (
+                <>▶ START SCAN</>
+              )}
+            </button>
+          </div>
         </header>
+
+        {displayed?.loadedFromId && (
+          <div className="flex items-center gap-3 cyber-card cyber-card-accent p-2 text-xs">
+            <History className="h-3 w-3" />
+            <span>
+              Scan rechargé{" "}
+              <span className="font-mono">
+                #{displayed.loadedFromId}
+              </span>
+              {displayed.loadedAt && (
+                <span className="ml-2 text-[color:var(--color-cyber-muted)]">
+                  · {new Date(displayed.loadedAt).toLocaleString("fr-FR")}
+                </span>
+              )}
+              {displayed.loadedNote && (
+                <span className="ml-2 italic text-[color:var(--color-cyber-muted)]">
+                  · {displayed.loadedNote}
+                </span>
+              )}
+            </span>
+            <button
+              onClick={onClearLoaded}
+              className="ml-auto cyber-button-ghost px-2 py-0.5 text-[10px]"
+            >
+              fermer
+            </button>
+          </div>
+        )}
 
         {!scanResult && !scanning && (
           <p className="cyber-label text-[10px]">
-            // aucun scan effectué — clique START SCAN pour analyser le spectre
+            // aucun scan affiché — clique START SCAN ou pioche un scan
+            précédent dans la liste déroulante
           </p>
         )}
 
@@ -409,7 +482,10 @@ function ScanResultsView({
         applyDisabled={applyDisabled}
       />
 
-      <NeighborsTable neighbors={result.neighbors} />
+      <APTreeView
+        neighbors={result.neighbors}
+        groups={result.physical_aps}
+      />
     </div>
   );
 }
@@ -549,173 +625,379 @@ function colorForApRoot(apRoot: string): string {
   return `hsl(${hue} 70% 55%)`;
 }
 
-function NeighborsTable({ neighbors }: { neighbors: NeighborAPView[] }) {
-  // Sort by ap_root first (so VAPs of the same radio sit together),
-  // then by RSSI descending within each cluster.
-  const sorted = useMemo(
-    () =>
-      [...neighbors].sort((a, b) => {
-        if (a.ap_root !== b.ap_root) {
-          return a.ap_root.localeCompare(b.ap_root);
-        }
-        return b.rssi_dbm - a.rssi_dbm;
-      }),
-    [neighbors],
-  );
-  // Short labels per group : G1, G2, ... in order of appearance.
+function APTreeView({
+  neighbors,
+  groups,
+}: {
+  neighbors: NeighborAPView[];
+  groups: PhysicalAPGroupView[];
+}) {
+  // Group label G1/G2/G3 mapped from order-of-strength (groups[]
+  // already comes back sorted by descending RSSI).
   const groupLabel = useMemo(() => {
-    const map = new Map<string, string>();
-    let i = 1;
-    for (const n of sorted) {
-      if (n.ap_root && !map.has(n.ap_root)) {
-        map.set(n.ap_root, `G${i++}`);
-      }
+    const m = new Map<string, string>();
+    groups.forEach((g, i) => m.set(g.ap_root, `G${i + 1}`));
+    return m;
+  }, [groups]);
+
+  // Members per group, sorted by best RSSI first within each.
+  const membersByRoot = useMemo(() => {
+    const m = new Map<string, NeighborAPView[]>();
+    for (const n of neighbors) {
+      const k = n.ap_root || n.bssid;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(n);
     }
-    return map;
-  }, [sorted]);
-  if (sorted.length === 0) {
+    for (const list of m.values()) {
+      list.sort((a, b) => b.rssi_dbm - a.rssi_dbm);
+    }
+    return m;
+  }, [neighbors]);
+
+  // Each row's expand state. Default : ALL collapsed (the user wants a
+  // clean root-only view at first glance).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (root: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  const allExpanded = expanded.size === groups.length && groups.length > 0;
+  const toggleAll = () => {
+    if (allExpanded) setExpanded(new Set());
+    else setExpanded(new Set(groups.map((g) => g.ap_root)));
+  };
+
+  if (groups.length === 0) {
     return (
       <div className="cyber-card p-3 text-xs text-[color:var(--color-cyber-muted)]">
         Aucun AP voisin détecté sur cette bande.
       </div>
     );
   }
+
   return (
-    <div className="cyber-card p-3">
-      <header className="cyber-label text-[10px] mb-2">
-        AP voisins ({sorted.length})
+    <div className="cyber-card p-3 space-y-1">
+      <header className="cyber-label text-[10px] mb-2 flex items-center justify-between">
+        <span>
+          AP physiques ({groups.length}) · VAPs ({neighbors.length})
+        </span>
+        <button
+          onClick={toggleAll}
+          className="cyber-button-ghost px-2 py-0.5 text-[9px]"
+        >
+          {allExpanded ? "tout replier" : "tout déplier"}
+        </button>
       </header>
-      <table className="w-full font-mono text-xs">
-        <thead>
-          <tr className="text-[color:var(--color-cyber-muted)] text-left">
-            <th className="px-2 py-1">AP</th>
-            <th className="px-2 py-1">SSID</th>
-            <th className="px-2 py-1">BSSID</th>
-            <th className="px-2 py-1">vendor</th>
-            <th className="px-2 py-1">ch</th>
-            <th className="px-2 py-1">RSSI</th>
-            <th className="px-2 py-1">distance</th>
-            <th className="px-2 py-1">security</th>
-            <th className="px-2 py-1">mode</th>
-            <th className="px-2 py-1">flags</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((n) => {
-            const color = colorForApRoot(n.ap_root);
-            const label = groupLabel.get(n.ap_root) ?? "";
-            return (
-            <tr
-              key={n.bssid}
-              className={cn(
-                "border-t border-[color:var(--color-cyber-border)]/30",
-                n.is_ours && "bg-cyan-500/5",
-              )}
-              style={
-                n.ap_root
-                  ? { borderLeft: `3px solid ${color}` }
-                  : undefined
-              }
+      {groups.map((g) => {
+        const isOpen = expanded.has(g.ap_root);
+        const members = membersByRoot.get(g.ap_root) ?? [];
+        const label = groupLabel.get(g.ap_root) ?? "";
+        const color = colorForApRoot(g.ap_root);
+        return (
+          <div key={g.ap_root}>
+            <button
+              onClick={() => toggle(g.ap_root)}
+              className="w-full flex items-center gap-2 p-2 text-xs hover:bg-[color:var(--color-cyber-bg-2)]/40 border-b border-[color:var(--color-cyber-border)]/30"
+              style={{ borderLeft: `3px solid ${color}` }}
             >
-              <td className="px-2 py-1 text-[10px]" title={n.ap_root}>
-                {label && (
-                  <span
-                    className="px-1.5 py-0.5 rounded font-mono font-bold"
-                    style={{ background: color, color: "white" }}
-                  >
-                    {label}
-                  </span>
-                )}
-              </td>
-              <td className="px-2 py-1">
-                {n.hidden ? (
-                  <span className="text-[color:var(--color-cyber-muted)] italic">
-                    &lt;hidden&gt;
+              {isOpen ? (
+                <ChevronDown className="h-3 w-3 shrink-0" />
+              ) : (
+                <ChevronRight className="h-3 w-3 shrink-0" />
+              )}
+              <span
+                className="px-1.5 py-0.5 rounded font-mono font-bold text-[10px]"
+                style={{ background: color, color: "white" }}
+              >
+                {label}
+              </span>
+              <span className="font-mono text-[color:var(--color-cyber-accent)]">
+                {g.member_count} SSID{g.member_count > 1 ? "s" : ""}
+              </span>
+              {g.hidden_count > 0 && (
+                <span className="text-[10px] text-[color:var(--color-cyber-muted)]">
+                  ({g.member_count - g.hidden_count} visibles + {g.hidden_count} cachés)
+                </span>
+              )}
+              <span className="text-[color:var(--color-cyber-muted)] text-[10px]">
+                ch {g.channel}
+              </span>
+              <DistanceBadge rssi_dbm={g.rssi_dbm} />
+              <span className="font-mono text-[10px]">{g.rssi_dbm} dBm</span>
+              <span className="ml-auto text-[10px] flex items-center gap-2">
+                {g.is_all_randomized ? (
+                  <span className="text-amber-300">🎭 random</span>
+                ) : g.vendor ? (
+                  <span className="text-[color:var(--color-cyber-dim)]">
+                    {g.vendor.length > 22
+                      ? g.vendor.slice(0, 20) + "…"
+                      : g.vendor}
                   </span>
                 ) : (
-                  <span className="text-[color:var(--color-cyber-dim)]">
-                    {n.ssid}
+                  <span className="text-[color:var(--color-cyber-muted)]">
+                    ? vendor
                   </span>
                 )}
-                {n.is_ours && (
-                  <span className="ml-2 text-cyan-300 text-[10px]">
-                    ← toi
-                  </span>
+                {g.has_wps && (
+                  <span className="text-amber-300 text-[9px]">WPS</span>
                 )}
-              </td>
-              <td className="px-2 py-1 text-[10px]">{n.bssid}</td>
-              <td className="px-2 py-1 text-[10px]">
-                <VendorBadge
-                  vendor={n.vendor}
-                  vendorSlug={n.vendor_slug}
-                  isRandomized={n.is_randomized}
-                />
-              </td>
-              <td className="px-2 py-1">{n.channel}</td>
-              <td
-                className={cn(
-                  "px-2 py-1",
-                  n.rssi_dbm > -55
-                    ? "text-emerald-300"
-                    : n.rssi_dbm > -75
-                      ? "text-cyan-300"
-                      : "text-[color:var(--color-cyber-muted)]",
-                )}
-              >
-                {n.rssi_dbm} dBm
-              </td>
-              <td className="px-2 py-1">
-                <DistanceBadge rssi_dbm={n.rssi_dbm} />
-              </td>
-              <td className="px-2 py-1">{n.security}</td>
-              <td className="px-2 py-1">{n.ht_mode}</td>
-              <td className="px-2 py-1 text-[10px]">
-                {n.is_wps_enabled && (
-                  <span className="text-amber-300">WPS</span>
-                )}
-              </td>
-            </tr>
-            );
-          })}
-        </tbody>
-      </table>
+              </span>
+            </button>
+            {isOpen && (
+              <div className="ml-6 mb-2">
+                <table className="w-full font-mono text-[11px]">
+                  <thead>
+                    <tr className="text-[color:var(--color-cyber-muted)] text-left">
+                      <th className="px-2 py-1">SSID</th>
+                      <th className="px-2 py-1">BSSID</th>
+                      <th className="px-2 py-1">RSSI</th>
+                      <th className="px-2 py-1">distance</th>
+                      <th className="px-2 py-1">security</th>
+                      <th className="px-2 py-1">mode</th>
+                      <th className="px-2 py-1">flags</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {members.map((n) => (
+                      <tr
+                        key={n.bssid}
+                        className="border-t border-[color:var(--color-cyber-border)]/30"
+                      >
+                        <td className="px-2 py-0.5">
+                          {n.hidden ? (
+                            <span className="text-[color:var(--color-cyber-muted)] italic">
+                              &lt;hidden&gt;
+                            </span>
+                          ) : (
+                            n.ssid
+                          )}
+                        </td>
+                        <td className="px-2 py-0.5 text-[10px]">{n.bssid}</td>
+                        <td
+                          className={cn(
+                            "px-2 py-0.5",
+                            n.rssi_dbm > -55
+                              ? "text-emerald-300"
+                              : n.rssi_dbm > -75
+                                ? "text-cyan-300"
+                                : "text-[color:var(--color-cyber-muted)]",
+                          )}
+                        >
+                          {n.rssi_dbm} dBm
+                        </td>
+                        <td className="px-2 py-0.5">
+                          <DistanceBadge rssi_dbm={n.rssi_dbm} />
+                        </td>
+                        <td className="px-2 py-0.5">{n.security}</td>
+                        <td className="px-2 py-0.5">{n.ht_mode}</td>
+                        <td className="px-2 py-0.5 text-[10px]">
+                          {n.is_wps_enabled && (
+                            <span className="text-amber-300">WPS</span>
+                          )}
+                          {n.is_randomized && (
+                            <span
+                              className="text-amber-300 ml-1"
+                              title="MAC randomisée (U/L bit)"
+                            >
+                              🎭
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function VendorBadge({
-  vendor,
-  vendorSlug,
-  isRandomized,
+
+// Convert a persisted scan history detail back into the in-memory
+// ScanResponse shape so the same view code renders both fresh and
+// loaded scans. channel_scores + threats aren't persisted ; they
+// render as "—" / empty when we look at a past scan.
+function historyToDisplayed(d: ScanHistoryDetail): DisplayedScan {
+  const neighbors: NeighborAPView[] = d.neighbors.map((n) => ({
+    ...n,
+    band: n.band as WifiBand,
+    is_ours: false,
+  }));
+  // Rebuild physical AP groups client-side from the persisted ap_root.
+  const buckets = new Map<string, NeighborAPView[]>();
+  for (const n of neighbors) {
+    const key = n.ap_root || n.bssid;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(n);
+  }
+  const groups: PhysicalAPGroupView[] = [];
+  for (const [key, members] of buckets) {
+    const ssids = Array.from(
+      new Set(members.filter((m) => m.ssid).map((m) => m.ssid)),
+    ).sort();
+    const hidden = members.filter((m) => m.hidden).length;
+    const rssis = members.map((m) => m.rssi_dbm).sort((a, b) => a - b);
+    const med = rssis[Math.floor(rssis.length / 2)] ?? -100;
+    let vendor = "";
+    let vendor_slug = "";
+    for (const m of members) {
+      if (!m.is_randomized && m.vendor) {
+        vendor = m.vendor;
+        vendor_slug = m.vendor_slug;
+        break;
+      }
+    }
+    groups.push({
+      ap_root: key,
+      channel: members[0]?.channel ?? 0,
+      rssi_dbm: med,
+      vendor,
+      vendor_slug,
+      is_all_randomized: members.every((m) => m.is_randomized),
+      has_wps: members.some((m) => m.is_wps_enabled),
+      ssids,
+      hidden_count: hidden,
+      member_count: members.length,
+      bssids: members.map((m) => m.bssid),
+    });
+  }
+  groups.sort((a, b) => b.rssi_dbm - a.rssi_dbm);
+  const result: ScanResponse = {
+    band: d.band as WifiBand,
+    iface: d.iface,
+    duration_s: d.duration_s,
+    started_at: new Date(d.started_at).getTime() / 1000,
+    neighbors,
+    channel_scores: [],
+    recommended_channel: d.recommended_channel,
+    current_channel: d.current_channel,
+    threats: [],
+    physical_aps: groups,
+  };
+  const locParts: string[] = [];
+  if (d.lat != null && d.lon != null) {
+    locParts.push(`${d.lat.toFixed(4)}, ${d.lon.toFixed(4)}`);
+    if (d.source) locParts.push(d.source);
+  }
+  return {
+    result,
+    loadedFromId: d.id,
+    loadedAt: d.started_at,
+    loadedNote: locParts.join(" · "),
+  };
+}
+
+function ScanPicker({
+  band,
+  onLoad,
+  activeLoadedId,
 }: {
-  vendor: string;
-  vendorSlug: string;
-  isRandomized: boolean;
+  band: WifiBand;
+  onLoad: (d: DisplayedScan) => void;
+  activeLoadedId?: number;
 }) {
-  if (isRandomized) {
-    return (
-      <span
-        title="MAC locally administered (U/L bit) — typique randomisation iOS/Android/Pwnagotchi"
-        className="text-amber-300"
-      >
-        🎭 random
-      </span>
-    );
-  }
-  if (!vendor) {
-    return (
-      <span className="text-[color:var(--color-cyber-muted)]" title="OUI inconnu (registre IEEE non chargé ou OUI non répertorié)">
-        ?
-      </span>
-    );
-  }
-  // Truncate long vendor names ; keep slug as a data attribute for
-  // future logo placement.
-  const display = vendor.length > 18 ? vendor.slice(0, 16) + "…" : vendor;
+  const qc = useQueryClient();
+  const list = useQuery({
+    queryKey: ["scan-history", band, "for-picker"],
+    queryFn: () => listScanHistory({ band, limit: 50 }),
+  });
+  const delMut = useMutation({
+    mutationFn: (id: number) => deleteScanHistory(id),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["scan-history"] }),
+  });
+  const [open, setOpen] = useState(false);
+  const handlePick = async (row: ScanHistoryRow) => {
+    setOpen(false);
+    try {
+      const detail = await getScanHistoryDetail(row.id);
+      onLoad(historyToDisplayed(detail));
+    } catch (e) {
+      console.error("Failed to load scan", e);
+    }
+  };
   return (
-    <span title={vendor} data-vendor-slug={vendorSlug}>
-      {display}
-    </span>
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={list.isLoading}
+        className="cyber-button-ghost px-3 py-2 text-xs"
+        title="Recharger un scan précédent"
+      >
+        <History className="inline h-3 w-3 mr-1" />
+        scans précédents ({list.data?.length ?? 0})
+        <ChevronDown className="inline h-3 w-3 ml-1" />
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-1 z-20 cyber-card p-2 min-w-[380px] max-h-[400px] overflow-y-auto"
+          style={{ background: "var(--color-cyber-surface)" }}
+        >
+          {list.data && list.data.length === 0 && (
+            <p className="text-xs text-[color:var(--color-cyber-muted)] p-2">
+              aucun scan {BAND_LABEL[band]} enregistré encore
+            </p>
+          )}
+          {list.data?.map((row) => (
+            <div
+              key={row.id}
+              className={cn(
+                "flex items-center gap-2 p-1.5 text-xs border-b border-[color:var(--color-cyber-border)]/30 hover:bg-[color:var(--color-cyber-bg-2)]/60",
+                row.id === activeLoadedId && "bg-[color:var(--color-cyber-accent)]/10",
+              )}
+            >
+              <button
+                onClick={() => handlePick(row)}
+                className="flex-1 text-left"
+              >
+                <div className="font-mono">
+                  #{row.id} · {row.neighbors_count} SSIDs
+                  {row.threats_count > 0 && (
+                    <span className="ml-2 text-amber-300">⚠ {row.threats_count}</span>
+                  )}
+                </div>
+                <div className="text-[10px] text-[color:var(--color-cyber-muted)] flex items-center gap-2">
+                  <Clock className="h-3 w-3" />
+                  {new Date(row.started_at).toLocaleString("fr-FR", {
+                    dateStyle: "short",
+                    timeStyle: "short",
+                  })}
+                  {row.lat != null && row.lon != null && (
+                    <>
+                      <MapPin className="h-3 w-3" />
+                      <span className="font-mono">
+                        {row.lat.toFixed(3)}, {row.lon.toFixed(3)}
+                      </span>
+                      <span className="cyber-chip text-[9px]">{row.source}</span>
+                    </>
+                  )}
+                </div>
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm(`Supprimer le scan #${row.id} ?`)) {
+                    delMut.mutate(row.id);
+                  }
+                }}
+                disabled={delMut.isPending}
+                className="cyber-button-ghost p-1 text-[10px]"
+                title="Supprimer ce scan"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
