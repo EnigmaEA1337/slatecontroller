@@ -9,20 +9,24 @@ import {
   Users,
   Zap,
 } from "lucide-react";
+
 import { getSlateStatus } from "@/api/slate";
 import type { SlateStatus } from "@/types/slate";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import NetworkHubMap from "@/components/NetworkHubMap";
 import SpeedtestCard from "@/components/SpeedtestCard";
 
-function formatUptime(seconds: number | null): string {
+type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+function formatUptime(t: Translator, seconds: number | null): string {
   if (seconds == null) return "—";
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  if (d > 0) return `${d}j ${h}h ${m}min`;
-  if (h > 0) return `${h}h ${m}min`;
-  return `${m}min`;
+  if (d > 0) return t("dashboard.uptime_days", { d, h, m });
+  if (h > 0) return t("dashboard.uptime_hours", { h, m });
+  return t("dashboard.uptime_minutes", { m });
 }
 
 function formatBytes(bytes: number | null): string {
@@ -48,7 +52,7 @@ function StatCard(props: {
         {props.value}
       </div>
       {props.hint && (
-        <div className="mt-1 text-[10px] uppercase tracking-wider text-[color:var(--color-cyber-dim)]">
+        <div className="mt-1 text-[10px] uppercase tracking-wider text-[color:var(--color-cyber-muted)]">
           {props.hint}
         </div>
       )}
@@ -63,11 +67,13 @@ function ServiceChip({ name, enabled }: { name: string; enabled: boolean }) {
 }
 
 export default function Dashboard() {
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<SlateStatus>({
-    queryKey: ["slate-status"],
-    queryFn: getSlateStatus,
-    refetchInterval: 10_000,
-  });
+  const t = useT();
+  const { data, isLoading, isError, error, refetch, isFetching } =
+    useQuery<SlateStatus>({
+      queryKey: ["slate-status"],
+      queryFn: getSlateStatus,
+      refetchInterval: 10_000,
+    });
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -75,13 +81,13 @@ export default function Dashboard() {
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <Zap className="cyber-glow h-3 w-3" />
-            real-time monitoring
+            {t("dashboard.subtitle")}
           </div>
           <h1
             className="cyber-display cyber-glitch text-4xl"
-            data-text="DASHBOARD"
+            data-text={t("dashboard.title").toUpperCase()}
           >
-            DASHBOARD
+            {t("dashboard.title").toUpperCase()}
           </h1>
         </div>
         <button
@@ -90,18 +96,20 @@ export default function Dashboard() {
           disabled={isFetching}
           className="cyber-button-ghost px-4 py-2 text-[10px]"
         >
-          {isFetching ? "Sync…" : "Refresh ▸"}
+          {isFetching ? t("dashboard.syncing") : `${t("dashboard.refresh")} ▸`}
         </button>
       </header>
 
       {isLoading && (
-        <p className="cyber-label cyber-cursor">connexion au backend</p>
+        <p className="cyber-label cyber-cursor">{t("dashboard.connecting")}</p>
       )}
 
       {isError && (
         <div className="cyber-card cyber-card-accent p-4 text-sm text-[color:var(--color-cyber-accent)]">
-          <strong className="uppercase tracking-wider">[ ERROR ] </strong>
-          Slate injoignable. {error instanceof Error ? error.message : ""}
+          <strong className="uppercase tracking-wider">[ {t("common.error")} ] </strong>
+          {t("dashboard.error_unreachable", {
+            error: error instanceof Error ? error.message : "",
+          })}
         </div>
       )}
 
@@ -130,20 +138,29 @@ export default function Dashboard() {
                       : "bg-[color:var(--color-cyber-accent)]",
                   )}
                 />
-                {data.connected ? "Online" : "Offline"}
+                {data.connected
+                  ? t("dashboard.status_online")
+                  : t("dashboard.status_offline")}
               </span>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-xs md:grid-cols-4">
-              {[
-                ["LAN", data.lan_ip],
-                ["MAC", data.mac],
-                ["WAN", data.wan_online == null ? "—" : data.wan_online ? "online" : "offline"],
-                ["Pays", data.country_code],
-              ].map(([label, value]) => (
-                <div key={label} className="flex flex-col gap-1">
-                  <span className="text-[10px] uppercase tracking-[0.25em] text-[color:var(--color-cyber-dim)]">
-                    {label}
+              {([
+                ["dashboard.label_lan", data.lan_ip],
+                ["dashboard.label_mac", data.mac],
+                [
+                  "dashboard.label_wan",
+                  data.wan_online == null
+                    ? "—"
+                    : data.wan_online
+                      ? t("dashboard.wan_online")
+                      : t("dashboard.wan_offline"),
+                ],
+                ["dashboard.label_country", data.country_code],
+              ] as const).map(([labelKey, value]) => (
+                <div key={labelKey} className="flex flex-col gap-1">
+                  <span className="text-[10px] uppercase tracking-[0.25em] text-[color:var(--color-cyber-muted)]">
+                    {t(labelKey)}
                   </span>
                   <span className="cyber-glow-soft font-mono text-sm">
                     {value ?? "—"}
@@ -155,44 +172,57 @@ export default function Dashboard() {
 
           <section className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-5">
             <StatCard
-              label="Uptime"
-              value={formatUptime(data.uptime_seconds)}
+              label={t("dashboard.stat_uptime")}
+              value={formatUptime(t, data.uptime_seconds)}
               icon={Router}
             />
             <StatCard
-              label="Clients"
+              label={t("dashboard.stat_clients")}
               value={data.connected_clients?.toString() ?? "—"}
               icon={Users}
             />
             <StatCard
-              label="CPU Temp"
+              label={t("dashboard.stat_cpu_temp")}
               value={
                 data.cpu_temperature_celsius != null
                   ? `${data.cpu_temperature_celsius}°C`
                   : "—"
               }
               icon={Thermometer}
-              hint={data.cpu_count != null ? `${data.cpu_count} cores` : undefined}
-            />
-            <StatCard
-              label="Load 1m"
-              value={data.load_average_1m != null ? data.load_average_1m.toFixed(2) : "—"}
-              icon={Cpu}
               hint={
-                data.load_average_5m != null
-                  ? `5m ${data.load_average_5m.toFixed(2)} · 15m ${data.load_average_15m?.toFixed(2)}`
+                data.cpu_count != null
+                  ? t("dashboard.stat_cpu_cores", { n: data.cpu_count })
                   : undefined
               }
             />
             <StatCard
-              label="RAM"
+              label={t("dashboard.stat_load_1m")}
+              value={
+                data.load_average_1m != null
+                  ? data.load_average_1m.toFixed(2)
+                  : "—"
+              }
+              icon={Cpu}
+              hint={
+                data.load_average_5m != null
+                  ? t("dashboard.stat_load_hint", {
+                      l5: data.load_average_5m.toFixed(2),
+                      l15: data.load_average_15m?.toFixed(2) ?? "—",
+                    })
+                  : undefined
+              }
+            />
+            <StatCard
+              label={t("dashboard.stat_ram")}
               value={
                 data.memory_usage_percent != null
                   ? `${data.memory_usage_percent.toFixed(1)}%`
                   : "—"
               }
               icon={HardDrive}
-              hint={`${formatBytes(data.memory_free_bytes)} libres`}
+              hint={t("dashboard.stat_ram_hint", {
+                value: formatBytes(data.memory_free_bytes),
+              })}
             />
           </section>
 
@@ -200,7 +230,7 @@ export default function Dashboard() {
             <section className="cyber-card p-5">
               <h3 className="cyber-label mb-3 flex items-center gap-2">
                 <Network className="cyber-glow h-3 w-3" />
-                Services actifs
+                {t("dashboard.services_title")}
               </h3>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(data.services).map(([name, enabled]) => (
@@ -210,21 +240,23 @@ export default function Dashboard() {
             </section>
           )}
 
-          {/* At-a-glance topology — Slate centre + WAN/Tor/Tailscale/
-              Networks/Radios satellites. Each subsystem polls
-              independently so the visual updates in real time. */}
+          {/* Vue topologique : Slate au centre, satellites WAN / Tor /
+              Tailscale / Réseaux / Radios. Chaque sous-système polle
+              indépendamment, l'affichage se met à jour en temps réel. */}
           <div className="mt-6">
             <NetworkHubMap />
           </div>
 
-          {/* Cloudflare-backed speedtest run FROM the Slate (ping + curl
-              download/upload). Spinner during ~25 s, then 3 metric
-              tiles. */}
+          {/* Test de débit Cloudflare exécuté DEPUIS le Slate (ping +
+              curl download/upload). Spinner pendant ~25 s, puis 3
+              tuiles de métriques. */}
           <SpeedtestCard />
 
-          <footer className="mt-6 flex items-center justify-end gap-2 text-[10px] uppercase tracking-[0.25em] text-[color:var(--color-cyber-dim)]">
+          <footer className="mt-6 flex items-center justify-end gap-2 text-[10px] uppercase tracking-[0.25em] text-[color:var(--color-cyber-muted)]">
             <Globe className="h-3 w-3" />
-            snapshot {new Date(data.timestamp).toLocaleTimeString()}
+            {t("dashboard.snapshot", {
+              time: new Date(data.timestamp).toLocaleTimeString(),
+            })}
           </footer>
         </>
       )}

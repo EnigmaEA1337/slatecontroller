@@ -400,6 +400,17 @@ async def _task_lock_wan_admin(*, ssh: SlateSSH) -> AdoptionTaskReport:
         uci -q set glconfig.general.wan_ping='off' 2>/dev/null
         uci -q commit glconfig 2>/dev/null
 
+        # 1b. The single flag that DRIVES `system.get_security_policy`
+        # over JSON-RPC (and therefore the hardening check verdict).
+        # Discovered live 2026-06-05 : the controller's hardening check
+        # reads this via RPC, so the entire "Admin UI restreinte au LAN"
+        # status depends on it. Without this line, every other lockdown
+        # below is invisible to the verifier.
+        uci -q set oui-httpd.main.security_rule='1' 2>/dev/null
+        uci -q commit oui-httpd 2>/dev/null
+        /etc/init.d/oui-httpd reload 2>/dev/null || \
+            /etc/init.d/oui-httpd restart 2>/dev/null
+
         # 2. Belt-and-braces firewall rules with our SC_FR_HD_* namespace.
         # Idempotent upsert via uci set ; option slate_ctrl_managed=1 marks
         # them as ours for any future orphan purge.
@@ -558,8 +569,22 @@ async def _task_enable_adguard(
     # 2. Provision the admin user so REST auth works. Build a throwaway
     #    AdGuardManager bound to this device's SSH + the router creds.
     from app.adguard.manager import AdGuardError, AdGuardManager
+    # Include the Slate's tailscale IP as a fallback : AdGuard's :::3000
+    # binding refuses LAN-IP connections coming via the tailnet tunnel
+    # (see app/adguard/manager.py docstring). Discover the IP via SSH
+    # at build time.
+    adoption_adguard_hosts: list[str] = [ssh.host]
+    try:
+        tsip_r = await ssh.run(
+            "tailscale ip -4 2>/dev/null | head -1", timeout=4,
+        )
+        ts_ip = tsip_r.stdout.strip()
+        if ts_ip and ts_ip not in adoption_adguard_hosts:
+            adoption_adguard_hosts.append(ts_ip)
+    except Exception:  # noqa: BLE001
+        pass
     mgr = AdGuardManager(
-        ssh=ssh, slate_host=ssh.host,
+        ssh=ssh, slate_hosts=adoption_adguard_hosts,
         admin_username=settings.admin_username,
         admin_password=settings.admin_password,
     )
@@ -579,6 +604,83 @@ async def _task_enable_adguard(
         return ctx.failed(f"AdGuard bootstrap failed: {exc}")
     finally:
         await mgr.aclose()
+
+
+# Packages the controller features need on every adopted Slate. Listed
+# here so the install happens at adoption time (one ``opkg update`` per
+# pipeline, one shot for the whole batch) rather than lazily on first
+# use of each feature (slow + needs WAN). Add to this when a new
+# feature needs an opkg package.
+#
+# Current entries :
+#   tcpdump     →  /api/network/pcap (Phase 1 LAN capture)
+#
+# Reserved for future phases (commented out to avoid forced installs
+# until the feature lands) :
+#   kmod-mt76x0u   →  Monitor mode Phase 2 (USB dongle ALFA AWUS036ACHM)
+#   usbutils       →  ``lsusb`` for dongle detection in Phase 2
+_EXTRA_PACKAGES: tuple[str, ...] = (
+    "tcpdump",
+)
+
+
+async def _task_install_extra_packages(*, ssh: SlateSSH) -> AdoptionTaskReport:
+    """Install controller-feature opkg packages in one shot.
+
+    Skips packages already present (``opkg list-installed`` check), so
+    re-adoption is cheap when nothing changed. A failed install on one
+    package doesn't abort the rest — the task reports which succeeded
+    and which didn't.
+    """
+    ctx = _TaskCtx(f"Install extra packages ({', '.join(_EXTRA_PACKAGES)})")
+    ctx.start()
+    # Build the install command : one opkg-list pass to filter the
+    # already-installed entries, then a single update + install for
+    # the rest. ``2>&1`` keeps stderr in the report on failure.
+    pkgs_quoted = " ".join(_EXTRA_PACKAGES)
+    cmd = (
+        f"MISSING=''; "
+        f"for p in {pkgs_quoted}; do "
+        f"  opkg list-installed | grep -q \"^$p \" || MISSING=\"$MISSING $p\"; "
+        f"done; "
+        f"if [ -z \"$MISSING\" ]; then echo NOTHING_TO_DO; exit 0; fi; "
+        f"echo \"MISSING:$MISSING\"; "
+        f"opkg update >/dev/null 2>&1 || {{ echo OPKG_UPDATE_FAILED; exit 1; }}; "
+        f"opkg install $MISSING 2>&1 | tail -20; "
+        f"echo INSTALL_DONE"
+    )
+    try:
+        result = await ssh.run(cmd, timeout=120)
+    except SlateSSHError as exc:
+        return ctx.failed(f"SSH failed: {exc}")
+    out = result.stdout
+    if "NOTHING_TO_DO" in out:
+        return ctx.ok(f"all extras already installed ({pkgs_quoted})")
+    if "OPKG_UPDATE_FAILED" in out:
+        return ctx.failed(
+            "opkg update failed — Slate has no WAN uplink ? "
+            f"(extras: {pkgs_quoted})",
+        )
+    if "INSTALL_DONE" not in out:
+        return ctx.failed(f"opkg install incomplete : {out.strip()[-200:]}")
+    # Verify each package landed.
+    failed: list[str] = []
+    for p in _EXTRA_PACKAGES:
+        try:
+            r = await ssh.run(
+                f"opkg list-installed | grep -q \"^{p} \" "
+                f"&& echo PRESENT || echo MISSING",
+                timeout=10,
+            )
+            if "PRESENT" not in r.stdout:
+                failed.append(p)
+        except SlateSSHError:
+            failed.append(p)
+    if failed:
+        return ctx.failed(
+            f"missing after install : {', '.join(failed)}",
+        )
+    return ctx.ok(f"installed : {pkgs_quoted}")
 
 
 async def _task_disable_upnp(*, ssh: SlateSSH) -> AdoptionTaskReport:
@@ -625,8 +727,18 @@ async def _task_enable_doh_blocklist(
         # Shouldn't happen — feeds.py owns this slug. Fail loud if it does.
         return ctx.failed("feed slug 'hagezi-doh-vpn' missing from catalog")
 
+    filter_seed_hosts: list[str] = [ssh.host]
+    try:
+        tsip_r = await ssh.run(
+            "tailscale ip -4 2>/dev/null | head -1", timeout=4,
+        )
+        ts_ip = tsip_r.stdout.strip()
+        if ts_ip and ts_ip not in filter_seed_hosts:
+            filter_seed_hosts.append(ts_ip)
+    except Exception:  # noqa: BLE001
+        pass
     mgr = AdGuardManager(
-        ssh=ssh, slate_host=ssh.host,
+        ssh=ssh, slate_hosts=filter_seed_hosts,
         admin_username=settings.admin_username,
         admin_password=settings.admin_password,
     )
@@ -704,6 +816,11 @@ async def run_adoption(
     # advanced web UI access for debugging or operations the GL.iNet
     # UI doesn't expose. Hardcoded on purpose, no flag in AdoptionOptions.
     reports.append(await _task_enable_luci(ssh=ssh))
+    # Install the opkg packages controller features depend on (tcpdump
+    # for /api/network/pcap, and any future entries in _EXTRA_PACKAGES).
+    # Runs alongside luci so a single opkg update covers both — and so
+    # PCAP capture from the UI never has to wait for a first-use install.
+    reports.append(await _task_install_extra_packages(ssh=ssh))
     # Same convention : locking the WAN admin surface (ping/HTTPS/SSH)
     # is a non-negotiable security baseline. Hardcoded.
     reports.append(await _task_lock_wan_admin(ssh=ssh))

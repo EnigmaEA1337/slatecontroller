@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.deps import get_device_connections, get_slate_ssh
 from app.auth import User, get_current_user
-from app.db.models import ScanHistoryRow, ScanNeighborRow, ThreatEventRow
+from app.db.models import (
+    ApReviewRow,
+    BssidReviewRow,
+    ScanHistoryRow,
+    ScanNeighborRow,
+    ThreatEventRow,
+)
 from app.devices.locations import DeviceLocationStore
 from app.devices.registry import DeviceConnections
 from app.slate.ssh import SlateSSH
@@ -35,6 +41,7 @@ from app.wifi.scanner import (
     detect_threats,
     group_by_physical_ap,
     scan_band,
+    scan_band_extended,
 )
 from app.wifi.store import WifiSsidStore
 
@@ -91,6 +98,20 @@ class NeighborAPView(BaseModel):
     vendor_slug: str
     is_randomized: bool
     ap_root: str
+    # review_status_own : explicit per-BSSID override (None if absent).
+    # review_status_effective : own override if set, else the group's
+    #     status, else None. UI renders the effective one (italic when
+    #     inherited from the group, plain when own).
+    review_status_own: str | None = None
+    review_status_effective: str | None = None
+    review_label_own: str = ""
+    # Multi-pass stats (single-pass scans : seen_count=1, both extrema
+    # equal rssi_dbm, offsets=0).
+    seen_count: int = 1
+    rssi_max: int = 0
+    rssi_min: int = 0
+    first_seen_offset_s: float = 0.0
+    last_seen_offset_s: float = 0.0
 
     @classmethod
     def from_neighbor(cls, n: NeighborAP) -> "NeighborAPView":
@@ -102,6 +123,11 @@ class NeighborAPView(BaseModel):
             vendor=n.vendor, vendor_slug=n.vendor_slug,
             is_randomized=n.is_randomized,
             ap_root=n.ap_root,
+            seen_count=n.seen_count,
+            rssi_max=n.rssi_max or n.rssi_dbm,
+            rssi_min=n.rssi_min or n.rssi_dbm,
+            first_seen_offset_s=n.first_seen_offset_s,
+            last_seen_offset_s=n.last_seen_offset_s,
         )
 
 
@@ -119,6 +145,9 @@ class PhysicalAPGroupView(BaseModel):
     hidden_count: int
     member_count: int
     bssids: list[str]
+    # None when there's no review row yet (implicit "unknown" state).
+    review_status: str | None = None
+    review_label: str = ""
 
 
 class ChannelScoreView(BaseModel):
@@ -254,15 +283,34 @@ async def scan_radio(
         str | None,
         Query(alias="source", description="Override location source label"),
     ] = None,
+    duration_s: Annotated[
+        int,
+        Query(
+            ge=0, le=1200,
+            description=(
+                "Multi-pass scan : total wall-clock budget in seconds. "
+                "0 (default) = single iw-scan pass (~3s on 2.4 GHz, "
+                "~25s on 5 GHz). > 0 loops scans, merging by BSSID."
+            ),
+        ),
+    ] = 0,
 ) -> ScanResponse:
     """Run a live scan on the given band and return AP list + channel scores.
 
-    Slow-ish (~15-25s for 5 GHz with DFS) — clients should show a
-    progress indicator. The route is not rate-limited but a single
-    sustained scan per band per minute is the operator-friendly cap.
+    Single-pass : slow-ish (~15-25s for 5 GHz with DFS). Multi-pass
+    (``duration_s > 0``) : loops until the time budget is spent,
+    merging observations by BSSID and exposing per-BSSID stats
+    (``seen_count``, ``rssi_max/min``, ``first/last_seen_offset_s``).
+    Hard cap at 20 minutes to avoid runaway sessions ; for longer
+    monitoring use the surveillance-session endpoints (planned).
     """
     try:
-        result: ScanResult = await scan_band(ssh, band, iface=iface)
+        if duration_s > 0:
+            result: ScanResult = await scan_band_extended(
+                ssh, band, total_duration_s=duration_s, iface=iface,
+            )
+        else:
+            result = await scan_band(ssh, band, iface=iface)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc),
@@ -296,12 +344,61 @@ async def scan_radio(
     if result.current_channel:
         our_channels[band] = result.current_channel
 
-    threats = detect_threats(
+    # Fetch operator reviews once — used both to suppress Air Watch
+    # false positives and to overlay status badges on physical_aps +
+    # individual neighbours below. Two layers : group (ap_root) and
+    # per-BSSID override.
+    reviews_by_root: dict[str, tuple[str, str]] = {}
+    reviews_by_bssid: dict[str, tuple[str, str]] = {}
+    try:
+        sf_reviews: async_sessionmaker = request.app.state.db_session_factory
+        async with sf_reviews() as s_rev:
+            ap_rows = (await s_rev.scalars(
+                select(ApReviewRow).where(
+                    ApReviewRow.device_slug == conn.slug,
+                ),
+            )).all()
+            bs_rows = (await s_rev.scalars(
+                select(BssidReviewRow).where(
+                    BssidReviewRow.device_slug == conn.slug,
+                ),
+            )).all()
+        reviews_by_root = {r.ap_root: (r.status, r.label) for r in ap_rows}
+        reviews_by_bssid = {
+            r.bssid.lower(): (r.status, r.label) for r in bs_rows
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wifi.scan.reviews_overlay_failed", error=str(exc))
+
+    bssid_to_root = {n.bssid: n.ap_root for n in result.neighbors}
+
+    def effective_for_bssid(bssid: str) -> str | None:
+        """Per-BSSID override wins over the group's status."""
+        own = reviews_by_bssid.get(bssid.lower())
+        if own is not None:
+            return own[0]
+        root = bssid_to_root.get(bssid, "")
+        grp = reviews_by_root.get(root)
+        return grp[0] if grp else None
+
+    raw_threats = detect_threats(
         result.neighbors,
         our_ssids=our_ssids,
         our_bssids=our_bssids,
         our_channels=our_channels,
     )
+    # Drop threats whose BSSID has an effective "trusted" status (own
+    # override OR inherited from the group). legacy_crypto / wps_enabled
+    # stay — they're crypto facts about the radio, trust doesn't fix
+    # them.
+    SUPPRESSIBLE = {"evil_twin", "strong_neighbor"}
+    threats = [
+        t for t in raw_threats
+        if not (
+            t.kind in SUPPRESSIBLE
+            and effective_for_bssid(t.bssid) == "trusted"
+        )
+    ]
 
     # Persist threats so AUDIT/Air Watch keeps a timeline. Best-effort —
     # we don't fail the scan if the DB write trips.
@@ -389,6 +486,11 @@ async def scan_radio(
                     ap_root=n.ap_root, vendor=n.vendor,
                     vendor_slug=n.vendor_slug,
                     is_randomized=n.is_randomized,
+                    seen_count=n.seen_count,
+                    rssi_max=n.rssi_max or n.rssi_dbm,
+                    rssi_min=n.rssi_min or n.rssi_dbm,
+                    first_seen_offset_s=n.first_seen_offset_s,
+                    last_seen_offset_s=n.last_seen_offset_s,
                 ))
             await s.commit()
     except Exception as exc:  # noqa: BLE001
@@ -404,12 +506,24 @@ async def scan_radio(
 
     physical_aps = group_by_physical_ap(result.neighbors)
 
+    def neighbour_view_with_reviews(n: NeighborAP) -> NeighborAPView:
+        v = NeighborAPView.from_neighbor(n)
+        own = reviews_by_bssid.get(n.bssid.lower())
+        if own is not None:
+            v.review_status_own = own[0]
+            v.review_label_own = own[1]
+            v.review_status_effective = own[0]
+        else:
+            grp = reviews_by_root.get(n.ap_root)
+            v.review_status_effective = grp[0] if grp else None
+        return v
+
     return ScanResponse(
         band=result.band,
         iface=result.iface,
         duration_s=result.duration_s,
         started_at=result.started_at,
-        neighbors=[NeighborAPView.from_neighbor(n) for n in result.neighbors],
+        neighbors=[neighbour_view_with_reviews(n) for n in result.neighbors],
         channel_scores=[
             ChannelScoreView(
                 band=s.band, channel=s.channel, score=s.score,
@@ -429,6 +543,8 @@ async def scan_radio(
                 ssids=g.ssids, hidden_count=g.hidden_count,
                 member_count=len(g.members),
                 bssids=[m.bssid for m in g.members],
+                review_status=reviews_by_root.get(g.ap_root, (None, ""))[0],
+                review_label=reviews_by_root.get(g.ap_root, (None, ""))[1],
             )
             for g in physical_aps
         ],

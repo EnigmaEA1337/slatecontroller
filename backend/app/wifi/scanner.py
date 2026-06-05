@@ -93,9 +93,25 @@ def _ap_root_for(bssid: str, channel: int) -> str:
 
 
 def _band_for_channel(ch: int) -> WifiBand:
+    """Band guess from CHANNEL NUMBER ALONE — ambiguous in the 36-93
+    range because 6 GHz numbering overlaps 5 GHz UNII ranges (ch 53 is
+    both a 5 GHz DFS slot AND a 6 GHz PSC channel). Always prefer
+    :func:`_band_for_freq` when the frequency is known."""
     if 1 <= ch <= 14:
         return "2"
     if 36 <= ch <= 196:
+        return "5"
+    return "6"
+
+
+def _band_for_freq(freq_mhz: int) -> WifiBand:
+    """Disambiguate band from the FREQUENCY (which is unambiguous).
+    Use this whenever ``iw scan`` gives us a ``freq:`` line — for
+    example channel 53 belongs to 5 GHz when freq < 5950 MHz, and to
+    6 GHz when freq ≥ 5950 MHz."""
+    if freq_mhz < 3000:
+        return "2"
+    if freq_mhz < 5950:
         return "5"
     return "6"
 
@@ -109,14 +125,21 @@ ThreatLevel = Literal["info", "warn", "alert"]
 class NeighborAP:
     """One BSS (= one VAP / one SSID broadcast). A single physical AP
     typically advertises several BSSes that share the lower 5 bytes of
-    their BSSID (vendor convention) — see ``ap_root`` below."""
+    their BSSID (vendor convention) — see ``ap_root`` below.
+
+    Multi-pass-scan fields (``seen_count`` / ``rssi_max`` / ``rssi_min``
+    / ``first_seen_offset_s`` / ``last_seen_offset_s``) carry the
+    accumulated stats when this neighbour was merged across several
+    ``iw scan`` passes — see :func:`scan_band_extended`. For a single-
+    pass scan the count is 1 and the two RSSI extrema match ``rssi_dbm``.
+    """
 
     bssid: str
     ssid: str            # may be "" for hidden / cloaked
     hidden: bool
     channel: int
     band: WifiBand
-    rssi_dbm: int        # negative, larger absolute = weaker
+    rssi_dbm: int        # last-seen RSSI ; negative, larger absolute = weaker
     security: str        # WPA3 / WPA2 / WPA / WEP / open / mixed
     ht_mode: str         # HT20 / HT40 / VHT80 / HE160 / EHT320 / ...
     is_wps_enabled: bool
@@ -131,6 +154,13 @@ class NeighborAP:
     # cluster together. Falls back to the BSSID itself when the suffix
     # can't be computed (parser edge cases).
     ap_root: str = ""
+    # Accumulated stats — meaningful when this neighbour came out of a
+    # multi-pass extended scan. Defaults match a single-pass observation.
+    seen_count: int = 1
+    rssi_max: int = 0  # placeholder ; populated to rssi_dbm on single pass
+    rssi_min: int = 0  # placeholder ; populated to rssi_dbm on single pass
+    first_seen_offset_s: float = 0.0
+    last_seen_offset_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -282,11 +312,16 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             continue
         bssid = m.group(1).lower()
         text = "\n".join(block)
-        # Freq & channel
+        # Freq & channel. We capture the frequency separately because
+        # channel numbers OVERLAP between 5 GHz and 6 GHz (e.g. ch 53
+        # exists in both), so the freq is the only unambiguous band
+        # discriminator.
         ch = 0
+        freq_mhz = 0
         freq_match = re.search(r"freq:\s*(\d+)", text)
         if freq_match:
-            ch = _freq_to_channel(int(freq_match.group(1)))
+            freq_mhz = int(freq_match.group(1))
+            ch = _freq_to_channel(freq_mhz)
         # DS Parameter set also carries the channel (Wi-Fi 4/5 fallback)
         if ch == 0:
             ds = re.search(r"DS Parameter set: channel (\d+)", text)
@@ -323,8 +358,15 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
         # Security + WPS
         security, wps = _security_from_caps(text)
         ht_mode = _ht_mode_from_text(text)
+        # Band : prefer the frequency-derived one (unambiguous between
+        # 5 GHz DFS and 6 GHz overlap). Fall back to channel-based when
+        # iw didn't give us a freq line (rare, but happens on legacy
+        # Wi-Fi 4 entries without a freq field).
         try:
-            band = _band_for_channel(ch)
+            if freq_mhz > 0:
+                band = _band_for_freq(freq_mhz)
+            else:
+                band = _band_for_channel(ch)
         except Exception:  # noqa: BLE001
             band = "5"
         oui = _oui_lookup(bssid)
@@ -342,6 +384,13 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             vendor_slug=oui.vendor_slug,
             is_randomized=oui.is_randomized,
             ap_root=_ap_root_for(bssid, ch),
+            # Single-observation defaults — make rssi_max/min meaningful
+            # so callers don't have to special-case the count==1 path.
+            seen_count=1,
+            rssi_max=rssi,
+            rssi_min=rssi,
+            first_seen_offset_s=0.0,
+            last_seen_offset_s=0.0,
         ))
     return out
 
@@ -598,16 +647,27 @@ def detect_threats(
 
 # ---------------------------- scan orchestration ---------------------------- #
 
-# Per-band default scan iface. GL.iNet's MTK firmware exposes dedicated
-# "ra15 / rai15 / rax15" interfaces per band specifically for site
-# survey — they're always up, channel-scanning, and decoupled from any
-# Master-mode VAP. Using them keeps the scan from touching the user's
-# broadcasted SSIDs (in particular avoids any disruption to MLO links
-# rai2/rax2 used by NEXUS-7 in the operator's catalog).
+# Per-band default scan iface.
+#
+# GL.iNet's MTK firmware exposes dedicated "ra15 / rai15" interfaces on
+# 2.4 / 5 GHz for site survey — they're AP-type slots that the driver
+# can off-channel scan from without disturbing user VAPs.
+#
+# **6 GHz quirk** (discovered live 2026-06-04 on MT7990) : the
+# equivalent "rax15" slot is the active 6 GHz broadcaster (channel 53
+# / 160 MHz typically), and ``iw dev rax15 scan`` returns ZERO results
+# even when UniFi APs are clearly transmitting on PSC channels. An
+# AP iface broadcasting on a 160 MHz 6 GHz channel can't off-channel
+# scan within the same band on this driver. Switching to ``rax0`` (the
+# managed/STA-mode 6 GHz iface used for repeater backbone) returns the
+# expected BSS list immediately. ``rax0`` happens to be UP when the
+# Slate is in repeater mode, but ``ip link set rax0 up`` brings it
+# back from DOWN otherwise, and the scan doesn't actually require it
+# to be associated to anything — just operational.
 DEFAULT_SCAN_IFACE: dict[WifiBand, str] = {
     "2": "ra15",
     "5": "rai15",
-    "6": "rax15",
+    "6": "rax0",
 }
 
 
@@ -662,4 +722,152 @@ async def scan_band(
         recommended_channel=rec,
         current_channel=cur_ch,
         threats=[],  # populated by the route after our SSIDs/BSSIDs are known
+    )
+
+
+async def scan_band_extended(
+    ssh: SlateSSH,
+    band: WifiBand,
+    total_duration_s: int,
+    *,
+    iface: str | None = None,
+) -> ScanResult:
+    """Multi-pass scan : loop ``iw scan`` until the time budget is spent,
+    merging observations by BSSID.
+
+    Why : a single ``iw scan`` only captures one beacon round per channel
+    (~100ms each on DFS). APs that beacon rarely, or hover at the edge of
+    sensitivity, may be missed on any given pass. Looping for N minutes
+    catches them.
+
+    Merge semantics per BSSID across passes :
+
+    - ``seen_count``           number of passes that observed it.
+    - ``rssi_dbm``             RSSI from the *latest* pass (live snapshot).
+    - ``rssi_max`` / ``rssi_min``   strongest / weakest RSSI across passes.
+    - ``first_seen_offset_s``  seconds after scan start when first seen.
+    - ``last_seen_offset_s``   seconds after scan start when last seen.
+
+    The string fields (ssid / security / vendor / …) take the *latest*
+    pass's value — they rarely change, and the latest is freshest.
+    """
+    import structlog as _sl
+    log = _sl.get_logger(__name__)
+    if iface is None:
+        iface = DEFAULT_SCAN_IFACE[band]
+    if total_duration_s <= 0:
+        return await scan_band(ssh, band, iface=iface)
+
+    await ssh.run(f"ip link set {iface} up 2>/dev/null; sleep 0.3", timeout=5)
+    started = time.time()
+    deadline = started + total_duration_s
+
+    # Per-BSSID accumulator. Storing the latest NeighborAP plus the
+    # running min/max/count/offsets ; we rebuild a fresh NeighborAP at
+    # the end since the dataclass is frozen.
+    acc: dict[str, dict] = {}
+    pass_index = 0
+    cur_ch: int | None = None
+
+    while time.time() < deadline:
+        pass_index += 1
+        pass_start = time.time()
+        # Per-pass scan timeout : cap to remaining budget + slack, but
+        # don't shoot lower than 12s (5 GHz needs that for DFS).
+        remaining = max(12, int(deadline - pass_start) + 5)
+        try:
+            result = await ssh.run(
+                f"iw dev {iface} scan 2>&1", timeout=remaining,
+            )
+        except SlateSSHError as exc:
+            log.warning(
+                "wifi.scan.pass_failed",
+                pass_index=pass_index, error=str(exc),
+            )
+            break
+        raw = result.stdout if isinstance(result.stdout, str) else ""
+        passes = parse_iw_scan(raw)
+        passes = [n for n in passes if n.band == band]
+        offset = time.time() - started
+        for n in passes:
+            slot = acc.get(n.bssid)
+            if slot is None:
+                acc[n.bssid] = {
+                    "latest": n,
+                    "rssi_max": n.rssi_dbm,
+                    "rssi_min": n.rssi_dbm,
+                    "seen_count": 1,
+                    "first": offset,
+                    "last": offset,
+                }
+            else:
+                slot["latest"] = n
+                if n.rssi_dbm > slot["rssi_max"]:
+                    slot["rssi_max"] = n.rssi_dbm
+                if n.rssi_dbm < slot["rssi_min"]:
+                    slot["rssi_min"] = n.rssi_dbm
+                slot["seen_count"] += 1
+                slot["last"] = offset
+
+        # Best-effort capture of our current channel (only once is enough).
+        if cur_ch is None:
+            try:
+                info = await ssh.run(
+                    f"iw dev {iface} info 2>/dev/null", timeout=5,
+                )
+                m = re.search(r"channel\s+(\d+)", info.stdout)
+                if m:
+                    cur_ch = int(m.group(1))
+            except SlateSSHError:
+                pass
+
+        log.info(
+            "wifi.scan.pass_done",
+            pass_index=pass_index, band=band,
+            unique_bssids=len(acc),
+            pass_s=round(time.time() - pass_start, 2),
+            elapsed_s=round(time.time() - started, 2),
+            target_s=total_duration_s,
+        )
+
+    duration = time.time() - started
+
+    # Rebuild frozen NeighborAP records carrying the merged stats.
+    neighbors: list[NeighborAP] = []
+    for slot in acc.values():
+        latest: NeighborAP = slot["latest"]
+        neighbors.append(NeighborAP(
+            bssid=latest.bssid,
+            ssid=latest.ssid,
+            hidden=latest.hidden,
+            channel=latest.channel,
+            band=latest.band,
+            rssi_dbm=latest.rssi_dbm,
+            security=latest.security,
+            ht_mode=latest.ht_mode,
+            is_wps_enabled=latest.is_wps_enabled,
+            is_ours=latest.is_ours,
+            vendor=latest.vendor,
+            vendor_slug=latest.vendor_slug,
+            is_randomized=latest.is_randomized,
+            ap_root=latest.ap_root,
+            seen_count=slot["seen_count"],
+            rssi_max=slot["rssi_max"],
+            rssi_min=slot["rssi_min"],
+            first_seen_offset_s=slot["first"],
+            last_seen_offset_s=slot["last"],
+        ))
+
+    scores = score_channels(band, neighbors, current_channel=cur_ch)
+    rec = best_channel(scores)
+    return ScanResult(
+        band=band,
+        iface=iface,
+        started_at=started,
+        duration_s=duration,
+        neighbors=neighbors,
+        channel_scores=scores,
+        recommended_channel=rec,
+        current_channel=cur_ch,
+        threats=[],
     )

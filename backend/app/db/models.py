@@ -432,6 +432,18 @@ class WifiSsidRow(Base):
     # option users expect to see in the UI.
     hidden: Mapped[bool] = mapped_column(default=False)
     notes: Mapped[str] = mapped_column(String(256), default="")
+    # Advanced MTK options (added 2026-06-04). Map 1:1 to UCI options
+    # the MT7990 driver honours ; default values preserve the existing
+    # behaviour for SSIDs that predate this column set.
+    #   "disabled" | "optional" | "required"  → ieee80211w (0/1/2)
+    pmf: Mapped[str] = mapped_column(String(16), default="optional")
+    ft_802_11r: Mapped[bool] = mapped_column(default=False)    # ieee80211r
+    rrm_802_11k: Mapped[bool] = mapped_column(default=False)   # ieee80211k
+    btm_802_11v: Mapped[bool] = mapped_column(default=False)   # ieee80211v
+    dtim_period: Mapped[int] = mapped_column(default=2)
+    wmm: Mapped[bool] = mapped_column(default=True)            # default on (WPA3 requires)
+    proxy_arp: Mapped[bool] = mapped_column(default=False)
+    wds: Mapped[bool] = mapped_column(default=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -796,6 +808,13 @@ class ScanHistoryRow(Base):
     # Free-text note the operator can attach ("client mission, point A").
     note: Mapped[str] = mapped_column(String(256), default="")
 
+    # Optional FK to a surveillance session — NULL for manual & ambient
+    # scans, set for every pass that belongs to a named monitoring run.
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("surveillance_sessions.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
 
 class ScanNeighborRow(Base):
     """One BSSID seen during a scan run. Many per ``ScanHistoryRow``."""
@@ -822,6 +841,13 @@ class ScanNeighborRow(Base):
     vendor: Mapped[str] = mapped_column(String(128), default="")
     vendor_slug: Mapped[str] = mapped_column(String(32), default="")
     is_randomized: Mapped[bool] = mapped_column(default=False)
+    # Multi-pass-scan stats — see app.wifi.scanner.scan_band_extended.
+    # Single-pass scans store seen_count=1 + rssi_max=rssi_min=rssi_dbm.
+    seen_count: Mapped[int] = mapped_column(default=1)
+    rssi_max: Mapped[int] = mapped_column(default=-100)
+    rssi_min: Mapped[int] = mapped_column(default=-100)
+    first_seen_offset_s: Mapped[float] = mapped_column(default=0.0)
+    last_seen_offset_s: Mapped[float] = mapped_column(default=0.0)
 
 
 class BssidWigleCacheRow(Base):
@@ -879,3 +905,319 @@ class DeviceLocationRow(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC), index=True,
     )
+
+
+class ApReviewRow(Base):
+    """Operator's review status for one physical AP (clustered by ap_root).
+
+    Status drives both UI display (badge in the scan tree) and Air Watch
+    behaviour : a ``trusted`` AP suppresses evil-twin and strong-neighbour
+    alerts whose BSSID rolls up to that ap_root. ``ignored`` hides the AP
+    from default views without endorsing it.
+
+    Per-device (the same SSID + BSSID can be your office at home and a
+    hotel on the road — two devices, two reviews).
+    """
+
+    __tablename__ = "ap_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_slug", "ap_root", name="uq_ap_reviews_device_root",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    ap_root: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True,
+    )
+    # trusted / known / ignored / suspicious
+    status: Mapped[str] = mapped_column(String(16), default="known")
+    label: Mapped[str] = mapped_column(String(128), default="")
+    note: Mapped[str] = mapped_column(String(512), default="")
+    # Snapshot fields — kept so the review row stays meaningful even if
+    # the AP later disappears from scans.
+    vendor: Mapped[str] = mapped_column(String(128), default="")
+    sample_ssids: Mapped[str] = mapped_column(String(512), default="")
+    sample_bssid: Mapped[str] = mapped_column(String(17), default="")
+    band: Mapped[str] = mapped_column(String(2), default="")
+    channel: Mapped[int] = mapped_column(default=0)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(UTC),
+    )
+    reviewed_by: Mapped[str] = mapped_column(String(64), default="")
+
+
+class PcapCaptureRow(Base):
+    """One LAN tcpdump capture session run on the Slate.
+
+    Phase 1 = LAN-side capture only (br-lan / eth0 / tailscale0 / …).
+    802.11 monitor mode isn't supported by the MT7990 driver, so until
+    a USB dongle path lands in Phase 2 the iface set is restricted to
+    interfaces in managed/AP mode. tcpdump writes the pcap binary to
+    ``/tmp/slate-ctrl-pcap-<id>.pcap`` ; the controller copies it on
+    demand via SSH cat + base64.
+    """
+
+    __tablename__ = "pcap_captures"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    iface: Mapped[str] = mapped_column(String(32), nullable=False)
+    duration_s: Mapped[int] = mapped_column(nullable=False)
+    snaplen: Mapped[int] = mapped_column(default=256)
+    filter_expr: Mapped[str] = mapped_column(String(512), default="")
+    # planned / running / completed / failed / cancelled
+    status: Mapped[str] = mapped_column(String(16), default="planned")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    bytes_captured: Mapped[int] = mapped_column(default=0)
+    remote_path: Mapped[str] = mapped_column(String(256), default="")
+    remote_pid: Mapped[int | None] = mapped_column(nullable=True)
+    error: Mapped[str] = mapped_column(String(512), default="")
+    label: Mapped[str] = mapped_column(String(128), default="")
+
+
+class WebhookSecretRow(Base):
+    """Per-device HMAC secret for Slate → Controller webhook auth.
+
+    Generated server-side (32 random bytes, hex-encoded), pushed to the
+    Slate at adoption. The Slate-side push helper reads the secret +
+    signs each POST. Controller verifies via :class:`WebhookAuthService`.
+
+    Rotation : the operator can rotate at any time. The previous secret
+    is honoured for ~30s after rotation so a push in flight at the moment
+    of rotation isn't rejected.
+    """
+
+    __tablename__ = "webhook_secrets"
+    __table_args__ = (
+        UniqueConstraint("device_slug", name="uq_webhook_secrets_device"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    secret: Mapped[str] = mapped_column(String(128), nullable=False)
+    previous_secret: Mapped[str] = mapped_column(String(128), default="")
+    previous_valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+
+
+class AntiTheftConfigRow(Base):
+    """Per-device anti-theft policy + cumulative failure counter.
+
+    Sister table to :class:`PinLockoutStateRow` but with a *different*
+    counter : ``total_failures`` only resets on a successful PIN
+    verification — never on the 60s rolling lockout window. An attacker
+    who patiently exhausts 3-try lockouts back-to-back still trips the
+    threshold here.
+
+    When ``autonomous_mode`` is OFF (default), this row is dormant : the
+    lockout behaves like a stock 3-tries/60s and nothing escalates. When
+    ON and ``total_failures >= failure_threshold``, the
+    :class:`AntiTheftService` fires :attr:`action`.
+    """
+
+    __tablename__ = "anti_theft_config"
+    __table_args__ = (
+        UniqueConstraint("device_slug", name="uq_anti_theft_config_device"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    autonomous_mode: Mapped[bool] = mapped_column(default=False)
+    failure_threshold: Mapped[int] = mapped_column(default=10)
+    # "alert" | "soft_wipe"  (factory_reset deferred — too destructive to
+    # ship without extensive on-device testing).
+    action: Mapped[str] = mapped_column(String(16), default="alert")
+    notify_webhook_url: Mapped[str] = mapped_column(String(256), default="")
+    total_failures: Mapped[int] = mapped_column(default=0)
+    last_action_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    last_action_kind: Mapped[str] = mapped_column(String(16), default="")
+    last_action_note: Mapped[str] = mapped_column(String(512), default="")
+
+
+class PinLockoutStateRow(Base):
+    """Per-(device_slug, scope) anti-bruteforce counter for PIN verification.
+
+    Threshold : 3 failed attempts inside a rolling 60s window → locked for
+    60s. The window is *rolling* (not fixed-bucket) because we record
+    ``last_attempt_at`` and treat any failure ≥ 60s old as a fresh slate.
+
+    The ``scope`` column lets unrelated PIN-protected flows have
+    independent counters : burning attempts on the controller verifier
+    doesn't lock out the future at-rest-encryption unlock.
+    """
+
+    __tablename__ = "pin_lockout_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_slug", "scope", name="uq_pin_lockout_device_scope",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    scope: Mapped[str] = mapped_column(
+        String(32), default="controller_verify",
+    )
+    failed_count: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+
+
+class SurveillanceSessionRow(Base):
+    """Named, time-bounded period of intensive WiFi scanning (Q2-C).
+
+    A session schedules its own ``IntervalTrigger`` job per band in
+    :attr:`bands` that runs ``scan_band()`` every :attr:`interval_s`
+    until ``ended_at`` is reached. Each pass is persisted as a regular
+    :class:`ScanHistoryRow` with ``session_id`` set, which lets the
+    timeline analytics compute per-BSSID presence ratios + RSSI drift
+    across the session.
+
+    Lifecycle :
+
+    - ``status="active"``    job is running ; ``ended_at`` is NULL.
+    - ``status="completed"`` target_duration_s elapsed, job auto-removed.
+    - ``status="cancelled"`` operator stopped it early via the UI.
+    - ``status="failed"``    scheduler raised something nasty.
+
+    The ``bands`` field is a CSV string ("2,5" / "5" / "2,5,6") because
+    SQLite doesn't have a list type and a separate join table is overkill
+    for a 3-band cap.
+    """
+
+    __tablename__ = "surveillance_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="active", index=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    target_duration_s: Mapped[int] = mapped_column(nullable=False)
+    interval_s: Mapped[int] = mapped_column(default=60)
+    bands: Mapped[str] = mapped_column(String(8), default="5")
+    location_lat: Mapped[float | None] = mapped_column(nullable=True)
+    location_lon: Mapped[float | None] = mapped_column(nullable=True)
+    location_label: Mapped[str] = mapped_column(String(128), default="")
+    note: Mapped[str] = mapped_column(String(1024), default="")
+    # Rolling counters updated by the scheduler job after each pass.
+    total_passes: Mapped[int] = mapped_column(default=0)
+    unique_bssids: Mapped[int] = mapped_column(default=0)
+
+
+class AmbientScanConfigRow(Base):
+    """Per-(device, band) settings for the Q2-A ambient scan background job.
+
+    When ``enabled``, an APScheduler job runs a single-pass ``iw scan`` on
+    that band every ``interval_s`` seconds and persists the result as a
+    regular ``scan_history`` row with ``source="ambient"``. Ambient scans
+    older than ``retention_days`` are purged by a daily cleanup job ;
+    manual scans are preserved indefinitely.
+
+    ``last_run_at`` / ``last_status`` / ``last_error`` are written by the
+    job itself so the UI can show health without inspecting logs.
+    """
+
+    __tablename__ = "ambient_scan_configs"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_slug", "band", name="uq_ambient_scan_device_band",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    band: Mapped[str] = mapped_column(String(2), nullable=False)
+    enabled: Mapped[bool] = mapped_column(default=False)
+    interval_s: Mapped[int] = mapped_column(default=60)
+    retention_days: Mapped[int] = mapped_column(default=7)
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True,
+    )
+    # "" before first run, "ok" / "error" / "disabled" after.
+    last_status: Mapped[str] = mapped_column(String(16), default="")
+    last_error: Mapped[str] = mapped_column(String(512), default="")
+
+
+class BssidReviewRow(Base):
+    """Per-BSSID review override, sitting on top of :class:`ApReviewRow`.
+
+    Effective status of a neighbour BSSID :
+
+        BssidReviewRow.status   if a row exists for that BSSID, else
+        ApReviewRow.status      if a row exists for that BSSID's ap_root,
+        else implicit "unknown".
+
+    Same per-device scoping rationale as :class:`ApReviewRow`.
+    """
+
+    __tablename__ = "bssid_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_slug", "bssid", name="uq_bssid_reviews_device_bssid",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True,
+    )
+    bssid: Mapped[str] = mapped_column(
+        String(17), nullable=False, index=True,
+    )
+    status: Mapped[str] = mapped_column(String(16), default="known")
+    label: Mapped[str] = mapped_column(String(128), default="")
+    note: Mapped[str] = mapped_column(String(512), default="")
+    ssid: Mapped[str] = mapped_column(String(64), default="")
+    vendor: Mapped[str] = mapped_column(String(128), default="")
+    band: Mapped[str] = mapped_column(String(2), default="")
+    channel: Mapped[int] = mapped_column(default=0)
+    reviewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(UTC),
+    )
+    reviewed_by: Mapped[str] = mapped_column(String(64), default="")

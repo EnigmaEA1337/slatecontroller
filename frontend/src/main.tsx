@@ -6,11 +6,15 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { initThemeFromStorage } from "./hooks/useTheme";
+import { initLangFromStorage } from "./hooks/useLang";
 import "./index.css";
 
 // Apply the saved theme BEFORE React mounts so the first paint already
 // uses the right palette (no flash of dark on a user who picked "day").
 initThemeFromStorage();
+// Same logic for the UI language : seed <html lang="…"> before the first
+// render so screen readers and CSS :lang() rules pick the right value.
+initLangFromStorage();
 
 const queryClient = new QueryClient({
   defaultOptions: {

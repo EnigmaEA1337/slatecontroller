@@ -17,8 +17,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api.deps import get_device_connections
 from app.auth import User, get_current_user
-from app.db.models import ScanHistoryRow, ScanNeighborRow
+from app.db.models import ApReviewRow, BssidReviewRow, ScanHistoryRow, ScanNeighborRow
 from app.devices.registry import DeviceConnections
+from app.wifi.scanner import NeighborAP, group_by_physical_ap, score_channels
+from app.wifi.models import WifiBand
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/wifi/scan-history", tags=["wifi", "scan-history"])
@@ -56,10 +58,47 @@ class ScanNeighborView(BaseModel):
     vendor: str
     vendor_slug: str
     is_randomized: bool
+    review_status_own: str | None = None
+    review_status_effective: str | None = None
+    review_label_own: str = ""
+    seen_count: int = 1
+    rssi_max: int = 0
+    rssi_min: int = 0
+    first_seen_offset_s: float = 0.0
+    last_seen_offset_s: float = 0.0
+
+
+class ChannelScoreView(BaseModel):
+    band: str
+    channel: int
+    score: int
+    neighbor_count: int
+    is_dfs: bool
+    is_psc: bool
+    is_current: bool
+    reasons: list[str]
+
+
+class PhysicalAPGroupView(BaseModel):
+    ap_root: str
+    channel: int
+    rssi_dbm: int
+    vendor: str
+    vendor_slug: str
+    is_all_randomized: bool
+    has_wps: bool
+    ssids: list[str]
+    hidden_count: int
+    member_count: int
+    bssids: list[str]
+    review_status: str | None = None
+    review_label: str = ""
 
 
 class ScanHistoryDetailView(ScanHistoryView):
     neighbors: list[ScanNeighborView]
+    channel_scores: list[ChannelScoreView]
+    physical_aps: list[PhysicalAPGroupView]
 
 
 @router.get("", response_model=list[ScanHistoryView])
@@ -112,19 +151,94 @@ async def get_history(
             .order_by(desc(ScanNeighborRow.rssi_dbm)),
         )).all()
     base = _row_to_view(run)
+    # Recompute channel scoring from the persisted neighbours so the
+    # heat-map is restored when a past scan is re-opened. Deterministic :
+    # same neighbours + same band + same current_channel => same scores.
+    band_typed: WifiBand = run.band  # type: ignore[assignment]
+    rebuilt_neighbors = [
+        NeighborAP(
+            bssid=n.bssid, ssid=n.ssid, hidden=n.hidden,
+            channel=n.channel, band=n.band,  # type: ignore[arg-type]
+            rssi_dbm=n.rssi_dbm, security=n.security, ht_mode=n.ht_mode,
+            is_wps_enabled=n.is_wps_enabled,
+            vendor=n.vendor, vendor_slug=n.vendor_slug,
+            is_randomized=n.is_randomized, ap_root=n.ap_root,
+        )
+        for n in neighbors
+    ]
+    scores = score_channels(
+        band_typed, rebuilt_neighbors, current_channel=run.current_channel,
+    )
+    # Reconstruct physical AP groups from the persisted neighbours, then
+    # overlay the operator's current review state on each one so the
+    # reloaded scan stays in sync with the latest review decisions.
+    groups = group_by_physical_ap(rebuilt_neighbors)
+    async with sf() as s:
+        review_rows = (await s.scalars(
+            select(ApReviewRow).where(ApReviewRow.device_slug == conn.slug),
+        )).all()
+        bssid_review_rows = (await s.scalars(
+            select(BssidReviewRow).where(
+                BssidReviewRow.device_slug == conn.slug,
+            ),
+        )).all()
+    reviews_by_root = {r.ap_root: (r.status, r.label) for r in review_rows}
+    reviews_by_bssid = {
+        r.bssid.lower(): (r.status, r.label) for r in bssid_review_rows
+    }
+
+    def _neighbor_view(n: ScanNeighborRow) -> ScanNeighborView:
+        own = reviews_by_bssid.get(n.bssid.lower())
+        if own is not None:
+            own_status, own_label = own
+            effective = own_status
+        else:
+            own_status = None
+            own_label = ""
+            grp = reviews_by_root.get(n.ap_root)
+            effective = grp[0] if grp else None
+        return ScanNeighborView(
+            bssid=n.bssid, ssid=n.ssid, hidden=n.hidden,
+            channel=n.channel, band=n.band, rssi_dbm=n.rssi_dbm,
+            security=n.security, ht_mode=n.ht_mode,
+            is_wps_enabled=n.is_wps_enabled,
+            ap_root=n.ap_root, vendor=n.vendor,
+            vendor_slug=n.vendor_slug,
+            is_randomized=n.is_randomized,
+            review_status_own=own_status,
+            review_status_effective=effective,
+            review_label_own=own_label,
+            seen_count=n.seen_count or 1,
+            rssi_max=n.rssi_max if n.rssi_max != -100 else n.rssi_dbm,
+            rssi_min=n.rssi_min if n.rssi_min != -100 else n.rssi_dbm,
+            first_seen_offset_s=n.first_seen_offset_s or 0.0,
+            last_seen_offset_s=n.last_seen_offset_s or 0.0,
+        )
+
     return ScanHistoryDetailView(
         **base.model_dump(),
-        neighbors=[
-            ScanNeighborView(
-                bssid=n.bssid, ssid=n.ssid, hidden=n.hidden,
-                channel=n.channel, band=n.band, rssi_dbm=n.rssi_dbm,
-                security=n.security, ht_mode=n.ht_mode,
-                is_wps_enabled=n.is_wps_enabled,
-                ap_root=n.ap_root, vendor=n.vendor,
-                vendor_slug=n.vendor_slug,
-                is_randomized=n.is_randomized,
+        neighbors=[_neighbor_view(n) for n in neighbors],
+        channel_scores=[
+            ChannelScoreView(
+                band=s.band, channel=s.channel, score=s.score,
+                neighbor_count=s.neighbor_count,
+                is_dfs=s.is_dfs, is_psc=s.is_psc,
+                is_current=s.is_current, reasons=list(s.reasons),
             )
-            for n in neighbors
+            for s in scores
+        ],
+        physical_aps=[
+            PhysicalAPGroupView(
+                ap_root=g.ap_root, channel=g.channel, rssi_dbm=g.rssi_dbm,
+                vendor=g.vendor, vendor_slug=g.vendor_slug,
+                is_all_randomized=g.is_all_randomized, has_wps=g.has_wps,
+                ssids=g.ssids, hidden_count=g.hidden_count,
+                member_count=len(g.members),
+                bssids=[m.bssid for m in g.members],
+                review_status=reviews_by_root.get(g.ap_root, (None, ""))[0],
+                review_label=reviews_by_root.get(g.ap_root, (None, ""))[1],
+            )
+            for g in groups
         ],
     )
 

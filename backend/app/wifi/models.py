@@ -14,6 +14,32 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # Wi-Fi-7 SSID still declares which bands it groups.
 WifiBand = Literal["2", "5", "6"]
 WifiSecurity = Literal["WPA3-SAE", "WPA3-PSK", "WPA2-PSK", "WPA2-WPA3-Mixed", "open"]
+# Protected Management Frames (802.11w) policy. "required" enforces PMF
+# and refuses legacy clients ; "optional" advertises PMF capability and
+# lets clients decide ; "disabled" turns it off entirely. WPA3 mandates
+# at least optional, and "required" should be the default for WPA3-only
+# deployments.
+WifiPMF = Literal["disabled", "optional", "required"]
+
+
+class WifiSsidAdvanced(BaseModel):
+    """MTK-specific knobs exposed under the "Avancé" section of the UI.
+
+    Defaults are conservative : the same behaviour you'd get without
+    explicitly setting these on UCI. The operator opts INTO each
+    tradeoff (PMF=required blocks WPA2 clients, FT/RRM/BTM may break
+    poorly-behaved roamers, higher DTIM trades multicast latency for
+    client power savings, …).
+    """
+
+    pmf: WifiPMF = "optional"
+    ft_802_11r: bool = False
+    rrm_802_11k: bool = False
+    btm_802_11v: bool = False
+    dtim_period: int = Field(default=2, ge=1, le=10)
+    wmm: bool = True
+    proxy_arp: bool = False
+    wds: bool = False
 
 
 class WifiSsidPublic(BaseModel):
@@ -29,6 +55,7 @@ class WifiSsidPublic(BaseModel):
     hidden: bool
     notes: str
     has_password: bool
+    advanced: WifiSsidAdvanced = Field(default_factory=WifiSsidAdvanced)
     created_at: datetime
     updated_at: datetime
 
@@ -76,6 +103,9 @@ class WifiSsidWrite(BaseModel):
         ),
     )
     notes: str = Field(default="", max_length=256)
+    # MTK advanced section. The default is the conservative all-fields
+    # snapshot ; the UI's "Avancé" pane lets the operator override.
+    advanced: WifiSsidAdvanced = Field(default_factory=WifiSsidAdvanced)
 
     @field_validator("bands")
     @classmethod

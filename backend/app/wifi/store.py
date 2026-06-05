@@ -25,6 +25,7 @@ class WifiSsidDuplicateError(WifiSsidError):
 
 
 def _to_public(row: WifiSsidRow) -> WifiSsidPublic:
+    from app.wifi.models import WifiSsidAdvanced
     return WifiSsidPublic(
         slug=row.slug,
         ssid_name=row.ssid_name,
@@ -35,6 +36,16 @@ def _to_public(row: WifiSsidRow) -> WifiSsidPublic:
         hidden=row.hidden,
         notes=row.notes,
         has_password=bool(row.password_encrypted),
+        advanced=WifiSsidAdvanced(
+            pmf=row.pmf,  # type: ignore[arg-type]
+            ft_802_11r=row.ft_802_11r,
+            rrm_802_11k=row.rrm_802_11k,
+            btm_802_11v=row.btm_802_11v,
+            dtim_period=row.dtim_period,
+            wmm=row.wmm,
+            proxy_arp=row.proxy_arp,
+            wds=row.wds,
+        ),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -86,6 +97,14 @@ class WifiSsidStore:
             client_isolation=body.client_isolation,
             hidden=body.hidden,
             notes=body.notes,
+            pmf=body.advanced.pmf,
+            ft_802_11r=body.advanced.ft_802_11r,
+            rrm_802_11k=body.advanced.rrm_802_11k,
+            btm_802_11v=body.advanced.btm_802_11v,
+            dtim_period=body.advanced.dtim_period,
+            wmm=body.advanced.wmm,
+            proxy_arp=body.advanced.proxy_arp,
+            wds=body.advanced.wds,
         )
         async with self._sf() as session:
             session.add(row)
@@ -111,6 +130,14 @@ class WifiSsidStore:
             row.client_isolation = body.client_isolation
             row.hidden = body.hidden
             row.notes = body.notes
+            row.pmf = body.advanced.pmf
+            row.ft_802_11r = body.advanced.ft_802_11r
+            row.rrm_802_11k = body.advanced.rrm_802_11k
+            row.btm_802_11v = body.advanced.btm_802_11v
+            row.dtim_period = body.advanced.dtim_period
+            row.wmm = body.advanced.wmm
+            row.proxy_arp = body.advanced.proxy_arp
+            row.wds = body.advanced.wds
             # password semantics: None = leave alone, "" = clear, anything else = set
             if body.password is not None:
                 row.password_encrypted = encrypt(body.password) if body.password else b""

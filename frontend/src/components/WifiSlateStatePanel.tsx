@@ -20,6 +20,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { getSlateWifiState, WifiSlotState } from "@/api/wifi";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 import { cn } from "@/lib/utils";
 
@@ -30,10 +31,10 @@ interface ParsedIfname {
   slot: number | null;
 }
 
-const FAMILIES: { key: Family; label: string }[] = [
-  { key: "ra", label: "ra · 2.4 GHz" },
-  { key: "rai", label: "rai · 5 GHz" },
-  { key: "rax", label: "rax · 6 GHz" },
+const FAMILIES: { key: Family; prefix: string; labelKey: string }[] = [
+  { key: "ra", prefix: "ra", labelKey: "radio.col_24" },
+  { key: "rai", prefix: "rai", labelKey: "radio.col_5" },
+  { key: "rax", prefix: "rax", labelKey: "radio.col_6" },
 ];
 
 function parseIfname(ifname: string): ParsedIfname {
@@ -50,6 +51,7 @@ function parseIfname(ifname: string): ParsedIfname {
 }
 
 export default function WifiSlateStatePanel() {
+  const t = useT();
   const q = useQuery({
     queryKey: ["wifi", "slate-state"],
     queryFn: getSlateWifiState,
@@ -60,23 +62,21 @@ export default function WifiSlateStatePanel() {
   return (
     <section className="cyber-panel p-4">
       <header className="mb-3 flex items-center justify-between">
-        <div className="cyber-label text-[10px]">
-          radios · état live côté slate
-        </div>
+        <div className="cyber-label text-[10px]">{t("radio.title")}</div>
         <button
           onClick={() => q.refetch()}
           disabled={q.isFetching}
-          className="rounded border border-[color:var(--color-cyber-border)] px-2 py-1 text-[9px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-dim)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-50"
+          className="rounded border border-[color:var(--color-cyber-border)] px-2 py-1 text-[9px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-50"
         >
           <RefreshCw
             className={cn("mr-1 inline h-2.5 w-2.5", q.isFetching && "animate-spin")}
           />
-          Refresh
+          {t("common.refresh")}
         </button>
       </header>
 
       {q.isError && (
-        <div className="rounded border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-300">
+        <div className="rounded border border-[color:var(--color-cyber-danger)]/40 bg-[color:var(--color-cyber-danger)]/5 p-2 text-[11px] text-[color:var(--color-cyber-danger)]">
           <AlertTriangle className="mr-1 inline h-3 w-3" />
           {errorMessage(q.error)}
         </div>
@@ -84,7 +84,7 @@ export default function WifiSlateStatePanel() {
 
       {q.isLoading && !q.data && (
         <div className="flex items-center gap-2 p-2 text-[11px] text-[color:var(--color-cyber-muted)]">
-          <RefreshCw className="h-3 w-3 animate-spin" /> probe SSH…
+          <RefreshCw className="h-3 w-3 animate-spin" /> {t("common.loading")}
         </div>
       )}
 
@@ -96,6 +96,7 @@ export default function WifiSlateStatePanel() {
 /* ---------- matrix ---------- */
 
 function SlotMatrix({ slots }: { slots: WifiSlotState[] }) {
+  const t = useT();
   // Index : pour chaque (family, slot) on garde le `WifiSlotState`
   // dont l'ifname correspond. Les sections sans ifname numéroté
   // (named GL.iNet stock comme `guest2g`, ou MLO links `wlanmld5g`)
@@ -144,52 +145,63 @@ function SlotMatrix({ slots }: { slots: WifiSlotState[] }) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[11px]">
+      <table className="cyber-table">
+        <colgroup>
+          <col className="w-16" />
+          <col />
+          <col />
+          <col />
+          <col className="w-40" />
+        </colgroup>
         <thead>
-          <tr className="text-[color:var(--color-cyber-muted)]">
-            <Th>slot</Th>
+          <tr>
+            <th>{t("radio.col_slot")}</th>
             {FAMILIES.map((f) => (
-              <Th key={f.key}>{f.label}</Th>
+              <th key={f.key}>
+                {f.prefix} · {t(f.labelKey)}
+              </th>
             ))}
-            <Th>MLO</Th>
+            <th>{t("radio.col_mlo")}</th>
           </tr>
         </thead>
         <tbody>
           {slotIndices.map((idx) => (
-            <tr
-              key={idx}
-              className="border-t border-[color:var(--color-cyber-border)]/30"
-            >
-              <Td mono accent>
+            <tr key={idx}>
+              <td className="font-mono text-[color:var(--color-cyber-accent)] cyber-glow">
                 {idx}
-              </Td>
+              </td>
               {FAMILIES.map((f) => (
-                <Td key={f.key}>
+                <td key={f.key}>
                   <Cell state={cells.get(`${f.key}-${idx}`)} />
-                </Td>
+                </td>
               ))}
-              <Td>
+              <td>
                 <MloCell
                   groups={[...mldByGroup.entries()].filter(([num]) =>
                     mldSlotsCovered.get(num)?.has(idx),
                   )}
                 />
-              </Td>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
 
-      {/* MLD groups dump under the matrix — context for the MLO column. */}
+      {/* Récapitulatif des groupes MLD — contextualise la colonne MLO. */}
       {mldByGroup.size > 0 && (
         <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-[color:var(--color-cyber-muted)]">
           {[...mldByGroup.entries()].map(([num, state]) => (
             <span
               key={num}
-              className="rounded border border-cyan-500/30 bg-cyan-500/5 px-1.5 py-0.5"
+              className="rounded border border-[color:var(--color-cyber-accent)]/30 bg-[color:var(--color-cyber-accent)]/5 px-1.5 py-0.5 text-[color:var(--color-cyber-fg)]"
             >
-              mld{num} → <span className="font-mono">{state.ssid_uci || "—"}</span>
-              {state.enabled ? " · enabled" : " · disabled"}
+              {t("radio.mlo_caption", {
+                ifname: `mld${num}`,
+                ssid: state.ssid_uci || t("radio.none"),
+                state: state.enabled
+                  ? t("radio.state_enabled")
+                  : t("radio.state_disabled"),
+              })}
             </span>
           ))}
         </div>
@@ -210,34 +222,47 @@ function Cell({ state }: { state: WifiSlotState | undefined }) {
     : state.is_up
       ? "ok"
       : "off";
-  const dot = {
-    ok: "bg-emerald-400",
-    drift: "bg-amber-400",
-    off: "bg-[color:var(--color-cyber-dim)]",
+  // Couleurs adossées aux variables CSS du thème : elles s'adaptent
+  // automatiquement au jour/nuit (ok = vert thème, drift = warn, off
+  // = muted). Le statut "drift" reste signalé par le pictogramme
+  // AlertTriangle en plus du code couleur.
+  const dotColor = {
+    ok: "var(--color-cyber-ok)",
+    drift: "var(--color-cyber-warn)",
+    off: "var(--color-cyber-dim)",
   }[status];
-  const text = {
-    ok: "text-emerald-200",
-    drift: "text-amber-200",
-    off: "text-[color:var(--color-cyber-muted)]",
+  const textColor = {
+    ok: "var(--color-cyber-ok)",
+    drift: "var(--color-cyber-warn)",
+    off: "var(--color-cyber-muted)",
   }[status];
   const ssid = state.ssid_broadcast || state.ssid_uci || "—";
   const tooltip = [
     `UCI : ${state.section_name}`,
     `iface : ${state.ifname}`,
-    `Config : ${state.enabled ? "enabled" : "disabled"} · réseau=${state.network || "—"}`,
-    `Broadcast : ${state.ssid_broadcast ? `"${state.ssid_broadcast}"` : "silent"}`,
+    `Config : ${state.enabled ? "activé" : "désactivé"} · réseau=${state.network || "—"}`,
+    `Diffusion : ${state.ssid_broadcast ? `"${state.ssid_broadcast}"` : "silencieuse"}`,
     state.notes.length > 0 ? `⚠ ${state.notes.join(" · ")}` : "",
   ]
     .filter(Boolean)
     .join("\n");
   return (
     <span
-      className={cn("inline-flex items-center gap-1.5 font-mono", text)}
+      className="inline-flex items-center gap-1.5 font-mono"
+      style={{ color: textColor }}
       title={tooltip}
     >
-      <span className={cn("inline-block h-1.5 w-1.5 rounded-full", dot)} />
+      <span
+        className="inline-block h-1.5 w-1.5 rounded-full"
+        style={{ background: dotColor }}
+      />
       <span className="truncate">{ssid}</span>
-      {drift && <AlertTriangle className="h-2.5 w-2.5 shrink-0 text-amber-400" />}
+      {drift && (
+        <AlertTriangle
+          className="h-2.5 w-2.5 shrink-0"
+          style={{ color: "var(--color-cyber-warn)" }}
+        />
+      )}
     </span>
   );
 }
@@ -250,56 +275,26 @@ function MloCell({ groups }: { groups: [number, WifiSlotState][] }) {
     <div className="flex flex-wrap gap-1">
       {groups.map(([num, state]) => {
         const drift = !state.enabled && state.is_up;
-        const color = state.enabled
-          ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-200"
+        const baseColor = state.enabled
+          ? "var(--color-cyber-accent)"
           : drift
-            ? "border-amber-500/50 bg-amber-500/10 text-amber-200"
-            : "border-[color:var(--color-cyber-border)] text-[color:var(--color-cyber-muted)]";
+            ? "var(--color-cyber-warn)"
+            : "var(--color-cyber-muted)";
         return (
           <span
             key={num}
-            className={cn(
-              "rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.15em]",
-              color,
-            )}
-            title={`mld${num} : ${state.ssid_uci || "(vide)"} · ${state.enabled ? "enabled" : "disabled"}`}
+            className="rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.15em]"
+            style={{
+              color: baseColor,
+              borderColor: `color-mix(in srgb, ${baseColor} 50%, transparent)`,
+              background: `color-mix(in srgb, ${baseColor} 10%, transparent)`,
+            }}
+            title={`mld${num} : ${state.ssid_uci || "(vide)"} · ${state.enabled ? "activé" : "désactivé"}`}
           >
             mld{num}
           </span>
         );
       })}
     </div>
-  );
-}
-
-/* ---------- primitives ---------- */
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th className="border-b border-[color:var(--color-cyber-border)] px-2 py-1 text-left font-mono text-[10px] uppercase tracking-[0.15em]">
-      {children}
-    </th>
-  );
-}
-
-function Td({
-  children,
-  mono,
-  accent,
-}: {
-  children: React.ReactNode;
-  mono?: boolean;
-  accent?: boolean;
-}) {
-  return (
-    <td
-      className={cn(
-        "px-2 py-1.5 text-[color:var(--color-cyber-dim)]",
-        mono && "font-mono",
-        accent && "text-[color:var(--color-cyber-accent)] cyber-glow",
-      )}
-    >
-      {children}
-    </td>
   );
 }

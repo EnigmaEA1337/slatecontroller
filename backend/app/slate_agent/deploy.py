@@ -35,6 +35,18 @@ REMOTE_CYCLE_SCRIPT = f"{REMOTE_SCRIPTS_DIR}/cycle-profile.sh"
 REMOTE_CYCLE_ACTION_UPDATE = f"{REMOTE_SCRIPTS_DIR}/cycle-action-update.sh"
 REMOTE_RC_BUTTON_RESET = "/etc/rc.button/reset"
 REMOTE_RC_BUTTON_RESET_BACKUP = "/etc/rc.button/reset.slate-ctrl.backup"
+# Webhook push helpers + their config files.
+REMOTE_WEBHOOK_SECRET = f"{REMOTE_SECRETS_DIR}/webhook.secret"
+REMOTE_CONTROLLER_URL = f"{REMOTE_ROOT}/controller-url"
+REMOTE_DEVICE_SLUG = f"{REMOTE_ROOT}/device-slug"
+# Controller's internal CA root, pushed when the controller HTTPS cert
+# is signed by our CA. The helper uses curl --cacert against this when
+# present ; absent = rely on the system trust store (publicly-trusted
+# certs like Tailscale ts.net Let's Encrypt).
+REMOTE_CONTROLLER_CA = f"{REMOTE_SECRETS_DIR}/controller-ca.pem"
+REMOTE_EVENT_PUSH = "/usr/local/bin/slate-ctrl-event-push"
+REMOTE_TOUCHSCREEN_WATCHER = "/usr/local/bin/slate-ctrl-touchscreen-watcher"
+REMOTE_TOUCHSCREEN_INIT = "/etc/init.d/slate-ctrl-touchscreen-watcher"
 # Marker embedded as a comment in our managed reset hook — used to
 # detect whether the file on the Slate is already ours so we don't
 # back up our own version on re-deploys.
@@ -404,3 +416,131 @@ async def get_agent_version(ssh: SlateSSH) -> str | None:
     except SlateSSHError:
         pass
     return None
+
+
+async def deploy_webhook_components(
+    ssh: SlateSSH,
+    *,
+    slug: str,
+    controller_url: str,
+    webhook_secret: str,
+) -> DeployReport:
+    """Push the Slate-side webhook push helpers + provision the secrets.
+
+    Separately from :func:`deploy_agent` so callers can rotate the secret
+    or re-target the controller URL without re-pushing handlers.
+
+    Pipeline :
+      1. push slate-ctrl-event-push → /usr/local/bin/ (chmod 755)
+      2. push slate-ctrl-touchscreen-watcher → /usr/local/bin/ (chmod 755)
+      3. push procd init script → /etc/init.d/ (chmod 755)
+      4. write controller-url, device-slug, secrets/webhook.secret (0600)
+      5. enable + restart the procd service so it picks up new config
+
+    Idempotent — re-running rotates the secret and reloads the service.
+    """
+    rep = DeployReport()
+
+    # 1+2+3. Push the three shell scripts.
+    for src, target, mode in (
+        ("slate-ctrl-event-push.sh", REMOTE_EVENT_PUSH, 0o755),
+        ("slate-ctrl-touchscreen-watcher.sh", REMOTE_TOUCHSCREEN_WATCHER, 0o755),
+        ("init.d-slate-ctrl-touchscreen-watcher", REMOTE_TOUCHSCREEN_INIT, 0o755),
+    ):
+        local = LOCAL_SCRIPTS_DIR / src
+        if not local.is_file():
+            rep.errors.append(f"missing local {src}")
+            continue
+        try:
+            payload = local.read_bytes()
+            await ssh.put_bytes(payload, target, mode=mode)
+            rep.pushed.append(f"{target} ({len(payload)} bytes)")
+        except (SlateSSHError, OSError) as exc:
+            rep.errors.append(f"push {src}: {exc}")
+
+    # 4. Provision the config files. URL + slug are world-readable
+    # (they're not secret), the HMAC secret is 0600 inside 0700 secrets/.
+    try:
+        await ssh.put_bytes(
+            controller_url.encode() + b"\n",
+            REMOTE_CONTROLLER_URL, mode=0o644,
+        )
+        rep.pushed.append(f"{REMOTE_CONTROLLER_URL}")
+    except (SlateSSHError, OSError) as exc:
+        rep.errors.append(f"write controller-url: {exc}")
+
+    try:
+        await ssh.put_bytes(
+            slug.encode() + b"\n",
+            REMOTE_DEVICE_SLUG, mode=0o644,
+        )
+        rep.pushed.append(f"{REMOTE_DEVICE_SLUG}")
+    except (SlateSSHError, OSError) as exc:
+        rep.errors.append(f"write device-slug: {exc}")
+
+    try:
+        await ssh.put_bytes(
+            webhook_secret.encode() + b"\n",
+            REMOTE_WEBHOOK_SECRET, mode=0o600,
+        )
+        rep.pushed.append(f"{REMOTE_WEBHOOK_SECRET} (0600)")
+    except (SlateSSHError, OSError) as exc:
+        rep.errors.append(f"write webhook secret: {exc}")
+
+    # 4b. Push the controller's internal-CA root cert ONLY when the
+    # controller URL is on a hostname whose TLS cert is NOT publicly
+    # trusted. Heuristic : *.ts.net is Tailscale Serve = Let's Encrypt,
+    # so the Slate's stock trust store validates it ; pushing our
+    # internal CA there would make curl --cacert REPLACE the trust
+    # store with the wrong chain → 000 / connection error. Any other
+    # hostname is assumed to be served by Traefik + our internal CA
+    # (the typical homelab setup), and we push the CA accordingly.
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(controller_url).hostname or "").lower()
+        is_publicly_trusted = host.endswith(".ts.net")
+        if is_publicly_trusted:
+            await ssh.run(
+                f"rm -f {REMOTE_CONTROLLER_CA}", timeout=5,
+            )
+            rep.pushed.append(
+                f"{REMOTE_CONTROLLER_CA} (none — {host} uses publicly-trusted cert)"
+            )
+        else:
+            from app.settings.internal_ca import pki as _ca_pki
+            from app.settings.internal_ca.state import ROOT_CERT_PATH
+            if _ca_pki.is_initialized() and ROOT_CERT_PATH.exists():
+                ca_pem = ROOT_CERT_PATH.read_bytes()
+                await ssh.put_bytes(
+                    ca_pem, REMOTE_CONTROLLER_CA, mode=0o644,
+                )
+                rep.pushed.append(
+                    f"{REMOTE_CONTROLLER_CA} ({len(ca_pem)} bytes, internal CA)"
+                )
+            else:
+                await ssh.run(
+                    f"rm -f {REMOTE_CONTROLLER_CA}", timeout=5,
+                )
+                rep.pushed.append(
+                    f"{REMOTE_CONTROLLER_CA} (none — internal CA not initialised)"
+                )
+    except Exception as exc:  # noqa: BLE001
+        rep.errors.append(f"push controller CA: {exc}")
+
+    # 5. Enable + restart the procd service. Failure here is annoying but
+    # not catastrophic — the scripts are pushed, operator can fix manually.
+    try:
+        await ssh.run(
+            f"{REMOTE_TOUCHSCREEN_INIT} enable 2>&1 ; "
+            f"{REMOTE_TOUCHSCREEN_INIT} restart 2>&1 ; echo OK",
+            timeout=15,
+        )
+        rep.pushed.append("touchscreen-watcher procd service enabled + restarted")
+    except SlateSSHError as exc:
+        rep.errors.append(f"enable touchscreen-watcher service: {exc}")
+
+    logger.info(
+        "slate_agent.deploy_webhook",
+        ok=rep.ok, pushed=len(rep.pushed), errors=len(rep.errors),
+    )
+    return rep

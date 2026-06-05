@@ -17,6 +17,7 @@ import {
   reliabilityShieldStyle,
 } from "@/components/ReliabilityShield";
 import { useSecurityReliability } from "@/hooks/useSecurityReliability";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 // Same color palette as the reliability shield, applied to KPI score text.
@@ -27,6 +28,7 @@ function postureColor(percent: number): string {
 }
 
 export default function SecurityHub() {
+  const t = useT();
   const hardeningQ = useQuery({
     queryKey: ["slate-hardening"],
     queryFn: getSlateHardening,
@@ -80,10 +82,12 @@ export default function SecurityHub() {
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <ScanLine className="cyber-glow h-5 w-5" />
-          <h1 className="cyber-display cyber-glow text-2xl">SÉCURITÉ</h1>
+          <h1 className="cyber-display cyber-glow text-2xl">
+            {t("security.hub_title").toUpperCase()}
+          </h1>
         </div>
         <p className="text-xs uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-          Hub des indicateurs sécurité — durcissement, vulnérabilités, mesh VPN.
+          {t("security.hub_subtitle")}
         </p>
       </div>
 
@@ -102,7 +106,9 @@ export default function SecurityHub() {
         <div className="flex items-start gap-6">
           <ShieldIcon className={cn("h-20 w-20 shrink-0", shieldStyle.text)} />
           <div className="flex flex-col">
-            <div className="cyber-label text-[10px]">Fiabilité Slate</div>
+            <div className="cyber-label text-[10px]">
+              {t("security.reliability_label")}
+            </div>
             <div className="mt-1 flex items-baseline gap-2">
               <span
                 className={cn(

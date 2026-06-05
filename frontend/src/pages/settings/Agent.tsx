@@ -27,7 +27,9 @@ import {
 import {
   applyAgentProfile,
   deployAgent,
+  deployAgentWebhook,
   getAgentStatus,
+  rotateAgentWebhookSecret,
   syncAgentProfiles,
   type AgentApplyResult,
 } from "@/api/agent";
@@ -291,6 +293,11 @@ export default function Agent() {
         )}
       </section>
 
+      {/* ── Slate → Controller push webhook ────────────────────────── */}
+      <div className="mt-4">
+        <WebhookPushPanel />
+      </div>
+
       {/* ── Reset-button profile cycle ─────────────────────────────── */}
       <div className="mt-4">
         <ButtonCyclePanel />
@@ -308,6 +315,123 @@ export default function Agent() {
         </button>
       </div>
     </div>
+  );
+}
+
+function WebhookPushPanel() {
+  const qc = useQueryClient();
+  const deployMut = useMutation({
+    mutationFn: deployAgentWebhook,
+    onSettled: () =>
+      qc.invalidateQueries({ queryKey: ["security", "lockout-status"] }),
+  });
+  const rotateMut = useMutation({
+    mutationFn: rotateAgentWebhookSecret,
+  });
+  const last = deployMut.data ?? rotateMut.data;
+  const lastErr = deployMut.error ?? rotateMut.error;
+  return (
+    <section className="cyber-card p-6">
+      <header className="mb-3 flex items-center gap-2">
+        <Upload className="cyber-glow h-4 w-4" />
+        <h2 className="cyber-display text-lg">push webhook Slate → Controller</h2>
+      </header>
+      <p className="mb-4 text-[11px] leading-relaxed text-[color:var(--color-cyber-muted)]">
+        Pousse l'agent <code>slate-ctrl-touchscreen-watcher</code> et son
+        helper de signature HMAC sur le Slate. Une fois activ&eacute;, les
+        &eacute;v&eacute;nements gl_screen (mauvais PIN, lockout) arrivent au controller en
+        ~2&nbsp;s au lieu d'attendre le poll fallback 60&nbsp;s.
+        <br />
+        <br />
+        <strong>Pré-requis</strong> : URL HTTPS dans{" "}
+        <strong>Settings → URLs controller</strong> (ex.{" "}
+        <code>https://controller.tonlab.local</code> ou{" "}
+        <code>https://&lt;host&gt;.tail-xxx.ts.net</code>). Si le cert est
+        sign&eacute; par ta CA interne (Settings → CA interne), elle sera
+        pouss&eacute;e sur le Slate pour que <code>curl --cacert</code> valide.
+        Les certs ts.net sont publiquement trusted, rien à faire.
+      </p>
+
+      <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => deployMut.mutate()}
+          disabled={deployMut.isPending || rotateMut.isPending}
+          className="cyber-button px-4 py-2 text-xs"
+        >
+          {deployMut.isPending ? (
+            <>
+              <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+              déploiement…
+            </>
+          ) : (
+            <>
+              <Upload className="mr-2 inline h-3 w-3" />
+              activer / déployer le push
+            </>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => rotateMut.mutate()}
+          disabled={rotateMut.isPending || deployMut.isPending}
+          className="cyber-button-ghost px-4 py-2 text-xs"
+          title="Génère un nouveau secret HMAC + re-provisionne le Slate. Ancien secret valide 30s."
+        >
+          {rotateMut.isPending ? (
+            <>
+              <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+              rotation…
+            </>
+          ) : (
+            <>
+              <RefreshCw className="mr-2 inline h-3 w-3" />
+              rotation du secret HMAC
+            </>
+          )}
+        </button>
+      </div>
+
+      {last && (
+        <div
+          className={cn(
+            "border p-3 text-[10px]",
+            last.ok
+              ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-300"
+              : "border-amber-500/40 bg-amber-500/5 text-amber-300",
+          )}
+        >
+          <div className="mb-1 flex items-center gap-1">
+            {last.ok ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <AlertTriangle className="h-3 w-3" />
+            )}
+            <span className="font-mono uppercase tracking-wider">
+              {last.ok ? "succès" : "partiel"} ·{" "}
+              {last.pushed?.length ?? 0} push,{" "}
+              {last.errors?.length ?? 0} erreur{(last.errors?.length ?? 0) > 1 ? "s" : ""}
+            </span>
+          </div>
+          {(last.pushed ?? []).slice(0, 8).map((p, i) => (
+            <div key={i} className="font-mono opacity-80">
+              ▸ {p}
+            </div>
+          ))}
+          {(last.errors ?? []).map((e, i) => (
+            <div key={i} className="font-mono text-amber-300">
+              ⚠ {e}
+            </div>
+          ))}
+        </div>
+      )}
+      {lastErr && (
+        <div className="border border-red-500/40 bg-red-500/5 p-3 text-[10px] text-red-300">
+          <AlertTriangle className="mr-1 inline h-3 w-3" />
+          {errorMessage(lastErr)}
+        </div>
+      )}
+    </section>
   );
 }
 

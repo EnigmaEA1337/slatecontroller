@@ -8,6 +8,35 @@ export type WifiSecurity =
   | "WPA2-WPA3-Mixed"
   | "open";
 
+// Protected Management Frames (802.11w) policy.
+export type WifiPMF = "disabled" | "optional" | "required";
+
+// MTK-specific knobs exposed under the "Avancé" section of the SSID
+// edit form. Each maps 1:1 to a UCI option the MT7990 driver honours.
+// The defaults preserve the legacy behaviour for SSIDs created before
+// this section existed.
+export interface WifiSsidAdvanced {
+  pmf: WifiPMF;
+  ft_802_11r: boolean;
+  rrm_802_11k: boolean;
+  btm_802_11v: boolean;
+  dtim_period: number; // 1-10
+  wmm: boolean;
+  proxy_arp: boolean;
+  wds: boolean;
+}
+
+export const DEFAULT_ADVANCED: WifiSsidAdvanced = {
+  pmf: "optional",
+  ft_802_11r: false,
+  rrm_802_11k: false,
+  btm_802_11v: false,
+  dtim_period: 2,
+  wmm: true,
+  proxy_arp: false,
+  wds: false,
+};
+
 // NB: no network_slug. An SSID is a pure L2 access definition; the
 // network (bridge/subnet) binding is a per-profile decision and lives
 // on ProfileSSIDRef.network_slug instead.
@@ -21,6 +50,7 @@ export interface WifiSsidPublic {
   hidden: boolean;
   notes: string;
   has_password: boolean;
+  advanced: WifiSsidAdvanced;
   created_at: string;
   updated_at: string;
 }
@@ -34,6 +64,7 @@ export interface WifiSsidWrite {
   client_isolation: boolean;
   hidden: boolean;
   notes: string;
+  advanced: WifiSsidAdvanced;
 }
 
 export interface WifiSsidCreate extends WifiSsidWrite {

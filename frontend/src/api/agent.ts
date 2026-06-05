@@ -47,6 +47,26 @@ export async function deployAgent(): Promise<AgentDeployResult> {
   return data;
 }
 
+export async function deployAgentWebhook(): Promise<AgentDeployResult> {
+  // Push the touchscreen-watcher + event-push helpers + secret + URL to
+  // the Slate, then enable the procd service so it starts polling
+  // /etc/gl_screen/status and pushing changes back to us.
+  const { data } = await api.post<AgentDeployResult>(
+    "/api/agent/deploy-webhook", undefined, { timeout: 30_000 },
+  );
+  return data;
+}
+
+export async function rotateAgentWebhookSecret(): Promise<AgentDeployResult> {
+  // Generate a fresh HMAC secret, re-provision on the Slate. Previous
+  // secret stays valid 30s on the controller side so requests in
+  // flight don't 401.
+  const { data } = await api.post<AgentDeployResult>(
+    "/api/agent/rotate-webhook-secret", undefined, { timeout: 30_000 },
+  );
+  return data;
+}
+
 export async function syncAgentProfiles(): Promise<AgentSyncResult> {
   // One SSH put per profile JSON → ~5 small calls.
   const { data } = await api.post<AgentSyncResult>(

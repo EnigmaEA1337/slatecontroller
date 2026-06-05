@@ -18,6 +18,7 @@ auto-lock windows so long they're effectively pointless.
 
 from __future__ import annotations
 
+import hmac
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -196,6 +197,104 @@ async def set_enabled(ssh: SlateSSH, enabled: bool) -> ScreenLockStatus:
         )
     logger.info("screen_lock.toggled", enabled=enabled)
     return await get_status(ssh)
+
+
+@dataclass(frozen=True)
+class TouchscreenLockoutTelemetry:
+    """On-device gl_screen lockout snapshot, polled via SSH.
+
+    Observed gl_screen semantic (live discovery 2026-06-03) :
+
+    - ``continuous_errors`` mirrors PASSWORD_CONTINOUS_ERRORS — current
+      failure streak counter. When the streak hits the gl_screen-internal
+      threshold (5 by default), gl_screen RESETS this back to 0 and
+      MOVES the count into UNLOCK_ATTEMPT_EXCEED_LIMIT.
+    - ``exceed_count`` mirrors UNLOCK_ATTEMPT_EXCEED_LIMIT — *count of
+      failures that triggered the current lockout*, not a flag. ``0``
+      means no lockout, anything > 0 means the touchscreen is locked.
+      At lockout expiry gl_screen clears this back to 0.
+    - ``exceed_limit`` is the boolean "is locked" semantic derived from
+      ``exceed_count > 0`` — what the UI cares about.
+    """
+
+    continuous_errors: int
+    exceed_count: int
+    exceed_limit: bool
+
+
+async def read_touchscreen_lockout(
+    ssh: SlateSSH,
+) -> TouchscreenLockoutTelemetry:
+    """Read the on-device touchscreen lockout state from
+    ``/etc/gl_screen/status``.
+
+    Raises :class:`ScreenLockError` only on SSH failures. Missing file
+    → return zeroes (the device may not have written the status yet).
+    """
+    try:
+        r = await ssh.run(
+            "cat /etc/gl_screen/status 2>/dev/null || true", timeout=5,
+        )
+    except SlateSSHError as exc:
+        raise ScreenLockError(
+            f"SSH read /etc/gl_screen/status failed: {exc}",
+        ) from exc
+    errors = 0
+    exceed_count = 0
+    for line in r.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 2:
+            continue
+        key, val = parts
+        if key == "PASSWORD_CONTINOUS_ERRORS":
+            try:
+                errors = int(val)
+            except ValueError:
+                pass
+        elif key == "UNLOCK_ATTEMPT_EXCEED_LIMIT":
+            try:
+                exceed_count = int(val)
+            except ValueError:
+                pass
+    return TouchscreenLockoutTelemetry(
+        continuous_errors=errors,
+        exceed_count=exceed_count,
+        exceed_limit=exceed_count > 0,
+    )
+
+
+async def _read_pin(ssh: SlateSSH) -> str:
+    """Internal : read the stored PIN from UCI. Never returned over the API ;
+    only used by :func:`verify_pin` for constant-time comparison."""
+    try:
+        r = await ssh.run(
+            "uci get gl_screen.generic.PASSCODE 2>/dev/null", timeout=5,
+        )
+    except SlateSSHError as exc:
+        raise ScreenLockError(f"SSH read PIN failed: {exc}") from exc
+    return _parse_pin_from_uci(r.stdout)
+
+
+async def verify_pin(ssh: SlateSSH, attempt: str) -> bool:
+    """Verify a PIN attempt against the stored UCI value.
+
+    Returns True on match, False on mismatch. Uses :func:`hmac.compare_digest`
+    for constant-time comparison so a remote timing oracle can't leak
+    digit-by-digit info — even though our attacker model is the operator,
+    not a remote, leaks are leaks.
+
+    Raises :class:`ScreenLockError` only on infrastructure problems
+    (SSH down, UCI unreadable). Never raises on a wrong PIN — that's a
+    legitimate path the caller wraps with the lockout service.
+    """
+    if not attempt:
+        return False
+    stored = await _read_pin(ssh)
+    if not stored:
+        # No PIN configured on the device — nothing to verify against.
+        # Caller decides whether that's a hard error.
+        return False
+    return hmac.compare_digest(stored, attempt)
 
 
 async def set_auto_lock(ssh: SlateSSH, seconds: int) -> ScreenLockStatus:

@@ -39,6 +39,7 @@ import type {
   AdoptionTaskReport,
   DevicePublic,
 } from "@/types/device";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage, formatDate } from "@/lib/error-utils";
 
@@ -47,6 +48,7 @@ import { errorMessage, formatDate } from "@/lib/error-utils";
 // ---------------------------- Add device form ---------------------------- #
 
 function AddDeviceForm({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const queryClient = useQueryClient();
   const [slug, setSlug] = useState("");
   const [label, setLabel] = useState("");
@@ -78,7 +80,9 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
   return (
     <form onSubmit={onSubmit} className="cyber-card cyber-card-accent space-y-4 p-5">
       <div className="flex items-center justify-between">
-        <h3 className="cyber-display cyber-glow text-lg">NEW DEVICE</h3>
+        <h3 className="cyber-display cyber-glow text-lg">
+          {t("devices.new").toUpperCase()}
+        </h3>
         <button
           type="button"
           onClick={onClose}
@@ -90,7 +94,7 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">
-          <span className="cyber-label mb-1.5 block">slug</span>
+          <span className="cyber-label mb-1.5 block">{t("devices.form_slug")}</span>
           <input
             type="text"
             required
@@ -98,33 +102,33 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
             onChange={(e) =>
               setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
             }
-            placeholder="slate-mobile"
+            placeholder={t("devices.form_slug_placeholder")}
             className="cyber-input w-full py-2 px-3 text-sm font-mono"
           />
         </label>
         <label className="block">
-          <span className="cyber-label mb-1.5 block">label (optionnel)</span>
+          <span className="cyber-label mb-1.5 block">{t("devices.form_label")}</span>
           <input
             type="text"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="Slate du sac à dos"
+            placeholder={t("devices.form_label_placeholder")}
             className="cyber-input w-full py-2 px-3 text-sm font-mono"
           />
         </label>
         <label className="col-span-2 block">
-          <span className="cyber-label mb-1.5 block">host (IP ou DNS)</span>
+          <span className="cyber-label mb-1.5 block">{t("devices.form_admin_url")}</span>
           <input
             type="text"
             required
             value={host}
             onChange={(e) => setHost(e.target.value)}
-            placeholder="192.168.8.1"
+            placeholder={t("devices.form_admin_url_placeholder")}
             className="cyber-input w-full py-2 px-3 text-sm font-mono"
           />
         </label>
         <label className="block">
-          <span className="cyber-label mb-1.5 block">SSH/RPC user</span>
+          <span className="cyber-label mb-1.5 block">SSH / RPC</span>
           <input
             type="text"
             required
@@ -134,7 +138,7 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
           />
         </label>
         <label className="block">
-          <span className="cyber-label mb-1.5 block">password</span>
+          <span className="cyber-label mb-1.5 block">{t("common.password")}</span>
           <div className="relative">
             <input
               type={showPw ? "text" : "password"}
@@ -160,14 +164,14 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
           disabled={submit.isPending || !slug || !host || !rpcPassword}
           className="cyber-button px-4 py-2 text-xs disabled:opacity-50"
         >
-          {submit.isPending ? "ajout…" : "Ajouter"}
+          {submit.isPending ? t("common.loading") : t("devices.action_create")}
         </button>
         <button
           type="button"
           onClick={onClose}
           className="border border-[color:var(--color-cyber-border-strong)] px-4 py-2 text-xs uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)]"
         >
-          Annuler
+          {t("devices.action_cancel")}
         </button>
       </div>
 
@@ -177,8 +181,8 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
         </p>
       )}
 
-      <p className="text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-dim)]">
-        Après ajout : clique "adopter" → exécute TLS pinning, force HTTPS, SSH key-only, désactive UPnP.
+      <p className="text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)]">
+        Après création, lancer l'adoption depuis la carte : épinglage TLS, HTTPS forcé, SSH par clé uniquement, désactivation d'UPnP.
       </p>
     </form>
   );
@@ -752,6 +756,7 @@ const DeviceCard = memo(function DeviceCard({
 // ---------------------------- Page ---------------------------- #
 
 export default function DevicesPage() {
+  const t = useT();
   const [creating, setCreating] = useState(false);
   const [adoptingDevice, setAdoptingDevice] = useState<DevicePublic | null>(null);
   const query = useQuery({
@@ -765,13 +770,16 @@ export default function DevicesPage() {
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <Router className="cyber-glow h-3 w-3" />
-            managed devices · {query.data?.length ?? 0}
+            {t("devices.counter", { n: query.data?.length ?? 0 })}
           </div>
-          <h1 className="cyber-display cyber-glitch text-4xl" data-text="DEVICES">
-            DEVICES
+          <h1
+            className="cyber-display cyber-glitch text-4xl"
+            data-text={t("devices.title").toUpperCase()}
+          >
+            {t("devices.title").toUpperCase()}
           </h1>
           <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-            GL.iNet hardware piloté par le contrôleur · adoption + hardening
+            {t("devices.subtitle")}
           </p>
         </div>
         {!creating && (
@@ -781,7 +789,7 @@ export default function DevicesPage() {
             className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
-            Nouveau device
+            {t("devices.new")}
           </button>
         )}
       </header>
@@ -792,7 +800,7 @@ export default function DevicesPage() {
         </section>
       )}
 
-      {query.isLoading && <p className="cyber-label cyber-cursor">chargement</p>}
+      {query.isLoading && <p className="cyber-label cyber-cursor">{t("common.loading")}</p>}
       {query.error && (
         <p className="cyber-chip cyber-chip-on block !rounded-none px-3 py-2 text-xs">
           {errorMessage(query.error)}
@@ -800,7 +808,7 @@ export default function DevicesPage() {
       )}
       {query.data && query.data.length === 0 && !creating && (
         <p className="text-xs text-[color:var(--color-cyber-muted)]">
-          Aucun device. Clique "Nouveau device" pour démarrer.
+          {t("devices.empty")}
         </p>
       )}
 

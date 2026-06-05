@@ -59,29 +59,31 @@
 
     /* Surfaces : white with a subtle cool-blue tint so it doesn't look
      * like printer paper. Cards are pure white to stand out. */
-    --color-cyber-bg: #f4f7fb;
-    --color-cyber-bg-2: #e8eef5;
+    --color-cyber-bg: #eef2f8;
+    --color-cyber-bg-2: #dde6f2;
     --color-cyber-surface: #ffffff;
     --color-cyber-surface-2: #f0f4fa;
-    --color-cyber-border: #c5d3e8;
-    --color-cyber-border-strong: #7a93b8;
+    --color-cyber-border: #9eb3cf;
+    --color-cyber-border-strong: #5b7da6;
 
     /* Accent : electric cyan-blue. #0066ff at full saturation reads
      * "Tron / Blade Runner exterior daylight" and works well on white. */
-    --color-cyber-accent: #0066ff;
-    --color-cyber-accent-dim: #0052cc;
-    --color-cyber-accent-soft: #4d8fff;
+    --color-cyber-accent: #0052cc;
+    --color-cyber-accent-dim: #003e99;
+    --color-cyber-accent-soft: #2b6fd6;
 
-    /* Status : tuned for visibility on white. */
-    --color-cyber-ok: #009358;
-    --color-cyber-warn: #c2410c;
-    --color-cyber-danger: #dc2626;
+    /* Status : tuned for visibility on white (WCAG AA ≥ 4.5:1 vs surface). */
+    --color-cyber-ok: #047357;
+    --color-cyber-warn: #92400e;
+    --color-cyber-danger: #b91c1c;
 
     /* Text : deep slate-navy that keeps the cyber feel without being
-     * pure black (which clashes with the cool accent). */
-    --color-cyber-fg: #0d1b2a;
-    --color-cyber-muted: #5b6b80;
-    --color-cyber-dim: #95a3b8;
+     * pure black. Muted/dim shifted darker so secondary labels, hashes
+     * and code values stay legible on the white surfaces (target ratio
+     * ≥ 4.5:1 for muted, ≥ 3:1 for dim). */
+    --color-cyber-fg: #0a1726;
+    --color-cyber-muted: #2f4257;
+    --color-cyber-dim: #4a5d76;
   }
 
   /* AUTO mode : follow the OS preference. When the system says light,
@@ -91,21 +93,21 @@
   @media (prefers-color-scheme: light) {
     html[data-theme="auto"] {
       color-scheme: light;
-      --color-cyber-bg: #f4f7fb;
-      --color-cyber-bg-2: #e8eef5;
+      --color-cyber-bg: #eef2f8;
+      --color-cyber-bg-2: #dde6f2;
       --color-cyber-surface: #ffffff;
       --color-cyber-surface-2: #f0f4fa;
-      --color-cyber-border: #c5d3e8;
-      --color-cyber-border-strong: #7a93b8;
-      --color-cyber-accent: #0066ff;
-      --color-cyber-accent-dim: #0052cc;
-      --color-cyber-accent-soft: #4d8fff;
-      --color-cyber-ok: #009358;
-      --color-cyber-warn: #c2410c;
-      --color-cyber-danger: #dc2626;
-      --color-cyber-fg: #0d1b2a;
-      --color-cyber-muted: #5b6b80;
-      --color-cyber-dim: #95a3b8;
+      --color-cyber-border: #9eb3cf;
+      --color-cyber-border-strong: #5b7da6;
+      --color-cyber-accent: #0052cc;
+      --color-cyber-accent-dim: #003e99;
+      --color-cyber-accent-soft: #2b6fd6;
+      --color-cyber-ok: #047357;
+      --color-cyber-warn: #92400e;
+      --color-cyber-danger: #b91c1c;
+      --color-cyber-fg: #0a1726;
+      --color-cyber-muted: #2f4257;
+      --color-cyber-dim: #4a5d76;
     }
   }
 
@@ -195,6 +197,44 @@
       rgba(255, 58, 82, 0.03) 2px,
       rgba(255, 58, 82, 0.03) 3px
     );
+  }
+
+  /* Day-mode swaps the scanline to the electric-blue accent and dims it
+   * so it doesn't grey out white surfaces. Same logic for AUTO+light. */
+  html[data-theme="day"] body::after {
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 2px,
+      rgba(0, 82, 204, 0.025) 2px,
+      rgba(0, 82, 204, 0.025) 3px
+    );
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] body::after {
+      background: repeating-linear-gradient(
+        0deg,
+        transparent 0,
+        transparent 2px,
+        rgba(0, 82, 204, 0.025) 2px,
+        rgba(0, 82, 204, 0.025) 3px
+      );
+    }
+  }
+
+  /* Corner PCB traces : swap red→blue in day mode, otherwise the only
+   * red elements on a white page look like a graphical glitch. */
+  html[data-theme="day"] body::before {
+    background-image:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='220'><g fill='none' stroke='%230052cc' stroke-width='0.8' opacity='0.32'><path d='M320 18 L240 18 L210 48 L210 110 L180 140 L180 200'/><path d='M320 58 L260 58 L260 92'/><path d='M320 108 L226 108'/><path d='M260 92 L260 132 L300 132'/></g><g fill='%230052cc' opacity='0.55'><rect x='208' y='46' width='4' height='4'/><rect x='178' y='138' width='4' height='4'/><rect x='258' y='90' width='4' height='4'/><rect x='178' y='198' width='4' height='4'/></g></svg>"),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='200'><g fill='none' stroke='%230052cc' stroke-width='0.8' opacity='0.32'><path d='M0 180 L60 180 L90 150 L90 90 L130 50'/><path d='M0 130 L40 130 L40 90'/><path d='M0 80 L100 80'/></g><g fill='%230052cc' opacity='0.55'><rect x='88' y='88' width='4' height='4'/><rect x='128' y='48' width='4' height='4'/><rect x='38' y='88' width='4' height='4'/></g></svg>");
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] body::before {
+      background-image:
+        url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='220'><g fill='none' stroke='%230052cc' stroke-width='0.8' opacity='0.32'><path d='M320 18 L240 18 L210 48 L210 110 L180 140 L180 200'/><path d='M320 58 L260 58 L260 92'/><path d='M320 108 L226 108'/><path d='M260 92 L260 132 L300 132'/></g><g fill='%230052cc' opacity='0.55'><rect x='208' y='46' width='4' height='4'/><rect x='178' y='138' width='4' height='4'/><rect x='258' y='90' width='4' height='4'/><rect x='178' y='198' width='4' height='4'/></g></svg>"),
+        url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='200'><g fill='none' stroke='%230052cc' stroke-width='0.8' opacity='0.32'><path d='M0 180 L60 180 L90 150 L90 90 L130 50'/><path d='M0 130 L40 130 L40 90'/><path d='M0 80 L100 80'/></g><g fill='%230052cc' opacity='0.55'><rect x='88' y='88' width='4' height='4'/><rect x='128' y='48' width='4' height='4'/><rect x='38' y='88' width='4' height='4'/></g></svg>");
+    }
   }
 
   ::selection {
@@ -363,9 +403,12 @@
       14px 100%,
       0 calc(100% - 14px)
     );
+    /* Drop shadow uses a CSS variable so the day theme can override it
+     * with a softer/lighter cast instead of the heavy black halo, which
+     * looks grimy against a white background. */
     box-shadow:
       0 0 0 1px var(--color-cyber-border) inset,
-      0 4px 30px rgba(0, 0, 0, 0.45);
+      0 4px 30px var(--cyber-card-shadow, rgba(0, 0, 0, 0.45));
     position: relative;
     transition: box-shadow 200ms ease;
   }
@@ -374,14 +417,26 @@
     box-shadow:
       0 0 0 1px var(--color-cyber-accent-dim) inset,
       0 0 24px rgba(255, 58, 82, 0.08),
-      0 4px 30px rgba(0, 0, 0, 0.45);
+      0 4px 30px var(--cyber-card-shadow, rgba(0, 0, 0, 0.45));
   }
 
   .cyber-card:hover {
     box-shadow:
       0 0 0 1px var(--color-cyber-accent) inset,
       0 0 28px rgba(255, 58, 82, 0.15),
-      0 4px 30px rgba(0, 0, 0, 0.45);
+      0 4px 30px var(--cyber-card-shadow, rgba(0, 0, 0, 0.45));
+  }
+
+  /* Day-mode soft shadow : a faint slate-blue cast instead of a heavy
+   * black halo. Applied via the same custom property the cyber-card
+   * rule reads. Also covers AUTO when the system prefers light. */
+  html[data-theme="day"] {
+    --cyber-card-shadow: rgba(10, 23, 38, 0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] {
+      --cyber-card-shadow: rgba(10, 23, 38, 0.08);
+    }
   }
 
   /* HUD brackets on top-left and bottom-right (the non-cut corners) */
@@ -571,5 +626,235 @@
   }
   .cyber-pulse {
     animation: cyber-pulse 2s ease-in-out infinite;
+  }
+
+  /* Used by PinConfirmModal on wrong-pin feedback. Short horizontal jiggle
+   * to make the failure tactile without being aggressive. */
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-4px); }
+    40% { transform: translateX(4px); }
+    60% { transform: translateX(-3px); }
+    80% { transform: translateX(2px); }
+  }
+  .shake {
+    animation: shake 0.4s ease-in-out;
+  }
+
+  /* =========================================================
+   * Cyber-table — uniformised tabular shell so every page
+   * gets the same column rhythm, padding, header treatment,
+   * row hover and zebra striping. Tailwind utility classes
+   * make alignment per-cell easy ; this base only sets the
+   * structural defaults (widths, borders, mono font).
+   *
+   * Usage :
+   *   <table className="cyber-table">
+   *     <colgroup>
+   *       <col className="w-12" />     // checkbox / index
+   *       <col className="w-40" />     // primary key
+   *       <col />                       // expanding column
+   *       <col className="w-28 text-right" />
+   *     </colgroup>
+   *     ...
+   *   </table>
+   * ========================================================= */
+  .cyber-table {
+    width: 100%;
+    table-layout: fixed;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .cyber-table thead th {
+    color: var(--color-cyber-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 10px;
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--color-cyber-border);
+    background: transparent;
+  }
+  .cyber-table tbody td {
+    padding: 6px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-cyber-border) 40%, transparent);
+    color: var(--color-cyber-fg);
+    vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cyber-table tbody tr:hover td {
+    background: color-mix(in srgb, var(--color-cyber-accent) 4%, transparent);
+  }
+  .cyber-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  /* Modifier : allow wrapping in a specific column (rare, opt-in). */
+  .cyber-table td.is-wrap,
+  .cyber-table th.is-wrap {
+    white-space: normal;
+  }
+  /* Modifier : zebra striping (off by default to keep the HUD clean). */
+  .cyber-table.is-zebra tbody tr:nth-child(odd) td {
+    background: color-mix(in srgb, var(--color-cyber-bg-2) 50%, transparent);
+  }
+
+  /* =========================================================
+   * Day-mode utility overrides — Tailwind's *-300 / *-400
+   * colours are tuned for dark backgrounds and turn invisible
+   * on white. We rebind the most-used ones in the codebase to
+   * deeper shades so existing JSX stays untouched.
+   *
+   * Applied for both data-theme="day" and AUTO+light. Only the
+   * `text-*` variants are remapped — backgrounds/borders are
+   * usually fine because they're already used with alpha.
+   * ========================================================= */
+  html[data-theme="day"] .text-amber-100,
+  html[data-theme="day"] .text-amber-200,
+  html[data-theme="day"] .text-amber-300,
+  html[data-theme="day"] .text-amber-400 {
+    color: #92400e !important;
+  }
+  html[data-theme="day"] .text-emerald-100,
+  html[data-theme="day"] .text-emerald-200,
+  html[data-theme="day"] .text-emerald-300,
+  html[data-theme="day"] .text-emerald-400 {
+    color: #047357 !important;
+  }
+  html[data-theme="day"] .text-cyan-100,
+  html[data-theme="day"] .text-cyan-200,
+  html[data-theme="day"] .text-cyan-300,
+  html[data-theme="day"] .text-cyan-400,
+  html[data-theme="day"] .text-sky-100,
+  html[data-theme="day"] .text-sky-200,
+  html[data-theme="day"] .text-sky-300,
+  html[data-theme="day"] .text-sky-400 {
+    color: #0e6ba8 !important;
+  }
+  html[data-theme="day"] .text-rose-100,
+  html[data-theme="day"] .text-rose-200,
+  html[data-theme="day"] .text-rose-300,
+  html[data-theme="day"] .text-rose-400,
+  html[data-theme="day"] .text-red-100,
+  html[data-theme="day"] .text-red-200,
+  html[data-theme="day"] .text-red-300,
+  html[data-theme="day"] .text-red-400 {
+    color: #b91c1c !important;
+  }
+  html[data-theme="day"] .text-yellow-100,
+  html[data-theme="day"] .text-yellow-200,
+  html[data-theme="day"] .text-yellow-300,
+  html[data-theme="day"] .text-yellow-400 {
+    color: #92400e !important;
+  }
+  html[data-theme="day"] .text-violet-100,
+  html[data-theme="day"] .text-violet-200,
+  html[data-theme="day"] .text-violet-300,
+  html[data-theme="day"] .text-violet-400,
+  html[data-theme="day"] .text-purple-100,
+  html[data-theme="day"] .text-purple-200,
+  html[data-theme="day"] .text-purple-300,
+  html[data-theme="day"] .text-purple-400 {
+    color: #6d28d9 !important;
+  }
+  html[data-theme="day"] .text-fuchsia-100,
+  html[data-theme="day"] .text-fuchsia-200,
+  html[data-theme="day"] .text-fuchsia-300,
+  html[data-theme="day"] .text-fuchsia-400,
+  html[data-theme="day"] .text-pink-100,
+  html[data-theme="day"] .text-pink-200,
+  html[data-theme="day"] .text-pink-300,
+  html[data-theme="day"] .text-pink-400 {
+    color: #be185d !important;
+  }
+  html[data-theme="day"] .text-slate-200,
+  html[data-theme="day"] .text-slate-300,
+  html[data-theme="day"] .text-slate-400,
+  html[data-theme="day"] .text-zinc-200,
+  html[data-theme="day"] .text-zinc-300,
+  html[data-theme="day"] .text-zinc-400,
+  html[data-theme="day"] .text-gray-200,
+  html[data-theme="day"] .text-gray-300,
+  html[data-theme="day"] .text-gray-400,
+  html[data-theme="day"] .text-neutral-200,
+  html[data-theme="day"] .text-neutral-300,
+  html[data-theme="day"] .text-neutral-400 {
+    color: var(--color-cyber-muted) !important;
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] .text-amber-100,
+    html[data-theme="auto"] .text-amber-200,
+    html[data-theme="auto"] .text-amber-300,
+    html[data-theme="auto"] .text-amber-400,
+    html[data-theme="auto"] .text-yellow-100,
+    html[data-theme="auto"] .text-yellow-200,
+    html[data-theme="auto"] .text-yellow-300,
+    html[data-theme="auto"] .text-yellow-400 {
+      color: #92400e !important;
+    }
+    html[data-theme="auto"] .text-emerald-100,
+    html[data-theme="auto"] .text-emerald-200,
+    html[data-theme="auto"] .text-emerald-300,
+    html[data-theme="auto"] .text-emerald-400 {
+      color: #047357 !important;
+    }
+    html[data-theme="auto"] .text-cyan-100,
+    html[data-theme="auto"] .text-cyan-200,
+    html[data-theme="auto"] .text-cyan-300,
+    html[data-theme="auto"] .text-cyan-400,
+    html[data-theme="auto"] .text-sky-100,
+    html[data-theme="auto"] .text-sky-200,
+    html[data-theme="auto"] .text-sky-300,
+    html[data-theme="auto"] .text-sky-400 {
+      color: #0e6ba8 !important;
+    }
+    html[data-theme="auto"] .text-rose-100,
+    html[data-theme="auto"] .text-rose-200,
+    html[data-theme="auto"] .text-rose-300,
+    html[data-theme="auto"] .text-rose-400,
+    html[data-theme="auto"] .text-red-100,
+    html[data-theme="auto"] .text-red-200,
+    html[data-theme="auto"] .text-red-300,
+    html[data-theme="auto"] .text-red-400 {
+      color: #b91c1c !important;
+    }
+    html[data-theme="auto"] .text-violet-100,
+    html[data-theme="auto"] .text-violet-200,
+    html[data-theme="auto"] .text-violet-300,
+    html[data-theme="auto"] .text-violet-400,
+    html[data-theme="auto"] .text-purple-100,
+    html[data-theme="auto"] .text-purple-200,
+    html[data-theme="auto"] .text-purple-300,
+    html[data-theme="auto"] .text-purple-400 {
+      color: #6d28d9 !important;
+    }
+    html[data-theme="auto"] .text-fuchsia-100,
+    html[data-theme="auto"] .text-fuchsia-200,
+    html[data-theme="auto"] .text-fuchsia-300,
+    html[data-theme="auto"] .text-fuchsia-400,
+    html[data-theme="auto"] .text-pink-100,
+    html[data-theme="auto"] .text-pink-200,
+    html[data-theme="auto"] .text-pink-300,
+    html[data-theme="auto"] .text-pink-400 {
+      color: #be185d !important;
+    }
+    html[data-theme="auto"] .text-slate-200,
+    html[data-theme="auto"] .text-slate-300,
+    html[data-theme="auto"] .text-slate-400,
+    html[data-theme="auto"] .text-zinc-200,
+    html[data-theme="auto"] .text-zinc-300,
+    html[data-theme="auto"] .text-zinc-400,
+    html[data-theme="auto"] .text-gray-200,
+    html[data-theme="auto"] .text-gray-300,
+    html[data-theme="auto"] .text-gray-400,
+    html[data-theme="auto"] .text-neutral-200,
+    html[data-theme="auto"] .text-neutral-300,
+    html[data-theme="auto"] .text-neutral-400 {
+      color: var(--color-cyber-muted) !important;
+    }
   }
 }

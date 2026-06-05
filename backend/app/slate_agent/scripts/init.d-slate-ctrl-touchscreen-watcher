@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# procd init script for slate-ctrl-touchscreen-watcher.
+#
+# Starts at boot, respawns on death (procd restart_threshold), logged
+# via stderr -> logger so it shows up in `logread`.
+
+USE_PROCD=1
+START=95
+STOP=10
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/local/bin/slate-ctrl-touchscreen-watcher
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    # Respawn fast on crash (threshold 60s / timeout 5s / retry 5x).
+    procd_set_param respawn 60 5 5
+    procd_close_instance
+}

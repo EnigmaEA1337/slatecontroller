@@ -122,6 +122,19 @@ def _profile_to_agent_payload(
             "client_isolation": catalog.client_isolation,
             "hidden": catalog.hidden,
             "enabled": enabled,
+            # MTK advanced UCI options. The wifi.sh handler reads each
+            # field optionally — missing keys → leave existing UCI
+            # untouched (so old payloads keep working unchanged).
+            "advanced": {
+                "pmf": catalog.advanced.pmf,
+                "ft_802_11r": catalog.advanced.ft_802_11r,
+                "rrm_802_11k": catalog.advanced.rrm_802_11k,
+                "btm_802_11v": catalog.advanced.btm_802_11v,
+                "dtim_period": catalog.advanced.dtim_period,
+                "wmm": catalog.advanced.wmm,
+                "proxy_arp": catalog.advanced.proxy_arp,
+                "wds": catalog.advanced.wds,
+            },
         })
     # Processing-order policy for slot-row exclusivity in the panel :
     #   1. multi-band non-MLO  → claim aligned indexes across their bands

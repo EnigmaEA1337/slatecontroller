@@ -35,6 +35,7 @@ import {
   toggleAdGuardFilter,
 } from "@/api/adguard";
 import type { AdGuardFilter, AdGuardStatus } from "@/types/adguard";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -1010,6 +1011,7 @@ function DnssecCard({ available }: { available: boolean }) {
 // ---------------------------- Page ---------------------------- #
 
 export default function AdGuardPage() {
+  const t = useT();
   const queryClient = useQueryClient();
   const status = useQuery({
     queryKey: ["adguard", "status"],
@@ -1039,18 +1041,21 @@ export default function AdGuardPage() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <FilterIcon className="cyber-glow h-3 w-3" />
-          protection · adguard home
+          {t("adguard.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="ADGUARD">
-          ADGUARD
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("adguard.title").toUpperCase()}
+        >
+          {t("adguard.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          dns filtering · blocklists · runtime stats
+          {t("adguard.description")}
         </p>
       </header>
 
       {status.isLoading && (
-        <p className="cyber-label cyber-cursor">chargement</p>
+        <p className="cyber-label cyber-cursor">{t("common.loading")}</p>
       )}
 
       {status.isError && (

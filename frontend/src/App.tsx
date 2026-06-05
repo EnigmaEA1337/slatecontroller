@@ -46,7 +46,17 @@ const NetworksRadioHistory = lazy(
   () => import("./pages/networks/RadioHistory"),
 );
 const NetworksRadioMap = lazy(() => import("./pages/networks/RadioMap"));
+const NetworksAmbient = lazy(() => import("./pages/networks/Ambient"));
+const NetworksPcap = lazy(() => import("./pages/networks/Pcap"));
+const WifiOrphansPage = lazy(() => import("./pages/networks/WifiOrphans"));
+const NetworksSurveillance = lazy(
+  () => import("./pages/networks/Surveillance"),
+);
+const NetworksSurveillanceDetail = lazy(
+  () => import("./pages/networks/SurveillanceDetail"),
+);
 const SecurityAirWatch = lazy(() => import("./pages/security/AirWatch"));
+const SecurityAntiTheft = lazy(() => import("./pages/security/AntiTheft"));
 const SettingsAppearance = lazy(() => import("./pages/settings/Appearance"));
 const SettingsHub = lazy(() => import("./pages/settings/SettingsHub"));
 const SettingsSshKey = lazy(() => import("./pages/settings/SshKey"));
@@ -115,7 +125,22 @@ export default function App() {
             element={<NetworksRadioHistory />}
           />
           <Route path="/networks/radio/map" element={<NetworksRadioMap />} />
+          <Route path="/networks/ambient" element={<NetworksAmbient />} />
+          <Route path="/networks/pcap" element={<NetworksPcap />} />
+          <Route
+            path="/wifi/orphans"
+            element={<WifiOrphansPage />}
+          />
+          <Route
+            path="/networks/surveillance"
+            element={<NetworksSurveillance />}
+          />
+          <Route
+            path="/networks/surveillance/:id"
+            element={<NetworksSurveillanceDetail />}
+          />
           <Route path="/security/air-watch" element={<SecurityAirWatch />} />
+          <Route path="/security/anti-theft" element={<SecurityAntiTheft />} />
           <Route path="/settings/appearance" element={<SettingsAppearance />} />
           <Route path="/settings" element={<SettingsHub />} />
           <Route path="/settings/ssh-key" element={<SettingsSshKey />} />

@@ -28,12 +28,30 @@ export async function updateRadioConfig(
   return data;
 }
 
-/** Trigger a live scan. Slow-ish (10-25s) — UI must show progress. */
-export async function scanRadio(band: WifiBand): Promise<ScanResponse> {
+/** Trigger a live scan.
+ *
+ * - durationS = 0 (default) : single pass, slow-ish (10-25s).
+ * - durationS > 0 : multi-pass extended scan ; loops iw scans until the
+ *   wall-clock budget is spent, merges by BSSID, exposes per-BSSID stats
+ *   (seen_count, rssi_max/min, first/last_seen_offset_s). Backend caps
+ *   at 1200s (20 min) for safety.
+ */
+export async function scanRadio(
+  band: WifiBand,
+  opts?: { durationS?: number },
+): Promise<ScanResponse> {
+  const durationS = opts?.durationS ?? 0;
+  // HTTP timeout : duration_s budget + 30s slack for the last pass +
+  // network overhead. Default (single pass) keeps the original 60s.
+  const httpTimeout =
+    durationS > 0 ? (durationS + 30) * 1000 : 60_000;
+  const params = new URLSearchParams();
+  if (durationS > 0) params.set("duration_s", String(durationS));
+  const qs = params.toString();
   const { data } = await api.post<ScanResponse>(
-    `/api/wifi/radios/${encodeURIComponent(band)}/scan`,
+    `/api/wifi/radios/${encodeURIComponent(band)}/scan${qs ? `?${qs}` : ""}`,
     null,
-    { timeout: 60_000 },
+    { timeout: httpTimeout },
   );
   return data;
 }

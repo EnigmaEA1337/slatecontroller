@@ -29,8 +29,15 @@ from app.api.routes import tailscale as tailscale_routes
 from app.api.routes import tor as tor_routes
 from app.api.routes import vpn_configs as vpn_config_routes
 from app.api.routes import air_watch as air_watch_routes
+from app.api.routes import ambient_scan as ambient_scan_routes
+from app.api.routes import anti_theft as anti_theft_routes
+from app.api.routes import ap_reviews as ap_reviews_routes
 from app.api.routes import device_locations as device_locations_routes
 from app.api.routes import scan_history as scan_history_routes
+from app.api.routes import pcap as pcap_routes
+from app.api.routes import slate_webhooks as slate_webhooks_routes
+from app.api.routes import surveillance as surveillance_routes
+from app.api.routes import wifi_orphans as wifi_orphans_routes
 from app.api.routes import wifi as wifi_routes
 from app.api.routes import wifi_radio as wifi_radio_routes
 from app.config import get_settings
@@ -257,11 +264,82 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state._security_cve2capec = cve2capec
 
     # Single scheduler shared by future jobs. Daily exploit-sources refresh
-    # at 06:00 UTC is the only one wired today.
+    # at 06:00 UTC + ambient-scan loops + ambient cleanup are the wired
+    # ones today.
     scheduler = AsyncIOScheduler(timezone="UTC")
     register_security_jobs(scheduler, exploit_enricher)
     scheduler.start()
     app.state.scheduler = scheduler
+
+    # Ambient-scan manager : reads enabled configs and (re)schedules a
+    # job per (device, band). Lives for the app lifetime.
+    from app.scheduler.ambient_scan import AmbientScanManager
+    ambient_mgr = AmbientScanManager(
+        scheduler=scheduler,
+        session_factory=session_factory,
+        device_registry=device_registry,
+    )
+    app.state.ambient_scan_manager = ambient_mgr
+
+    # LAN PCAP capture manager — orchestrates tcpdump-over-SSH sessions.
+    from app.wifi.pcap_capture import PcapCaptureManager
+    app.state.pcap_manager = PcapCaptureManager(session_factory)
+
+    # Surveillance-session manager : re-schedules every still-active
+    # session's per-band jobs + runs the deadline supervisor.
+    from app.scheduler.surveillance import SurveillanceManager
+    surveillance_mgr = SurveillanceManager(
+        scheduler=scheduler,
+        session_factory=session_factory,
+        device_registry=device_registry,
+    )
+    app.state.surveillance_manager = surveillance_mgr
+
+    # PIN bruteforce lockout : stateless service backed by SQLite.
+    # Lives on app.state for the whole app lifetime ; no init needed.
+    from app.security.anti_theft import AntiTheftService
+    from app.security.pin_lockout import PinLockoutService
+    pin_lockout_svc = PinLockoutService(session_factory)
+    anti_theft_svc = AntiTheftService(
+        session_factory=session_factory,
+        device_registry=device_registry,
+    )
+    # Wire the two together so PIN failures escalate via anti-theft
+    # autonomous mode when enabled.
+    pin_lockout_svc.attach_anti_theft(anti_theft_svc)
+    app.state.pin_lockout = pin_lockout_svc
+    app.state.anti_theft = anti_theft_svc
+
+    # Bridge gl_screen → anti-theft. Push is the primary path — the
+    # Slate-side watcher pushes within ~2s of any state change AND
+    # heartbeats every 30s, so the controller's snapshot stays fresh
+    # on its own. The SSH poll is now a SAFETY NET only : it kicks in
+    # at 5 min intervals to recover from a crashed/stopped on-device
+    # watcher, an HMAC secret out-of-sync, or a controller restart
+    # that lost the in-memory snapshot. At 300s it's invisible cost on
+    # SSH (one tiny `cat` per device per 5 min).
+    from app.scheduler.screen_lock_watcher import ScreenLockWatcher
+    screen_lock_watcher = ScreenLockWatcher(
+        scheduler=scheduler,
+        device_registry=device_registry,
+        anti_theft=anti_theft_svc,
+        poll_interval_s=300,
+    )
+    screen_lock_watcher.register()
+    app.state.screen_lock_watcher = screen_lock_watcher
+
+    # Webhook infrastructure : HMAC auth + dispatcher + handlers.
+    from app.webhooks.auth import WebhookAuthService
+    from app.webhooks.dispatcher import WebhookDispatcher
+    from app.webhooks.handlers import build_touchscreen_status_handler
+    webhook_auth = WebhookAuthService(session_factory)
+    webhook_dispatcher = WebhookDispatcher()
+    webhook_dispatcher.register(
+        "touchscreen_status",
+        build_touchscreen_status_handler(screen_lock_watcher),
+    )
+    app.state.webhook_auth = webhook_auth
+    app.state.webhook_dispatcher = webhook_dispatcher
 
     import asyncio as _asyncio
 
@@ -301,6 +379,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             )
             logger.info("post_adoption.ha_watchdog.started")
+        # Ambient scan : restore whatever was enabled before shutdown.
+        # Same idempotent pattern as above — register_all() replaces by id.
+        cur_a = getattr(app.state, "_ambient_scan_boot_task", None)
+        if cur_a is None or cur_a.done():
+            app.state._ambient_scan_boot_task = _asyncio.create_task(
+                ambient_mgr.register_all(),
+            )
+            logger.info("post_adoption.ambient_scan.started")
+        # Surveillance : re-attach still-active sessions whose deadline
+        # hasn't passed ; finalize the rest.
+        cur_s = getattr(app.state, "_surveillance_boot_task", None)
+        if cur_s is None or cur_s.done():
+            app.state._surveillance_boot_task = _asyncio.create_task(
+                surveillance_mgr.register_all(),
+            )
+            logger.info("post_adoption.surveillance.started")
 
     # Expose the starter on app.state so the adoption route can call it
     # after marking the first device as adopted.
@@ -397,6 +491,8 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     app.include_router(auth_routes.router, prefix="/api")
+    # Webhook ingestion (Slate → Controller push). NO JWT — HMAC-only.
+    app.include_router(slate_webhooks_routes.router, prefix="/api")
     app.include_router(profile_routes.router, prefix="/api")
     app.include_router(slate_routes.router, prefix="/api")
     app.include_router(proton_routes.router, prefix="/api")
@@ -408,6 +504,19 @@ def create_app() -> FastAPI:
     # must register BEFORE wifi_routes' /wifi/{slug}.
     app.include_router(wifi_radio_routes.router, prefix="/api")
     app.include_router(scan_history_routes.router, prefix="/api")
+    # ap_reviews is /wifi/reviews — also needs to land before the wifi
+    # catch-all that owns /wifi/{slug}.
+    app.include_router(ap_reviews_routes.router, prefix="/api")
+    # bssid_router is the per-BSSID override layer on top of ap_reviews.
+    app.include_router(ap_reviews_routes.bssid_router, prefix="/api")
+    # ambient_scan owns /wifi/ambient — also before the catch-all.
+    app.include_router(ambient_scan_routes.router, prefix="/api")
+    # wifi orphans owns /wifi/orphans — same shadow concern as the rest.
+    app.include_router(wifi_orphans_routes.router, prefix="/api")
+    # surveillance owns /wifi/surveillance — same shadow concern.
+    app.include_router(surveillance_routes.router, prefix="/api")
+    # PCAP capture — /network/pcap.
+    app.include_router(pcap_routes.router, prefix="/api")
     app.include_router(wifi_routes.router, prefix="/api")
     app.include_router(air_watch_routes.router, prefix="/api")
     app.include_router(device_locations_routes.router, prefix="/api")
@@ -416,6 +525,7 @@ def create_app() -> FastAPI:
     app.include_router(adguard_routes.router, prefix="/api")
     app.include_router(device_routes.router, prefix="/api")
     app.include_router(security_routes.router, prefix="/api")
+    app.include_router(anti_theft_routes.router, prefix="/api")
     app.include_router(tailscale_routes.router, prefix="/api")
     app.include_router(agent_routes.router, prefix="/api")
     app.include_router(dns_protection_routes.router, prefix="/api")

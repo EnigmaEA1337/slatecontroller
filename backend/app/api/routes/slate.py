@@ -12,12 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.adguard.manager import AdGuardManager
 from app.api.deps import (
     get_adguard_manager,
+    get_device_connections,
     get_exploit_enricher,
     get_security_store,
     get_slate_client,
     get_slate_ssh,
     get_slate_url_resolver,
 )
+from app.devices.registry import DeviceConnections
 from app.security.exploit_enricher import ExploitEnricher
 from app.security.store import SecurityStore
 from app.auth import User, get_current_user
@@ -31,6 +33,7 @@ from app.slate.screen_lock import (
     set_auto_lock as screen_lock_set_auto_lock,
     set_enabled as screen_lock_set_enabled,
     set_pin as screen_lock_set_pin,
+    verify_pin as screen_lock_verify_pin,
 )
 from app.slate.ssh import SlateSSH
 from app.slate.url_resolver import SlateUrlResolver
@@ -656,6 +659,106 @@ async def set_screen_lock_pin(
         pin_strength=st.pin_strength,
     )
     return _screen_lock_to_dict(st)
+
+
+class _VerifyPinBody(BaseModel):
+    pin: str = Field(min_length=1, max_length=16)
+    # Per-scope counter — defaults to the generic controller flow. Future
+    # callers (encryption unlock, factory-reset confirm) pass their own
+    # scope so their lockouts don't bleed into each other.
+    scope: str = Field(default="controller_verify", max_length=32)
+
+
+class _VerifyPinResult(BaseModel):
+    ok: bool
+    failed_count: int
+    remaining_attempts: int
+    remaining_lock_s: int
+
+
+def _pin_lockout(request: Request):
+    """Resolve the lockout service from app.state — fail loudly if absent."""
+    svc = getattr(request.app.state, "pin_lockout", None)
+    if svc is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PIN lockout service not initialised",
+        )
+    return svc
+
+
+@router.post("/screen-lock/verify", response_model=_VerifyPinResult)
+async def verify_screen_lock_pin(
+    body: _VerifyPinBody,
+    request: Request,
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> _VerifyPinResult:
+    """Verify a PIN attempt against the touchscreen-stored PIN, with
+    bruteforce protection (3 failed attempts within 60s → 60s lockout).
+
+    Used by UI flows that gate a sensitive action behind a PIN confirm
+    (e.g. future at-rest encryption unlock). The PIN itself is never
+    logged — only the structural outcome.
+
+    Responses :
+      - 200 ok=true             match
+      - 200 ok=false            mismatch (counter incremented, attempts left)
+      - 423 Locked              lockout active ; body carries retry_after_s
+    """
+    svc = _pin_lockout(request)
+    # First check : are we currently locked ? This raises 423 if so.
+    await svc.check_or_raise(conn.slug, body.scope)
+
+    try:
+        matched = await screen_lock_verify_pin(ssh, body.pin)
+    except ScreenLockError as exc:
+        # Infra error — don't burn a try, surface as 502.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc),
+        ) from exc
+
+    if matched:
+        snap = await svc.record_success(conn.slug, body.scope)
+        logger.info(
+            "slate.screen_lock.verify.ok",
+            username=user.username, device=conn.slug, scope=body.scope,
+        )
+        return _VerifyPinResult(
+            ok=True,
+            failed_count=snap.failed_count,
+            remaining_attempts=snap.remaining_attempts,
+            remaining_lock_s=snap.remaining_lock_s,
+        )
+
+    snap = await svc.record_failure(conn.slug, body.scope)
+    logger.info(
+        "slate.screen_lock.verify.fail",
+        username=user.username, device=conn.slug, scope=body.scope,
+        failed_count=snap.failed_count,
+        remaining_attempts=snap.remaining_attempts,
+        locked=snap.remaining_lock_s > 0,
+    )
+    # If the last failure put us into lockout, surface 423 so the UI
+    # countdown kicks in immediately instead of waiting one more click.
+    if snap.remaining_lock_s > 0:
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail={
+                "message": "PIN verifier locked",
+                "retry_after_s": snap.remaining_lock_s,
+                "scope": body.scope,
+                "failed_count": snap.failed_count,
+            },
+            headers={"Retry-After": str(snap.remaining_lock_s)},
+        )
+    return _VerifyPinResult(
+        ok=False,
+        failed_count=snap.failed_count,
+        remaining_attempts=snap.remaining_attempts,
+        remaining_lock_s=snap.remaining_lock_s,
+    )
 
 
 @router.put("/screen-lock/enabled", response_model=_ScreenLockStatusOut)

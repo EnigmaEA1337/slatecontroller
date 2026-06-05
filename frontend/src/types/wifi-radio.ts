@@ -39,6 +39,18 @@ export interface NeighborAPView {
   vendor_slug: string;
   is_randomized: boolean;
   ap_root: string;
+  // Reviews — own = per-BSSID override, effective = own || group.
+  review_status_own?: string | null;
+  review_status_effective?: string | null;
+  review_label_own?: string;
+  // Multi-pass stats — meaningful when the scan was an extended (N×) one.
+  // For single-pass : seen_count=1, rssi_max = rssi_min = rssi_dbm,
+  // offsets = 0.
+  seen_count?: number;
+  rssi_max?: number;
+  rssi_min?: number;
+  first_seen_offset_s?: number;
+  last_seen_offset_s?: number;
 }
 
 export interface PhysicalAPGroupView {
@@ -53,6 +65,9 @@ export interface PhysicalAPGroupView {
   hidden_count: number;
   member_count: number;
   bssids: string[];
+  // null when there's no review row yet (implicit "unknown")
+  review_status: string | null;
+  review_label: string;
 }
 
 export interface ChannelScoreView {

@@ -9,6 +9,7 @@ import {
   LogOut,
   MonitorSmartphone,
   Network,
+  Radio,
   Router,
   Shield,
   ShieldCheck,
@@ -20,80 +21,93 @@ import { useAdoptedDevice } from "@/hooks/useAdoptedDevice";
 import { useCurrentUser, useLogout } from "@/hooks/useAuth";
 import { reliabilityShieldStyle } from "@/components/ReliabilityShield";
 import DevicePicker from "@/components/DevicePicker";
+import LockoutBanner from "@/components/LockoutBanner";
 import SlateConnectivityBadge from "@/components/SlateConnectivityBadge";
 import { useSecurityReliability } from "@/hooks/useSecurityReliability";
 import { useWallpaperBlobUrl } from "@/hooks/useWallpaper";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
-const topItems = [
-  { to: "/", label: "Dashboard", icon: Gauge, end: true },
-  { to: "/devices", label: "Devices", icon: Router, end: false },
-  { to: "/profiles", label: "Profils", icon: ShieldCheck, end: false },
+interface NavItem {
+  to: string;
+  labelKey: string;
+  icon?: typeof Gauge;
+  end?: boolean;
+}
+
+const TOP_ITEMS: NavItem[] = [
+  { to: "/", labelKey: "nav.item_dashboard", icon: Gauge, end: true },
+  { to: "/devices", labelKey: "nav.item_devices", icon: Router, end: false },
+  { to: "/profiles", labelKey: "nav.item_profiles", icon: ShieldCheck, end: false },
   // Slate Screen renamed to "Remote Control" — same route for now,
   // becomes a full remote-screen-control surface in a future iteration.
-  { to: "/slate-screen", label: "Remote Control", icon: MonitorSmartphone, end: false },
+  { to: "/slate-screen", labelKey: "nav.item_remote_control", icon: MonitorSmartphone, end: false },
 ];
 
-// New "Réseau" expandable group: groups all LAN-side surfaces (physical
-// + logical) so the top-level nav stays tight. Interfaces is a fresh
-// page added in this restructure ; the other two are moves from the
-// top list (their URLs stay /wifi and /networks — no link rewrites).
-const networkChildren = [
-  { to: "/networks/interfaces", label: "Interfaces" },
-  { to: "/networks/diagnostic", label: "Diagnostic" },
-  { to: "/networks", label: "Réseaux" },
-  { to: "/wifi", label: "SSIDs" },
-  // Radio = layer-1 config (channel / htmode / txpower / country) +
-  // channel scanner. Distinct from SSIDs (which is the layer-2 catalog).
-  { to: "/networks/radio", label: "Radio · RF" },
-  { to: "/networks/radio/map", label: "Radio · Carte" },
+// "Réseau" expandable group : surfaces LAN câblées et logiques.
+const NETWORK_CHILDREN: NavItem[] = [
+  { to: "/networks/interfaces", labelKey: "nav.item_interfaces" },
+  { to: "/networks/diagnostic", labelKey: "nav.item_diagnostic" },
+  { to: "/networks", labelKey: "nav.item_networks" },
+  { to: "/wifi", labelKey: "nav.item_ssids" },
+  { to: "/wifi/orphans", labelKey: "nav.item_ssids_orphans" },
   // Tor = couche de routage par-réseau (per-bridge transparent / SOCKS),
   // donc sa place est ici à côté des autres surfaces réseau — pas dans
   // "Protection".
-  { to: "/networks/tor", label: "Tor" },
+  { to: "/networks/tor", labelKey: "nav.item_tor" },
+];
+
+// Air Wave : tout ce qui est RF / radio / OSINT WiFi. Sorti de "Réseau"
+// pour avoir une section dédiée maintenant qu'on a 4 surfaces (config
+// + carte + ambient + sessions de surveillance).
+// Note : les URLs restent /networks/* pour ne pas casser les bookmarks ;
+// seule la place dans la nav change.
+const AIR_WAVE_CHILDREN: NavItem[] = [
+  // Layer-1 config (channel / htmode / txpower / country) + scanner ponctuel.
+  { to: "/networks/radio", labelKey: "nav.item_rf_scanner" },
+  { to: "/networks/radio/map", labelKey: "nav.item_geo_map" },
+  // Background scan loop : APScheduler job per band, ~6 KB/jour.
+  { to: "/networks/ambient", labelKey: "nav.item_ambient" },
+  // Sessions de surveillance nommées + timeline classifiée.
+  { to: "/networks/surveillance", labelKey: "nav.item_surveillance" },
+  { to: "/networks/pcap", labelKey: "nav.item_pcap" },
 ];
 
 // "Audit" group — renamed from "Sécurité" so the label matches what
 // the page actually does (hardening + CVE + Tailscale audit are all
 // READ-ONLY postures, not active defenses). URLs stay /security/* to
 // avoid breaking bookmarks.
-const auditChildren = [
-  { to: "/security/hardening", label: "Hardening" },
-  { to: "/security/vulnerabilities", label: "Vulnérabilités" },
-  { to: "/security/tailscale", label: "Tailscale Audit" },
-  { to: "/security/tor-audit", label: "Tor Audit" },
-  // Air Watch = audit RF : evil twins, deauth, WPS, voisins co-canal forts.
-  // Alimenté par les scans déclenchés depuis Réseau → Radio.
-  { to: "/security/air-watch", label: "Air Watch" },
+const AUDIT_CHILDREN: NavItem[] = [
+  { to: "/security/hardening", labelKey: "nav.item_hardening" },
+  { to: "/security/vulnerabilities", labelKey: "nav.item_vulnerabilities" },
+  { to: "/security/tailscale", labelKey: "nav.item_tailscale_audit" },
+  { to: "/security/tor-audit", labelKey: "nav.item_tor_audit" },
+  { to: "/security/air-watch", labelKey: "nav.item_air_watch" },
+  { to: "/security/anti-theft", labelKey: "nav.item_anti_theft" },
 ];
 
-// Note : `/settings/connectivity` (controller callback URLs) is volontairement
-// absent du menu. Le store + endpoints existent mais aucun consommateur ne
-// les lit (les webhooks Slate → controller ne sont pas implémentés). On
-// le ressortira quand on attaquera les notifs anti-theft / audit, où la
-// latence webhook bat le polling. Cf. Phase 1 anti-forensics du todo.
-const settingsChildren = [
-  { to: "/settings/setup-status", label: "Setup Status" },
-  { to: "/settings/ssh-key", label: "SSH Keypair" },
-  { to: "/settings/controller-https", label: "HTTPS Controller" },
-  { to: "/settings/internal-ca", label: "CA interne" },
-  { to: "/settings/tailnet-admin", label: "Tailnet admin" },
-  { to: "/settings/communication", label: "Communication" },
-  { to: "/settings/agent", label: "Agent local" },
-  // Pure client-side preference — palette day / night / auto. Saved in
-  // localStorage, no controller call.
-  { to: "/settings/appearance", label: "Apparence" },
+const SETTINGS_CHILDREN: NavItem[] = [
+  { to: "/settings/setup-status", labelKey: "nav.item_setup_status" },
+  { to: "/settings/ssh-key", labelKey: "nav.item_ssh_keypair" },
+  { to: "/settings/controller-https", labelKey: "nav.item_https_controller" },
+  { to: "/settings/internal-ca", labelKey: "nav.item_internal_ca" },
+  { to: "/settings/tailnet-admin", labelKey: "nav.item_tailnet_admin" },
+  { to: "/settings/connectivity", labelKey: "nav.item_callback_urls" },
+  { to: "/settings/communication", labelKey: "nav.item_communication" },
+  { to: "/settings/agent", labelKey: "nav.item_local_agent" },
+  // Pure client-side preference — palette day / night / auto + langue.
+  { to: "/settings/appearance", labelKey: "nav.item_appearance" },
 ];
 
-const vpnChildren = [
-  { to: "/vpn/proton", label: "Proton VPN" },
-  { to: "/vpn/tailscale", label: "Tailscale" },
+const VPN_CHILDREN: NavItem[] = [
+  { to: "/vpn/proton", labelKey: "nav.item_proton_vpn" },
+  { to: "/vpn/tailscale", labelKey: "nav.item_tailscale" },
 ];
 
-const protectionChildren = [
-  { to: "/protection/adguard", label: "AdGuard" },
-  { to: "/protection/dns", label: "DNS" },
-  { to: "/protection/firewall", label: "Firewall" },
+const PROTECTION_CHILDREN: NavItem[] = [
+  { to: "/protection/adguard", labelKey: "nav.item_adguard" },
+  { to: "/protection/dns", labelKey: "nav.item_dns" },
+  { to: "/protection/firewall", labelKey: "nav.item_firewall" },
 ];
 
 // Routes that stay reachable BEFORE adoption — operator needs them to
@@ -111,6 +125,7 @@ function pathIsAllowedPreAdoption(path: string): boolean {
 }
 
 export default function Layout() {
+  const t = useT();
   const me = useCurrentUser();
   const logout = useLogout();
   const navigate = useNavigate();
@@ -129,11 +144,25 @@ export default function Layout() {
     navigate("/devices", { replace: true });
   }, [adopted.isLoading, adopted.hasAdopted, location.pathname, navigate]);
 
+  // Air Wave paths live under /networks/* historically but they belong
+  // to their own section in the nav — so we explicitly exclude them
+  // from `isNetworkPath` and have a dedicated `isAirWavePath`. This
+  // keeps both top groups exclusive : the glow lights only the right
+  // one when the user navigates to e.g. /networks/radio.
+  const isAirWavePath = (p: string) =>
+    p === "/networks/radio" ||
+    p.startsWith("/networks/radio/") ||
+    p.startsWith("/networks/ambient") ||
+    p.startsWith("/networks/surveillance");
   const isNetworkPath = (p: string) =>
-    p.startsWith("/networks") || p.startsWith("/wifi");
+    (p.startsWith("/networks") || p.startsWith("/wifi")) &&
+    !isAirWavePath(p);
 
   const [networkOpen, setNetworkOpen] = useState(() =>
     isNetworkPath(location.pathname),
+  );
+  const [airWaveOpen, setAirWaveOpen] = useState(() =>
+    isAirWavePath(location.pathname),
   );
   const [vpnOpen, setVpnOpen] = useState(() =>
     location.pathname.startsWith("/vpn"),
@@ -150,6 +179,9 @@ export default function Layout() {
   useEffect(() => {
     if (isNetworkPath(location.pathname)) {
       setNetworkOpen(true);
+    }
+    if (isAirWavePath(location.pathname)) {
+      setAirWaveOpen(true);
     }
     if (location.pathname.startsWith("/vpn")) {
       setVpnOpen(true);
@@ -170,6 +202,7 @@ export default function Layout() {
   }
 
   const networkActive = isNetworkPath(location.pathname);
+  const airWaveActive = isAirWavePath(location.pathname);
   const vpnActive = location.pathname.startsWith("/vpn");
   const protectionActive = location.pathname.startsWith("/protection");
   const securityActive = location.pathname.startsWith("/security");
@@ -219,11 +252,13 @@ export default function Layout() {
             slate://
           </span>
         </div>
-        <div className="cyber-display cyber-glow mb-1 text-lg">CONTROLLER</div>
+        <div className="cyber-display cyber-glow mb-1 text-lg">
+          {t("nav.brand").toUpperCase()}
+        </div>
         <div className="cyber-hatch mb-8 mt-1 h-px w-full" />
 
         <nav className="flex-1 space-y-1">
-          {topItems.map((item) => (
+          {TOP_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -237,8 +272,8 @@ export default function Layout() {
                 )
               }
             >
-              <item.icon className="h-3.5 w-3.5" />
-              {item.label}
+              {item.icon && <item.icon className="h-3.5 w-3.5" />}
+              {t(item.labelKey)}
             </NavLink>
           ))}
 
@@ -258,7 +293,7 @@ export default function Layout() {
               aria-expanded={networkOpen}
             >
               <Cable className="h-3.5 w-3.5" />
-              <span>Réseau</span>
+              <span>{t("nav.section_network")}</span>
               {networkOpen ? (
                 <ChevronDown className="ml-auto h-3 w-3" />
               ) : (
@@ -268,7 +303,7 @@ export default function Layout() {
 
             {networkOpen && (
               <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                {networkChildren.map((child) => (
+                {NETWORK_CHILDREN.map((child) => (
                   <NavLink
                     key={child.to}
                     to={child.to}
@@ -283,7 +318,54 @@ export default function Layout() {
                     }
                   >
                     <span className="text-[color:var(--color-cyber-accent)]">▸</span>
-                    {child.label}
+                    {t(child.labelKey)}
+                  </NavLink>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Air Wave expandable group — RF / radio / WiFi OSINT.
+              Distinct from "Réseau" (LAN-side wiring) because the layer-1
+              surfaces have their own lifecycle (scans, sessions, classification). */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setAirWaveOpen((v) => !v)}
+              className={cn(
+                "group flex w-full items-center gap-2 border border-transparent px-3 py-2 text-[11px] font-bold uppercase tracking-[0.2em] transition-all",
+                airWaveActive
+                  ? "cyber-glow border-[color:var(--color-cyber-accent)] bg-[color:var(--color-cyber-accent)]/8"
+                  : "text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-border-strong)] hover:bg-[color:var(--color-cyber-surface)] hover:text-[color:var(--color-cyber-fg)]",
+              )}
+              aria-expanded={airWaveOpen}
+            >
+              <Radio className="h-3.5 w-3.5" />
+              <span>{t("nav.section_air_wave")}</span>
+              {airWaveOpen ? (
+                <ChevronDown className="ml-auto h-3 w-3" />
+              ) : (
+                <ChevronRight className="ml-auto h-3 w-3" />
+              )}
+            </button>
+
+            {airWaveOpen && (
+              <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
+                {AIR_WAVE_CHILDREN.map((child) => (
+                  <NavLink
+                    key={child.to}
+                    to={child.to}
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.18em] transition-all",
+                        isActive
+                          ? "cyber-glow"
+                          : "text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)]",
+                      )
+                    }
+                  >
+                    <span className="text-[color:var(--color-cyber-accent)]">▸</span>
+                    {t(child.labelKey)}
                   </NavLink>
                 ))}
               </div>
@@ -306,12 +388,15 @@ export default function Layout() {
                 className="flex flex-1 items-center gap-2 px-3 py-2"
                 title={
                   reliability.percent !== null
-                    ? `Fiabilité Slate: ${reliability.percent}% — ${reliabilityStyle.label}`
-                    : "Fiabilité Slate: indéterminée"
+                    ? t("nav.reliability_tooltip", {
+                        percent: reliability.percent,
+                        label: reliabilityStyle.label,
+                      })
+                    : t("nav.reliability_unknown")
                 }
               >
                 <SecurityIcon className={cn("h-3.5 w-3.5", reliabilityStyle.text)} />
-                <span>Audit</span>
+                <span>{t("nav.section_audit")}</span>
                 {reliability.percent !== null && (
                   <span
                     className={cn(
@@ -327,7 +412,11 @@ export default function Layout() {
                 type="button"
                 onClick={() => setSecurityOpen((v) => !v)}
                 aria-expanded={securityOpen}
-                aria-label={securityOpen ? "Replier audit" : "Déplier audit"}
+                aria-label={
+                  securityOpen
+                    ? `${t("nav.collapse")} ${t("nav.section_audit")}`
+                    : `${t("nav.expand")} ${t("nav.section_audit")}`
+                }
                 className="flex items-center px-2"
               >
                 {securityOpen ? (
@@ -340,7 +429,7 @@ export default function Layout() {
 
             {securityOpen && (
               <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                {auditChildren.map((child) => (
+                {AUDIT_CHILDREN.map((child) => (
                   <NavLink
                     key={child.to}
                     to={child.to}
@@ -354,7 +443,7 @@ export default function Layout() {
                     }
                   >
                     <span className="text-[color:var(--color-cyber-accent)]">▸</span>
-                    {child.label}
+                    {t(child.labelKey)}
                   </NavLink>
                 ))}
               </div>
@@ -375,7 +464,7 @@ export default function Layout() {
               aria-expanded={vpnOpen}
             >
               <Network className="h-3.5 w-3.5" />
-              <span>VPN</span>
+              <span>{t("nav.section_vpn")}</span>
               {vpnOpen ? (
                 <ChevronDown className="ml-auto h-3 w-3" />
               ) : (
@@ -385,7 +474,7 @@ export default function Layout() {
 
             {vpnOpen && (
               <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                {vpnChildren.map((child) => (
+                {VPN_CHILDREN.map((child) => (
                   <NavLink
                     key={child.to}
                     to={child.to}
@@ -399,7 +488,7 @@ export default function Layout() {
                     }
                   >
                     <span className="text-[color:var(--color-cyber-accent)]">▸</span>
-                    {child.label}
+                    {t(child.labelKey)}
                   </NavLink>
                 ))}
               </div>
@@ -420,7 +509,7 @@ export default function Layout() {
               aria-expanded={protectionOpen}
             >
               <Shield className="h-3.5 w-3.5" />
-              <span>Protection</span>
+              <span>{t("nav.section_protection")}</span>
               {protectionOpen ? (
                 <ChevronDown className="ml-auto h-3 w-3" />
               ) : (
@@ -430,7 +519,7 @@ export default function Layout() {
 
             {protectionOpen && (
               <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                {protectionChildren.map((child) => (
+                {PROTECTION_CHILDREN.map((child) => (
                   <NavLink
                     key={child.to}
                     to={child.to}
@@ -444,7 +533,7 @@ export default function Layout() {
                     }
                   >
                     <span className="text-[color:var(--color-cyber-accent)]">▸</span>
-                    {child.label}
+                    {t(child.labelKey)}
                   </NavLink>
                 ))}
               </div>
@@ -468,13 +557,17 @@ export default function Layout() {
                   className="flex flex-1 items-center gap-2 px-3 py-2"
                 >
                   <Cog className="h-3.5 w-3.5" />
-                  <span>Settings</span>
+                  <span>{t("nav.section_settings")}</span>
                 </NavLink>
                 <button
                   type="button"
                   onClick={() => setSettingsOpen((v) => !v)}
                   aria-expanded={settingsOpen}
-                  aria-label={settingsOpen ? "Replier settings" : "Déplier settings"}
+                  aria-label={
+                    settingsOpen
+                      ? `${t("nav.collapse")} ${t("nav.section_settings")}`
+                      : `${t("nav.expand")} ${t("nav.section_settings")}`
+                  }
                   className="flex items-center px-2"
                 >
                   {settingsOpen ? (
@@ -486,7 +579,7 @@ export default function Layout() {
               </div>
               {settingsOpen && (
                 <div className="ml-3 mt-1 border-l border-[color:var(--color-cyber-border)] pl-2">
-                  {settingsChildren.map((child) => (
+                  {SETTINGS_CHILDREN.map((child) => (
                     <NavLink
                       key={child.to}
                       to={child.to}
@@ -500,7 +593,7 @@ export default function Layout() {
                       }
                     >
                       <span className="text-[color:var(--color-cyber-accent)]">▸</span>
-                      {child.label}
+                      {t(child.labelKey)}
                     </NavLink>
                   ))}
                 </div>
@@ -518,7 +611,7 @@ export default function Layout() {
           {/* Live badge — quel chemin réseau le contrôleur utilise pour
               joindre le Slate (bascule auto LAN ↔ Tailscale ↔ custom). */}
           <SlateConnectivityBadge />
-          <div className="cyber-label pt-2">user</div>
+          <div className="cyber-label pt-2">{t("nav.user")}</div>
           <div className="cyber-glow px-1 text-sm font-extrabold uppercase tracking-[0.15em]">
             {me.data?.username ?? "—"}
           </div>
@@ -528,19 +621,24 @@ export default function Layout() {
             className="mt-2 flex w-full items-center gap-2 border border-transparent px-3 py-2 text-[11px] font-bold uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)] transition hover:border-[color:var(--color-cyber-accent)] hover:bg-[color:var(--color-cyber-accent)]/8 hover:text-[color:var(--color-cyber-accent)]"
           >
             <LogOut className="h-3.5 w-3.5" />
-            Déconnexion
+            {t("nav.logout")}
           </button>
         </div>
       </aside>
 
       <main className="flex-1 overflow-x-hidden">
+        {/* Global PIN-verifier lockout banner — renders only when the
+            controller-side lockout is active. The native gl_screen
+            touchscreen lockout (5 min after N misses) lives on the
+            Slate itself and isn't observable from here. */}
+        <LockoutBanner />
         {/* Suspense around the route Outlet so the sidebar + connectivity
             badge stay visible while a lazy-loaded page chunk arrives. */}
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center p-12">
               <span className="cyber-label cyber-cursor text-xs uppercase tracking-[0.3em] text-[color:var(--color-cyber-muted)]">
-                chargement…
+                {t("nav.loading")}
               </span>
             </div>
           }

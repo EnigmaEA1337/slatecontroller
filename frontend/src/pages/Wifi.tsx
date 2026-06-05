@@ -27,9 +27,12 @@ import WifiPasswordModal from "@/components/WifiPasswordModal";
 import WifiQRModal from "@/components/WifiQRModal";
 import WifiSlateStatePanel from "@/components/WifiSlateStatePanel";
 import {
+  DEFAULT_ADVANCED,
   labelForBand,
   type WifiBand,
+  type WifiPMF,
   type WifiSecurity,
+  type WifiSsidAdvanced,
   type WifiSsidPublic,
   type WifiSsidWrite,
 } from "@/types/wifi";
@@ -77,6 +80,10 @@ function WifiForm({ initialSlug, initial, onClose }: FormProps) {
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [changePassword, setChangePassword] = useState(!isEdit);
+  const [advanced, setAdvanced] = useState<WifiSsidAdvanced>(
+    initial?.advanced ?? DEFAULT_ADVANCED,
+  );
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -92,6 +99,7 @@ function WifiForm({ initialSlug, initial, onClose }: FormProps) {
         client_isolation: clientIsolation,
         hidden,
         notes,
+        advanced,
       };
       return isEdit
         ? updateWifiSsid(slug, body)
@@ -326,6 +334,13 @@ function WifiForm({ initialSlug, initial, onClose }: FormProps) {
         />
       </label>
 
+      <AdvancedSection
+        open={showAdvanced}
+        onToggle={() => setShowAdvanced((v) => !v)}
+        value={advanced}
+        onChange={setAdvanced}
+      />
+
       {submit.error && (
         <p className="cyber-chip cyber-chip-on block !rounded-none px-3 py-2 text-xs">
           {errorMessage(submit.error)}
@@ -349,6 +364,176 @@ function WifiForm({ initialSlug, initial, onClose }: FormProps) {
         </button>
       </div>
     </form>
+  );
+}
+
+// ---------------------------- Advanced section ---------------------------- #
+
+/** 8 MTK-specific UCI toggles exposed under a collapsible "Avancé" pane.
+ *  Each field has a short hint explaining the tradeoff so the operator
+ *  doesn't have to look up 802.11 letters every time. */
+function AdvancedSection({
+  open,
+  onToggle,
+  value,
+  onChange,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  value: WifiSsidAdvanced;
+  onChange: (v: WifiSsidAdvanced) => void;
+}) {
+  const dirty = JSON.stringify(value) !== JSON.stringify(DEFAULT_ADVANCED);
+  const set = <K extends keyof WifiSsidAdvanced>(
+    k: K, v: WifiSsidAdvanced[K],
+  ) => onChange({ ...value, [k]: v });
+  return (
+    <div className="border border-[color:var(--color-cyber-border)]/60 rounded-sm">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)]"
+      >
+        <span className="flex items-center gap-2">
+          <span>{open ? "▾" : "▸"}</span>
+          <span>Avancé · 8 options MTK</span>
+          {dirty && (
+            <span className="cyber-chip text-[9px] text-[color:var(--color-cyber-accent)]">
+              modifié
+            </span>
+          )}
+        </span>
+        <span className="text-[10px] font-mono">
+          {value.pmf} · DTIM {value.dtim_period}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 py-3 border-t border-[color:var(--color-cyber-border)]/40 space-y-3">
+          <Field
+            label="PMF (802.11w · Protected Management Frames)"
+            hint="required = WPA3 strict, bloque les clients pré-WPA3 ; optional = laisse les clients choisir"
+          >
+            <select
+              value={value.pmf}
+              onChange={(e) => set("pmf", e.target.value as WifiPMF)}
+              className="cyber-input w-full text-xs"
+            >
+              <option value="disabled">disabled</option>
+              <option value="optional">optional</option>
+              <option value="required">required</option>
+            </select>
+          </Field>
+
+          <BoolField
+            label="FT (802.11r · Fast Transition)"
+            hint="Roaming rapide entre APs. Peut casser des clients IoT mal calibrés."
+            checked={value.ft_802_11r}
+            onChange={(v) => set("ft_802_11r", v)}
+          />
+          <BoolField
+            label="RRM (802.11k · Neighbor Reports)"
+            hint="L'AP envoie aux clients la liste des APs voisins → roaming + intelligent"
+            checked={value.rrm_802_11k}
+            onChange={(v) => set("rrm_802_11k", v)}
+          />
+          <BoolField
+            label="BTM (802.11v · BSS Transition)"
+            hint="L'AP peut suggérer à un client de basculer vers un autre AP — utile en mesh"
+            checked={value.btm_802_11v}
+            onChange={(v) => set("btm_802_11v", v)}
+          />
+
+          <Field
+            label="DTIM period"
+            hint="Beacons entre chaque délivrance multicast. Plus haut = clients économisent batterie, plus de latence multicast."
+          >
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={value.dtim_period}
+              onChange={(e) =>
+                set("dtim_period", Math.max(1, Math.min(10, Number(e.target.value) || 2)))
+              }
+              className="cyber-input w-24 text-xs"
+            />
+          </Field>
+
+          <BoolField
+            label="WMM (Wireless Multimedia · QoS)"
+            hint="Priorité voix/vidéo. Obligatoire pour WPA3 — laisse activé."
+            checked={value.wmm}
+            onChange={(v) => set("wmm", v)}
+          />
+          <BoolField
+            label="Proxy ARP"
+            hint="L'AP répond aux ARP au nom des clients connus → moins de broadcast en l'air"
+            checked={value.proxy_arp}
+            onChange={(v) => set("proxy_arp", v)}
+          />
+          <BoolField
+            label="WDS (Wireless Distribution System)"
+            hint="Mode bridge wireless. Rarement nécessaire avec MLO/mesh moderne."
+            checked={value.wds}
+            onChange={(v) => set("wds", v)}
+          />
+
+          {dirty && (
+            <button
+              type="button"
+              onClick={() => onChange(DEFAULT_ADVANCED)}
+              className="text-[10px] text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)] underline"
+            >
+              ↺ remettre les défauts
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({
+  label, hint, children,
+}: {
+  label: string; hint?: string; children: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="cyber-label block text-[10px] mb-1">{label}</span>
+      {children}
+      {hint && (
+        <span className="block mt-1 text-[9px] text-[color:var(--color-cyber-muted)] italic">
+          {hint}
+        </span>
+      )}
+    </label>
+  );
+}
+
+function BoolField({
+  label, hint, checked, onChange,
+}: {
+  label: string; hint?: string;
+  checked: boolean; onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex items-start gap-2 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="cyber-checkbox mt-0.5 shrink-0"
+      />
+      <span className="text-xs">
+        {label}
+        {hint && (
+          <span className="block text-[9px] text-[color:var(--color-cyber-muted)] italic">
+            {hint}
+          </span>
+        )}
+      </span>
+    </label>
   );
 }
 

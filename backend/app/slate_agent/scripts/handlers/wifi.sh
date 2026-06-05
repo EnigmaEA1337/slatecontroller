@@ -461,6 +461,56 @@ _wifi_provision_slot() {
   return 0
 }
 
+# Apply the 8 MTK advanced UCI options on a wifi-iface section. Each
+# field is OPTIONAL — when empty/null we leave the existing value
+# untouched (so SSIDs in old payloads keep their behaviour). Maps :
+#   pmf         disabled→ieee80211w=0   optional→1   required→2
+#   ft          true→ieee80211r=1       false→0
+#   k           true→ieee80211k=1       false→0
+#   v           true→ieee80211v=1       false→0
+#   dtim        integer → dtim_period
+#   wmm         true→wmm=1              false→0
+#   parp        true→proxy_arp=1        false→0
+#   wds         true→wds=1              false→0
+#
+# $1 section  $2 pmf  $3 ft  $4 k  $5 v  $6 dtim  $7 wmm  $8 parp  $9 wds
+_wifi_apply_advanced() {
+  local sec="$1" pmf="$2" ft="$3" k="$4" v="$5" dtim="$6" wmm="$7" parp="$8" wds="$9"
+  case "$pmf" in
+    disabled) uci set "wireless.$sec.ieee80211w=0" ;;
+    optional) uci set "wireless.$sec.ieee80211w=1" ;;
+    required) uci set "wireless.$sec.ieee80211w=2" ;;
+  esac
+  case "$ft" in
+    true)  uci set "wireless.$sec.ieee80211r=1" ;;
+    false) uci set "wireless.$sec.ieee80211r=0" ;;
+  esac
+  case "$k" in
+    true)  uci set "wireless.$sec.ieee80211k=1" ;;
+    false) uci set "wireless.$sec.ieee80211k=0" ;;
+  esac
+  case "$v" in
+    true)  uci set "wireless.$sec.ieee80211v=1" ;;
+    false) uci set "wireless.$sec.ieee80211v=0" ;;
+  esac
+  case "$dtim" in
+    [1-9]|10) uci set "wireless.$sec.dtim_period=$dtim" ;;
+  esac
+  case "$wmm" in
+    true)  uci set "wireless.$sec.wmm=1" ;;
+    false) uci set "wireless.$sec.wmm=0" ;;
+  esac
+  case "$parp" in
+    true)  uci set "wireless.$sec.proxy_arp=1" ;;
+    false) uci set "wireless.$sec.proxy_arp=0" ;;
+  esac
+  case "$wds" in
+    true)  uci set "wireless.$sec.wds=1" ;;
+    false) uci set "wireless.$sec.wds=0" ;;
+  esac
+}
+
+
 # Set the activation state in uci. Live effect is applied separately via
 # ip link, after the commit/reboot decision.
 _wifi_set_disabled() {
@@ -593,6 +643,20 @@ wifi_apply() {
     network=$(_wifi_field "$payload" "$idx" network_slug)
     isolate=$(_wifi_field "$payload" "$idx" client_isolation)
     hidden=$(_wifi_field "$payload" "$idx" hidden)
+    # MTK advanced fields — every field has a safe default at the
+    # controller, so missing values here just inherit the prior UCI
+    # value (which is "off" on a fresh deploy thanks to the migration
+    # server_default). Picked once per SSID and applied to every slot
+    # it provisions below.
+    local pmf ft k v dtim wmm parp wds
+    pmf=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.pmf" 2>/dev/null)
+    ft=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.ft_802_11r" 2>/dev/null)
+    k=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.rrm_802_11k" 2>/dev/null)
+    v=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.btm_802_11v" 2>/dev/null)
+    dtim=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.dtim_period" 2>/dev/null)
+    wmm=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.wmm" 2>/dev/null)
+    parp=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.proxy_arp" 2>/dev/null)
+    wds=$(echo "$payload" | jsonfilter -e "@.ssids[$idx].advanced.wds" 2>/dev/null)
 
     [ -z "$name" ] && { IFS='
 '; continue; }
@@ -631,6 +695,7 @@ wifi_apply() {
         mlosec=$(_wifi_mlo_section_for_band "$band")
         [ -z "$mlosec" ] && continue
         if _wifi_provision_slot "$mlosec" "$name" "$psk" "$enc" "$network" "$isolate" "$hidden" "mld0"; then
+          _wifi_apply_advanced "$mlosec" "$pmf" "$ft" "$k" "$v" "$dtim" "$wmm" "$parp" "$wds"
           local ifn
           ifn=$(uci -q get "wireless.$mlosec.ifname")
           mlo_iface_list="${mlo_iface_list:+$mlo_iface_list }$ifn"
@@ -681,6 +746,7 @@ wifi_apply() {
           continue
         fi
         if _wifi_provision_slot "$sec" "$name" "$psk" "$enc" "$network" "$isolate" "$hidden" ""; then
+          _wifi_apply_advanced "$sec" "$pmf" "$ft" "$k" "$v" "$dtim" "$wmm" "$parp" "$wds"
           local ifn
           ifn=$(uci -q get "wireless.$sec.ifname")
           _wifi_set_disabled "$sec" "$want_disabled"

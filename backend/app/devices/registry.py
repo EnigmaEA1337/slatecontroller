@@ -241,9 +241,29 @@ class DeviceConnectionsRegistry:
         # credentials are global (controller's admin) — that's by design:
         # we reuse the controller's admin password for AdGuard's REST UI
         # too, so the user has one password to remember.
+        #
+        # We pass MULTIPLE host candidates : the SSH host (LAN IP, typically
+        # 192.168.8.1) first, then the Slate's tailscale IP if reachable.
+        # AdGuard's :::3000 binding behaves oddly when reached via the LAN
+        # IP through the tailnet tunnel (Connection refused, 2026-06-04
+        # repro), but works fine via the tailnet IP. The manager auto-
+        # selects whichever responds on first use.
+        adguard_hosts: list[str] = [ssh.host]
+        try:
+            tsip_result = await ssh.run(
+                "tailscale ip -4 2>/dev/null | head -1", timeout=4,
+            )
+            tsip = tsip_result.stdout.strip()
+            if tsip and tsip not in adguard_hosts:
+                adguard_hosts.append(tsip)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "device_registry.tailscale_ip_probe_failed",
+                slug=slug, error=str(exc),
+            )
         adguard = AdGuardManager(
             ssh=ssh,
-            slate_host=ssh.host,
+            slate_hosts=adguard_hosts,
             admin_username=self._settings.admin_username,
             admin_password=self._settings.admin_password,
         )

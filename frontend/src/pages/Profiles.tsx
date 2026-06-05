@@ -31,6 +31,7 @@ import ProfileScoresBars from "@/components/ProfileScoresBars";
 import WifiQRModal from "@/components/WifiQRModal";
 import type { ProfileEnvelope } from "@/types/profile";
 import type { WifiSsidPublic } from "@/types/wifi";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -279,6 +280,7 @@ function ProfileCard({
 }
 
 export default function Profiles() {
+  const t = useT();
   const queryClient = useQueryClient();
   const { data, isLoading, isError, error } = useQuery<ProfileEnvelope[]>({
     queryKey: ["profiles"],
@@ -343,16 +345,16 @@ export default function Profiles() {
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <ShieldCheck className="cyber-glow h-3 w-3" />
-            contextual profiles
+            {t("profiles.subtitle")}
           </div>
           <h1
             className="cyber-display cyber-glitch text-4xl"
-            data-text="PROFILS"
+            data-text={t("profiles.title").toUpperCase()}
           >
-            PROFILS
+            {t("profiles.title").toUpperCase()}
           </h1>
           <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-            {data?.length ?? 0} profil(s) · template = livré · user = créé par toi
+            {t("profiles.counter", { n: data?.length ?? 0 })}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -360,7 +362,7 @@ export default function Profiles() {
             type="button"
             onClick={() => regenAll.mutate()}
             disabled={regenAll.isPending}
-            title="Régénère le wallpaper home + lock de tous les profils avec le thème cyber actuel. Overwrite les slots existants."
+            title={t("profiles.regenerate_all_title")}
             className={cn(
               "inline-flex items-center gap-2 border px-3 py-2.5 text-[10px] font-bold uppercase tracking-[0.18em]",
               "border-[color:var(--color-cyber-border)] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]",
@@ -368,14 +370,16 @@ export default function Profiles() {
             )}
           >
             <Sparkles className="h-3.5 w-3.5" />
-            {regenAll.isPending ? "génération…" : "Régénérer les wallpapers"}
+            {regenAll.isPending
+              ? t("profiles.regenerating")
+              : t("profiles.regenerate_all")}
           </button>
           <Link
             to="/profiles/new"
             className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
-            Nouveau profil
+            {t("profiles.new")}
           </Link>
         </div>
       </header>
@@ -442,7 +446,9 @@ export default function Profiles() {
         </div>
       )}
 
-      {isLoading && <p className="cyber-label cyber-cursor">chargement</p>}
+      {isLoading && (
+        <p className="cyber-label cyber-cursor">{t("common.loading")}</p>
+      )}
 
       {isError && (
         <div className="cyber-card cyber-card-accent p-4 text-sm text-[color:var(--color-cyber-accent)]">
@@ -451,8 +457,8 @@ export default function Profiles() {
       )}
 
       {data && data.length === 0 && (
-        <p className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-dim)]">
-          ▸ Aucun profil — clique sur "Nouveau profil".
+        <p className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
+          ▸ {t("profiles.no_profiles")}
         </p>
       )}
 

@@ -1,33 +1,49 @@
 import { Link } from "react-router-dom";
-import { CheckCircle2, ChevronRight, Cog, Cpu, Key, Lock, MessageSquare, Shield, ShieldCheck } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronRight,
+  Cog,
+  Cpu,
+  Key,
+  Lock,
+  MessageSquare,
+  Shield,
+  ShieldCheck,
+} from "lucide-react";
 
-const cards = [
+import { useT } from "@/lib/i18n";
+
+interface HubCard {
+  to: string;
+  icon: typeof Cog;
+  titleKey: string;
+  descKey: string;
+}
+
+const CARDS: HubCard[] = [
   {
     to: "/settings/setup-status",
     icon: CheckCircle2,
-    title: "Setup Status",
-    subtitle:
-      "Vue agrégée de la configuration · Tailscale, CA, SSH, Slate, callbacks · checklist post-déploiement",
+    titleKey: "settings.hub.setup_title",
+    descKey: "settings.hub.setup_desc",
   },
   {
     to: "/settings/ssh-key",
     icon: Key,
-    title: "SSH Keypair",
-    subtitle: "Auth clé-only sur le Slate · génération + déploiement",
+    titleKey: "settings.hub.ssh_title",
+    descKey: "settings.hub.ssh_desc",
   },
   {
     to: "/settings/controller-https",
     icon: Lock,
-    title: "HTTPS Controller",
-    subtitle:
-      "Expose ce controller en HTTPS sur le tailnet via Tailscale Serve · cert Let's Encrypt auto, jamais public",
+    titleKey: "settings.hub.https_title",
+    descKey: "settings.hub.https_desc",
   },
   {
     to: "/settings/internal-ca",
     icon: ShieldCheck,
-    title: "CA interne (LAN HTTPS Slate)",
-    subtitle:
-      "Root CA local + cert pour le Slate valide sur 192.168.8.1 (cas hotel offline). One-time install du Root CA → zéro warning partout",
+    titleKey: "settings.hub.ca_title",
+    descKey: "settings.hub.ca_desc",
   },
   // `/settings/connectivity` est volontairement omis : les callback URLs
   // existent en store mais aucun consommateur ne les lit (les webhooks
@@ -36,43 +52,50 @@ const cards = [
   {
     to: "/settings/tailnet-admin",
     icon: Shield,
-    title: "Tailnet admin IPs",
-    subtitle:
-      "Whitelist des peers tailnet autorisés à atteindre l'admin (LuCI / SSH / AdGuard / controller). Drive le flag admin_only des profils.",
+    titleKey: "settings.hub.tailnet_title",
+    descKey: "settings.hub.tailnet_desc",
   },
   {
     to: "/settings/communication",
     icon: MessageSquare,
-    title: "Communication",
-    subtitle: "Toggle messages écran + test à la demande",
+    titleKey: "settings.hub.communication_title",
+    descKey: "settings.hub.communication_desc",
   },
   {
     to: "/settings/agent",
     icon: Cpu,
-    title: "Agent local",
-    subtitle:
-      "Déploie slate-ctrl sur le Slate · profils en JSON, apply offline, bouton physique",
+    titleKey: "settings.hub.agent_title",
+    descKey: "settings.hub.agent_desc",
   },
 ];
 
 export default function SettingsHub() {
+  const t = useT();
+  const countKey =
+    CARDS.length > 1
+      ? "settings.subsection_count_plural"
+      : "settings.subsection_count";
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Cog className="cyber-glow h-3 w-3" />
-          controller settings · configuration globale
+          {t("settings.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="SETTINGS">
-          SETTINGS
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("settings.title").toUpperCase()}
+        >
+          {t("settings.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          {cards.length} sous-section{cards.length > 1 ? "s" : ""}
+          {t(countKey, { n: CARDS.length })}
         </p>
       </header>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {cards.map((c) => (
+        {CARDS.map((c) => (
           <Link
             key={c.to}
             to={c.to}
@@ -80,11 +103,13 @@ export default function SettingsHub() {
           >
             <div className="flex items-center gap-2 text-[color:var(--color-cyber-accent)]">
               <c.icon className="h-5 w-5" />
-              <h3 className="cyber-display cyber-glow text-base">{c.title}</h3>
+              <h3 className="cyber-display cyber-glow text-base">
+                {t(c.titleKey)}
+              </h3>
               <ChevronRight className="ml-auto h-4 w-4 text-[color:var(--color-cyber-muted)] transition-transform group-hover:translate-x-1 group-hover:text-[color:var(--color-cyber-accent)]" />
             </div>
             <p className="text-[11px] text-[color:var(--color-cyber-muted)]">
-              {c.subtitle}
+              {t(c.descKey)}
             </p>
           </Link>
         ))}

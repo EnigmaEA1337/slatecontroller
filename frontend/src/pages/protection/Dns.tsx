@@ -22,6 +22,7 @@ import {
 
 import DnsThreatModelModal from "@/components/DnsThreatModelModal";
 
+import { useT } from "@/lib/i18n";
 import { listNetworks } from "@/api/networks";
 import {
   type LevelPatchBody,
@@ -69,6 +70,7 @@ function transportBadge(t: string) {
 }
 
 export default function DnsPage() {
+  const t = useT();
   const qc = useQueryClient();
   const [configuringNet, setConfiguringNet] = useState<string | null>(null);
   const [editingLevel, setEditingLevel] = useState<string | null>(null);
@@ -126,12 +128,11 @@ export default function DnsPage() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold text-[color:var(--color-cyber-fg)]">
-            <Globe className="h-6 w-6 text-cyan-400" />
-            Protection DNS
+            <Globe className="h-6 w-6 text-[color:var(--color-cyber-accent)]" />
+            {t("dns.title")}
           </h1>
           <p className="mt-1 text-sm text-[color:var(--color-cyber-muted)]">
-            Résolveurs DNS sécurisés (DoT/DoH) et niveaux de protection
-            appliqués par-réseau via AdGuard Clients.
+            {t("dns.description")}
           </p>
         </div>
         <div className="flex gap-2">
@@ -170,7 +171,7 @@ export default function DnsPage() {
       {/* Niveaux de sécurité */}
       <section>
         <h2 className="mb-3 text-lg font-semibold text-[color:var(--color-cyber-fg)]">
-          Niveaux de sécurité
+          {t("dns.levels_title")}
         </h2>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           {levelsList.map((level) => (
@@ -1017,6 +1018,7 @@ function ProviderCatalogTable({ providers }: { providers: DnsProvider[] }) {
  * dupliquer la logique de feed management.
  */
 function AntiBypassSection() {
+  const t = useT();
   const qc = useQueryClient();
   const status = useQuery({
     queryKey: ["dns", "anti-bypass"],
@@ -1038,7 +1040,7 @@ function AntiBypassSection() {
     <section>
       <div className="mb-3 flex items-center justify-between gap-2">
         <h2 className="text-lg font-semibold text-[color:var(--color-cyber-fg)]">
-          Anti-bypass DoT / DoH
+          {t("dns.anti_bypass_title")}
         </h2>
         {data && (
           <span
@@ -1059,22 +1061,20 @@ function AntiBypassSection() {
         )}
       </div>
 
-      <div className="rounded-lg border border-[color:var(--color-cyber-border-strong)] bg-slate-900/60 p-4">
+      <div className="rounded-lg border border-[color:var(--color-cyber-border-strong)] bg-[color:var(--color-cyber-surface-2)] p-4">
         <p className="mb-3 text-sm text-[color:var(--color-cyber-fg)]">
-          Empêche les clients de contourner le résolveur local en utilisant
-          leurs propres canaux DNS chiffrés. Combine deux mécanismes
-          complémentaires :
+          {t("dns.anti_bypass_intro")}
         </p>
 
         <div className="mb-4 space-y-2">
           <BypassMechanism
-            label="Bloquer le port TCP/853 (LAN → WAN)"
-            description="Empêche les navigateurs et applications qui utilisent un résolveur DoT propre (Cloudflare, Quad9 direct, etc.) de contourner AdGuard. Ces clients basculent automatiquement sur le DNS système."
+            label={t("dns.anti_bypass_dot_title")}
+            description={t("dns.anti_bypass_dot_desc")}
             active={data?.custom_block_dot_active ?? false}
           />
           <BypassMechanism
-            label="Activer les règles anti-fuite GL.iNet préinstallées"
-            description="Le firmware GL.iNet inclut des règles drop_leaked_dns/adgdns pour les zones LAN, guest, wgserver et ovpnserver mais les laisse désactivées par défaut. Empêche les fuites DNS lors de la rotation de tunnels."
+            label={t("dns.anti_bypass_glinet_title")}
+            description={t("dns.anti_bypass_glinet_desc")}
             active={
               data
                 ? Object.values(data.gl_rules_enabled).filter((v) => v).length > 0
@@ -1090,10 +1090,10 @@ function AntiBypassSection() {
             }
           />
           <BypassMechanism
-            label="Blocklist HaGeZi DoH/VPN dans AdGuard"
-            description="Filtre les endpoints DoH publics (Firefox Secure DNS, Chrome, Brave, etc.) et les VPN/proxies courants. Liste mise à jour quotidiennement, ~600 entrées. À activer depuis la page AdGuard > Filtres."
+            label={t("dns.anti_bypass_hagezi_title")}
+            description={t("dns.anti_bypass_hagezi_desc")}
             active={null}
-            note="Activable depuis la page AdGuard (feed slug : hagezi-doh-vpn)"
+            note={t("dns.anti_bypass_hagezi_link")}
           />
         </div>
 
@@ -1108,28 +1108,28 @@ function AntiBypassSection() {
         )}
 
         <div className="flex items-center justify-between gap-2 border-t border-[color:var(--color-cyber-border)] pt-3">
-          <p className="text-xs text-[color:var(--color-cyber-dim)]">
-            Le DoT du Slate vers ses résolveurs upstream n'est pas affecté
-            (trafic OUTPUT, pas FORWARD).
+          <p className="text-xs text-[color:var(--color-cyber-muted)]">
+            {t("dns.anti_bypass_footer")}
           </p>
           {data?.any_active ? (
             <button
               onClick={() => {
-                if (confirm("Désactiver l'anti-bypass DoT/DoH ?"))
+                if (confirm(t("dns.anti_bypass_enable") + " ?")) {
                   disableMut.mutate();
+                }
               }}
               disabled={pending}
-              className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+              className="rounded border border-[color:var(--color-cyber-warn)]/40 bg-[color:var(--color-cyber-warn)]/10 px-3 py-1.5 text-sm text-[color:var(--color-cyber-warn)] hover:bg-[color:var(--color-cyber-warn)]/20 disabled:opacity-50"
             >
-              {pending ? "Application…" : "Désactiver l'anti-bypass"}
+              {pending ? t("common.loading") : t("common.disabled")}
             </button>
           ) : (
             <button
               onClick={() => enableMut.mutate()}
               disabled={pending}
-              className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-sm text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+              className="rounded border border-[color:var(--color-cyber-ok)]/40 bg-[color:var(--color-cyber-ok)]/10 px-3 py-1.5 text-sm text-[color:var(--color-cyber-ok)] hover:bg-[color:var(--color-cyber-ok)]/20 disabled:opacity-50"
             >
-              {pending ? "Application…" : "Activer l'anti-bypass"}
+              {pending ? t("common.loading") : t("dns.anti_bypass_enable")}
             </button>
           )}
         </div>

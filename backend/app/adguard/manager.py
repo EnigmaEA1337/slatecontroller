@@ -60,33 +60,123 @@ class AdGuardFilter:
 
 
 class AdGuardManager:
-    """Wraps UCI-via-SSH for enable/disable + httpx for the REST API."""
+    """Wraps UCI-via-SSH for enable/disable + httpx for the REST API.
+
+    The REST endpoint may be reachable on several IPs (the LAN IP, the
+    Tailscale IP, ...). We accept a list of candidates and try them in
+    order on every request, caching the one that worked last so we don't
+    pay the discovery cost twice.
+
+    Why : observed live (2026-06-04) that AdGuard listens on ``:::3000``
+    (IPv6 dual-stack INADDR_ANY), but a connection from inside the
+    Tailscale netns to the Slate's LAN IP gets ``Connection refused``
+    while the same call to the Slate's tailnet IP returns 200. The
+    other HTTP services bind to specific IPv4 addresses so they don't
+    have that issue. Multi-host failover papers over the binding quirk
+    without changing AdGuard's config.
+    """
 
     def __init__(
         self,
         ssh: SlateSSH,
-        slate_host: str,
+        slate_hosts: list[str],
         *,
         admin_username: str,
         admin_password: str,
         http_port: int = ADGUARD_HTTP_PORT,
         timeout: float = 5.0,
     ) -> None:
+        if not slate_hosts:
+            raise ValueError("slate_hosts must not be empty")
         self._ssh = ssh
-        self._host = slate_host
+        # Order-preserving dedup.
+        self._candidates: list[str] = list(dict.fromkeys(
+            h.strip() for h in slate_hosts if h and h.strip()
+        ))
         self._port = http_port
-        self._base_url = f"http://{slate_host}:{http_port}"
+        self._timeout = timeout
         self._admin_username = admin_username
         self._admin_password = admin_password
-        self._http = httpx.AsyncClient(
-            base_url=self._base_url,
-            timeout=timeout,
-            headers={"Accept": "application/json"},
-            auth=(admin_username, admin_password),
+        # Active host = the one we'll try first on the next request. Starts
+        # as the first candidate ; switches on ConnectError. Per-host
+        # httpx clients are cached so we don't rebuild on every retry.
+        self._active_host: str = self._candidates[0]
+        self._clients: dict[str, httpx.AsyncClient] = {}
+
+    def _client_for(self, host: str) -> httpx.AsyncClient:
+        client = self._clients.get(host)
+        if client is None:
+            client = httpx.AsyncClient(
+                base_url=f"http://{host}:{self._port}",
+                timeout=self._timeout,
+                headers={"Accept": "application/json"},
+                auth=(self._admin_username, self._admin_password),
+            )
+            self._clients[host] = client
+        return client
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        """Backward-compat accessor : keeps every existing call site
+        (``self._request("GET", ...)`` etc.) working while the failover happens
+        underneath via :meth:`_request`. Used for one-shot calls where
+        retry isn't worth it — but all the long-lived paths now go
+        through :meth:`_request`."""
+        return self._client_for(self._active_host)
+
+    @property
+    def _base_url(self) -> str:
+        return f"http://{self._active_host}:{self._port}"
+
+    async def _request(
+        self, method: str, path: str, **kwargs: Any,
+    ) -> httpx.Response:
+        """HTTP request with automatic failover across candidate hosts.
+
+        Walks :attr:`_candidates` starting from :attr:`_active_host`. On
+        ``ConnectError``/``ConnectTimeout`` (i.e. the host doesn't even
+        accept the TCP handshake) we move to the next candidate. Other
+        errors (timeouts on the response, HTTP 4xx/5xx) propagate as-is
+        — they mean we reached AdGuard but it didn't like our request,
+        switching hosts wouldn't help.
+        """
+        # Reorder so the active host is first.
+        order = [self._active_host] + [
+            h for h in self._candidates if h != self._active_host
+        ]
+        last_exc: Exception | None = None
+        for host in order:
+            client = self._client_for(host)
+            try:
+                resp = await client.request(method, path, **kwargs)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                last_exc = exc
+                logger.debug(
+                    "adguard.host.connect_failed",
+                    host=host, path=path, error=str(exc),
+                )
+                continue
+            if host != self._active_host:
+                logger.info(
+                    "adguard.host.switched",
+                    from_host=self._active_host, to_host=host,
+                )
+                self._active_host = host
+            return resp
+        # All candidates failed.
+        assert last_exc is not None
+        logger.warning(
+            "adguard.host.all_failed",
+            candidates=self._candidates, path=path,
         )
+        raise last_exc
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        for client in self._clients.values():
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------------------------- status ---------------------------- #
 
@@ -119,7 +209,7 @@ class AdGuardManager:
         # REST probe (only meaningful if init_running, but try anyway — cheap).
         if init_running:
             try:
-                resp = await self._http.get("/control/status")
+                resp = await self._request("GET", "/control/status")
                 if resp.status_code == 200:
                     web_ui_reachable = True
                     data = resp.json()
@@ -151,7 +241,7 @@ class AdGuardManager:
         we don't have the right creds" (HTTP 403/401).
         """
         try:
-            resp = await self._http.get("/control/status")
+            resp = await self._request("GET", "/control/status")
             return resp.status_code == 200
         except httpx.HTTPError:
             return False
@@ -266,8 +356,8 @@ class AdGuardManager:
     async def set_protection(self, enabled: bool) -> None:
         """Toggle AdGuard's own 'protection' (filters/safesearch/etc) without stopping the daemon."""
         try:
-            resp = await self._http.post(
-                "/control/protection",
+            resp = await self._request(
+                "POST", "/control/protection",
                 json={"enabled": enabled, "duration": 0},
             )
             resp.raise_for_status()
@@ -280,7 +370,7 @@ class AdGuardManager:
         """Read the full /control/dns_info block. We use it to introspect
         dnssec_enabled, upstream_dns, fallback_dns, cache_size, etc."""
         try:
-            resp = await self._http.get("/control/dns_info")
+            resp = await self._request("GET", "/control/dns_info")
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
@@ -309,7 +399,7 @@ class AdGuardManager:
             raise
         current["dnssec_enabled"] = bool(enabled)
         try:
-            resp = await self._http.post("/control/dns_config", json=current)
+            resp = await self._request("POST", "/control/dns_config", json=current)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise AdGuardError(
@@ -322,7 +412,7 @@ class AdGuardManager:
 
     async def get_stats(self) -> AdGuardStats:
         try:
-            resp = await self._http.get("/control/stats")
+            resp = await self._request("GET", "/control/stats")
             resp.raise_for_status()
             data: dict[str, Any] = resp.json()
         except httpx.HTTPError as exc:
@@ -342,7 +432,7 @@ class AdGuardManager:
 
     async def list_filters(self) -> list[AdGuardFilter]:
         try:
-            resp = await self._http.get("/control/filtering/status")
+            resp = await self._request("GET", "/control/filtering/status")
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPError as exc:
@@ -364,8 +454,8 @@ class AdGuardManager:
 
     async def add_filter(self, *, url: str, name: str) -> None:
         try:
-            resp = await self._http.post(
-                "/control/filtering/add_url",
+            resp = await self._request(
+                "POST", "/control/filtering/add_url",
                 json={"url": url, "name": name, "whitelist": False},
             )
             resp.raise_for_status()
@@ -374,8 +464,8 @@ class AdGuardManager:
 
     async def remove_filter(self, *, url: str) -> None:
         try:
-            resp = await self._http.post(
-                "/control/filtering/remove_url",
+            resp = await self._request(
+                "POST", "/control/filtering/remove_url",
                 json={"url": url, "whitelist": False},
             )
             resp.raise_for_status()
@@ -384,8 +474,8 @@ class AdGuardManager:
 
     async def set_filter_enabled(self, *, url: str, enabled: bool) -> None:
         try:
-            resp = await self._http.post(
-                "/control/filtering/set_url",
+            resp = await self._request(
+                "POST", "/control/filtering/set_url",
                 json={
                     "url": url,
                     "whitelist": False,
@@ -399,8 +489,8 @@ class AdGuardManager:
     async def refresh_filters(self) -> None:
         """Force-refresh all blocklists from their upstream URLs."""
         try:
-            resp = await self._http.post(
-                "/control/filtering/refresh",
+            resp = await self._request(
+                "POST", "/control/filtering/refresh",
                 json={"whitelist": False},
             )
             resp.raise_for_status()

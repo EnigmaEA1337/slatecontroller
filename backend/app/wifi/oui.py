@@ -21,15 +21,20 @@ from __future__ import annotations
 
 import csv
 import io
-import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+import structlog
 
-logger = logging.getLogger(__name__)
+# Note: use structlog (not stdlib `logging`) so we can pass arbitrary
+# keyword arguments to `logger.info(...)`. Stdlib Logger._log() rejects
+# anything beyond `extra=...`, and a stray `count=N` raises TypeError
+# from inside a background OUI refresh — which silently breaks the
+# downstream consumer (we saw this kill 6 GHz scans live).
+logger = structlog.get_logger(__name__)
 
 # Where we keep the local CSV cache. Lives in the controller's data
 # directory so it survives container restarts but is volatile-by-design

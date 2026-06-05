@@ -22,6 +22,7 @@ import {
 import { ClickableHost } from "@/components/ClickableHost";
 import DnsProtectionWidget from "@/components/DnsProtectionWidget";
 import type { NetworkPublic, NetworkWrite } from "@/types/network";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 
 
@@ -723,6 +724,7 @@ function NetworkCard({
 }
 
 export default function Networks() {
+  const t = useT();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<NetworkPublic | null>(null);
   const [creating, setCreating] = useState(false);
@@ -740,16 +742,16 @@ export default function Networks() {
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <NetworkIcon className="cyber-glow h-3 w-3" />
-            networks catalog · {networks.data?.length ?? 0} bridge(s)
+            {t("networks.counter", { n: networks.data?.length ?? 0 })}
           </div>
           <h1
             className="cyber-display cyber-glitch text-4xl"
-            data-text="RESEAUX"
+            data-text={t("networks.title").toUpperCase()}
           >
-            RESEAUX
+            {t("networks.title").toUpperCase()}
           </h1>
           <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-            bridges / VLANs / subnets · référencés par les SSIDs
+            {t("networks.subtitle")}
           </p>
         </div>
         {!creating && !editing && (
@@ -759,7 +761,7 @@ export default function Networks() {
             className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
-            Nouveau réseau
+            {t("networks.new")}
           </button>
         )}
       </header>
@@ -785,7 +787,7 @@ export default function Networks() {
       </section>}
 
       {networks.isLoading && (
-        <p className="cyber-label cyber-cursor">chargement</p>
+        <p className="cyber-label cyber-cursor">{t("common.loading")}</p>
       )}
 
       {networks.data && (

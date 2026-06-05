@@ -34,7 +34,11 @@ from app.slate.ssh import SlateSSH
 from app.wifi.store import WifiSsidStore
 from app.db.database import make_session_factory
 from app.profiles.wallpapers import WallpaperStore
-from app.slate_agent.deploy import deploy_agent, get_agent_version
+from app.slate_agent.deploy import (
+    deploy_agent,
+    deploy_webhook_components,
+    get_agent_version,
+)
 from app.settings.button_cycle import ButtonCycleStore
 from app.slate_agent.sync import (
     REBOOT_SENTINEL,
@@ -280,3 +284,109 @@ async def agent_apply(
         "ok": ok, "name": name, "output": output,
         "reboot_pending": reboot_pending,
     }
+
+
+@router.post("/deploy-webhook")
+async def agent_deploy_webhook(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Push the Slate-side webhook push helpers + provision the HMAC secret.
+
+    Pipeline :
+      1. Generate (or fetch) the per-device webhook secret.
+      2. Resolve the controller URL from ControllerUrlsStore (preferred path).
+      3. SSH-push the 3 scripts + 3 config files + enable the procd service.
+    """
+    from app.api.deps import get_device_connections
+    from app.settings.controller_urls import ControllerUrlsStore
+    conn = await get_device_connections(request)
+    slug = conn.slug
+
+    # Resolve the controller URL. Preferred path first, fallback to the
+    # other. If neither set : 503 with a clear message — the operator
+    # has to fill the field in Settings → Connectivity.
+    urls_store = ControllerUrlsStore(request.app.state.db_session_factory)
+    urls = await urls_store.get()
+    preferred = urls.get("preferred") or "tailscale"
+    primary = urls.get(f"{preferred}_url") or ""
+    other = (
+        urls.get("lan_url") if preferred == "tailscale" else urls.get("tailscale_url")
+    ) or ""
+    controller_url = primary or other
+    if not controller_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "No controller URL configured. Set tailscale_url / lan_url "
+                "in Settings → Connectivity first."
+            ),
+        )
+
+    auth = getattr(request.app.state, "webhook_auth", None)
+    if auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="webhook auth service not initialised",
+        )
+    # First-time install : materialise the secret. Subsequent calls
+    # return the existing one (idempotent), so re-deploying after
+    # changing the URL doesn't rotate the secret.
+    secret = await auth.get_or_create_secret(slug)
+
+    report = await deploy_webhook_components(
+        ssh, slug=slug, controller_url=controller_url, webhook_secret=secret,
+    )
+    logger.info(
+        "agent.deploy_webhook",
+        username=user.username, slug=slug,
+        controller_url=controller_url, ok=report.ok,
+        errors=len(report.errors),
+    )
+    return report.to_dict()
+
+
+@router.post("/rotate-webhook-secret")
+async def agent_rotate_webhook_secret(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Rotate the per-device webhook HMAC secret. The Slate-side helper
+    is re-provisioned with the new value ; the old secret stays valid
+    for 30s so in-flight requests don't 401."""
+    from app.api.deps import get_device_connections
+    from app.settings.controller_urls import ControllerUrlsStore
+    conn = await get_device_connections(request)
+    slug = conn.slug
+    auth = getattr(request.app.state, "webhook_auth", None)
+    if auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="webhook auth service not initialised",
+        )
+    urls = await ControllerUrlsStore(
+        request.app.state.db_session_factory,
+    ).get()
+    preferred = urls.get("preferred") or "tailscale"
+    primary = urls.get(f"{preferred}_url") or ""
+    other = (
+        urls.get("lan_url") if preferred == "tailscale" else urls.get("tailscale_url")
+    ) or ""
+    controller_url = primary or other
+    if not controller_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No controller URL configured.",
+        )
+
+    new_secret = await auth.rotate_secret(slug)
+    report = await deploy_webhook_components(
+        ssh, slug=slug, controller_url=controller_url, webhook_secret=new_secret,
+    )
+    logger.info(
+        "agent.rotate_webhook_secret",
+        username=user.username, slug=slug, ok=report.ok,
+    )
+    return report.to_dict()

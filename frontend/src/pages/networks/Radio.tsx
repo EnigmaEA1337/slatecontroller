@@ -15,7 +15,8 @@
  * "RF" or "RADIO PLANNER" depending on width.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -42,7 +43,11 @@ import {
   type ScanHistoryDetail,
   type ScanHistoryRow,
 } from "@/api/scan-history";
+import ApReviewModal, { type ReviewSeed } from "@/components/ApReviewModal";
 import DeviceLocationPanel from "@/components/DeviceLocationPanel";
+import SpectrumChart from "@/components/SpectrumChart";
+import VendorLogo from "@/components/VendorLogo";
+import { type ReviewStatus, statusConfig } from "@/api/ap-reviews";
 import { errorMessage } from "@/lib/error-utils";
 import {
   bucketColor,
@@ -95,9 +100,12 @@ export default function NetworksRadio() {
     Partial<Record<WifiBand, DisplayedScan>>
   >({});
 
+  // Per-band scan duration choice. 0 = single pass (default).
+  // Persisted across band switches so the operator's choice sticks.
+  const [scanDurationS, setScanDurationS] = useState<number>(0);
   const scanMut = useMutation({
     mutationFn: async (band: WifiBand) => {
-      const res = await scanRadio(band);
+      const res = await scanRadio(band, { durationS: scanDurationS });
       return { band, res };
     },
     onSuccess: ({ band, res }) => {
@@ -192,6 +200,8 @@ export default function NetworksRadio() {
             setDisplayed((prev) => ({ ...prev, [activeBand]: undefined }))
           }
           scanning={scanMut.isPending && scanMut.variables === activeBand}
+          scanDurationS={scanDurationS}
+          onChangeScanDuration={setScanDurationS}
           onApplyChannel={(ch) =>
             applyMut.mutate({ band: activeBand, channel: ch })
           }
@@ -226,6 +236,8 @@ function BandPanel({
   onLoadScan,
   onClearLoaded,
   scanning,
+  scanDurationS,
+  onChangeScanDuration,
   onApplyChannel,
   onUpdateTx,
   onUpdateHtmode,
@@ -245,6 +257,8 @@ function BandPanel({
   onLoadScan: (d: DisplayedScan) => void;
   onClearLoaded: () => void;
   scanning: boolean;
+  scanDurationS: number;
+  onChangeScanDuration: (s: number) => void;
   onApplyChannel: (ch: number) => void;
   onUpdateTx: (p: number) => void;
   onUpdateHtmode: (m: string) => void;
@@ -321,16 +335,18 @@ function BandPanel({
               onLoad={onLoadScan}
               activeLoadedId={displayed?.loadedFromId}
             />
+            <ScanDurationSelect
+              value={scanDurationS}
+              onChange={onChangeScanDuration}
+              disabled={scanning}
+            />
             <button
               onClick={onScan}
               disabled={scanning}
               className="cyber-button px-4 py-2 text-xs"
             >
               {scanning ? (
-                <>
-                  <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
-                  scan en cours…
-                </>
+                <ScanningButtonContent durationS={scanDurationS} />
               ) : (
                 <>▶ START SCAN</>
               )}
@@ -485,7 +501,10 @@ function ScanResultsView({
       <APTreeView
         neighbors={result.neighbors}
         groups={result.physical_aps}
+        band={result.band}
       />
+
+      <SpectrumChart neighbors={result.neighbors} band={result.band} />
     </div>
   );
 }
@@ -625,20 +644,70 @@ function colorForApRoot(apRoot: string): string {
   return `hsl(${hue} 70% 55%)`;
 }
 
+type ReviewFilter = "all" | "no_review" | "trusted" | "suspicious" | "ignored";
+
 function APTreeView({
   neighbors,
   groups,
+  band,
 }: {
   neighbors: NeighborAPView[];
   groups: PhysicalAPGroupView[];
+  band: WifiBand;
 }) {
-  // Group label G1/G2/G3 mapped from order-of-strength (groups[]
-  // already comes back sorted by descending RSSI).
+  const [filter, setFilter] = useState<ReviewFilter>("all");
+  // The modal accepts either a group or a per-BSSID seed, built on demand.
+  const [reviewSeed, setReviewSeed] = useState<ReviewSeed | null>(null);
+  const openGroupReview = (g: PhysicalAPGroupView) =>
+    setReviewSeed({
+      scope: "group",
+      ap_root: g.ap_root,
+      vendor: g.vendor,
+      ssids: g.ssids,
+      bssids: g.bssids,
+      band,
+      channel: g.channel,
+      current_status: g.review_status,
+      current_label: g.review_label,
+    });
+  const openBssidReview = (
+    g: PhysicalAPGroupView,
+    n: NeighborAPView,
+  ) =>
+    setReviewSeed({
+      scope: "bssid",
+      ap_root: g.ap_root,
+      bssid: n.bssid,
+      ssid: n.ssid,
+      vendor: n.vendor || g.vendor,
+      ssids: [],
+      bssids: [],
+      band,
+      channel: n.channel || g.channel,
+      current_status: n.review_status_own ?? null,
+      current_label: n.review_label_own ?? "",
+      inherited_group_status: g.review_status,
+      inherited_group_label: g.review_label,
+    });
+
+  // Apply review filter on top of the original group list.
+  const filteredGroups = useMemo(() => {
+    if (filter === "all") {
+      // Hide ignored APs from default view (still kept in history).
+      return groups.filter((g) => g.review_status !== "ignored");
+    }
+    if (filter === "no_review")
+      return groups.filter((g) => !g.review_status);
+    return groups.filter((g) => g.review_status === filter);
+  }, [groups, filter]);
+
+  // Group label G1/G2/G3 mapped from order-of-strength on the FILTERED
+  // list so labels match what's actually shown.
   const groupLabel = useMemo(() => {
     const m = new Map<string, string>();
-    groups.forEach((g, i) => m.set(g.ap_root, `G${i + 1}`));
+    filteredGroups.forEach((g, i) => m.set(g.ap_root, `G${i + 1}`));
     return m;
-  }, [groups]);
+  }, [filteredGroups]);
 
   // Members per group, sorted by best RSSI first within each.
   const membersByRoot = useMemo(() => {
@@ -654,8 +723,6 @@ function APTreeView({
     return m;
   }, [neighbors]);
 
-  // Each row's expand state. Default : ALL collapsed (the user wants a
-  // clean root-only view at first glance).
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggle = (root: string) =>
     setExpanded((prev) => {
@@ -664,11 +731,29 @@ function APTreeView({
       else next.add(root);
       return next;
     });
-  const allExpanded = expanded.size === groups.length && groups.length > 0;
+  const allExpanded =
+    expanded.size === filteredGroups.length && filteredGroups.length > 0;
   const toggleAll = () => {
     if (allExpanded) setExpanded(new Set());
-    else setExpanded(new Set(groups.map((g) => g.ap_root)));
+    else setExpanded(new Set(filteredGroups.map((g) => g.ap_root)));
   };
+
+  // Count per status — used in the filter dropdown chip.
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {
+      all: groups.length,
+      no_review: 0,
+      trusted: 0,
+      suspicious: 0,
+      ignored: 0,
+      known: 0,
+    };
+    for (const g of groups) {
+      if (!g.review_status) c.no_review = (c.no_review ?? 0) + 1;
+      else c[g.review_status] = (c[g.review_status] ?? 0) + 1;
+    }
+    return c;
+  }, [groups]);
 
   if (groups.length === 0) {
     return (
@@ -680,29 +765,48 @@ function APTreeView({
 
   return (
     <div className="cyber-card p-3 space-y-1">
-      <header className="cyber-label text-[10px] mb-2 flex items-center justify-between">
+      <header className="cyber-label text-[10px] mb-2 flex items-center justify-between gap-2 flex-wrap">
         <span>
-          AP physiques ({groups.length}) · VAPs ({neighbors.length})
+          AP physiques ({filteredGroups.length}/{groups.length}) · VAPs ({neighbors.length})
         </span>
-        <button
-          onClick={toggleAll}
-          className="cyber-button-ghost px-2 py-0.5 text-[9px]"
-        >
-          {allExpanded ? "tout replier" : "tout déplier"}
-        </button>
+        <div className="flex items-center gap-2">
+          <select
+            value={filter}
+            onChange={(e) => setFilter(e.target.value as ReviewFilter)}
+            className="cyber-input text-[10px] py-0.5 px-2"
+            title="Filtre par statut de review"
+          >
+            <option value="all">tous ({counts.all})</option>
+            <option value="no_review">sans avis ({counts.no_review})</option>
+            <option value="trusted">✓ trusted ({counts.trusted})</option>
+            <option value="suspicious">⚠ suspicious ({counts.suspicious})</option>
+            <option value="ignored">⊘ ignored ({counts.ignored})</option>
+          </select>
+          <button
+            onClick={toggleAll}
+            className="cyber-button-ghost px-2 py-0.5 text-[9px]"
+          >
+            {allExpanded ? "tout replier" : "tout déplier"}
+          </button>
+        </div>
       </header>
-      {groups.map((g) => {
+      {filteredGroups.map((g) => {
         const isOpen = expanded.has(g.ap_root);
         const members = membersByRoot.get(g.ap_root) ?? [];
         const label = groupLabel.get(g.ap_root) ?? "";
         const color = colorForApRoot(g.ap_root);
+        const rev = statusConfig(g.review_status as ReviewStatus | null);
         return (
           <div key={g.ap_root}>
-            <button
-              onClick={() => toggle(g.ap_root)}
+            <div
               className="w-full flex items-center gap-2 p-2 text-xs hover:bg-[color:var(--color-cyber-bg-2)]/40 border-b border-[color:var(--color-cyber-border)]/30"
               style={{ borderLeft: `3px solid ${color}` }}
             >
+              <button
+                onClick={() => toggle(g.ap_root)}
+                className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                title="Déplier / replier les VAPs"
+              >
               {isOpen ? (
                 <ChevronDown className="h-3 w-3 shrink-0" />
               ) : (
@@ -728,24 +832,42 @@ function APTreeView({
               <DistanceBadge rssi_dbm={g.rssi_dbm} />
               <span className="font-mono text-[10px]">{g.rssi_dbm} dBm</span>
               <span className="ml-auto text-[10px] flex items-center gap-2">
-                {g.is_all_randomized ? (
-                  <span className="text-amber-300">🎭 random</span>
-                ) : g.vendor ? (
-                  <span className="text-[color:var(--color-cyber-dim)]">
-                    {g.vendor.length > 22
-                      ? g.vendor.slice(0, 20) + "…"
-                      : g.vendor}
-                  </span>
-                ) : (
-                  <span className="text-[color:var(--color-cyber-muted)]">
-                    ? vendor
+                {rev && (
+                  <span
+                    className="font-mono text-[10px] px-1.5 py-0.5 rounded"
+                    style={{
+                      color: rev.color,
+                      border: `1px solid ${rev.color}66`,
+                      background: `${rev.color}11`,
+                    }}
+                    title={`${rev.hint}${g.review_label ? ` · ${g.review_label}` : ""}`}
+                  >
+                    {rev.icon} {g.review_label || rev.label}
                   </span>
                 )}
+                <VendorLogo
+                  slug={g.vendor_slug}
+                  vendor={g.vendor}
+                  isRandomized={g.is_all_randomized}
+                  withLabel
+                  size="sm"
+                />
                 {g.has_wps && (
                   <span className="text-amber-300 text-[9px]">WPS</span>
                 )}
               </span>
-            </button>
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openGroupReview(g);
+                }}
+                className="cyber-button-ghost px-2 py-0.5 text-[9px] shrink-0"
+                title="Évaluer / éditer la review du groupe (AP physique)"
+              >
+                {g.review_status ? "éditer" : "review"}
+              </button>
+            </div>
             {isOpen && (
               <div className="ml-6 mb-2">
                 <table className="w-full font-mono text-[11px]">
@@ -753,11 +875,14 @@ function APTreeView({
                     <tr className="text-[color:var(--color-cyber-muted)] text-left">
                       <th className="px-2 py-1">SSID</th>
                       <th className="px-2 py-1">BSSID</th>
+                      <th className="px-2 py-1">vendor</th>
                       <th className="px-2 py-1">RSSI</th>
                       <th className="px-2 py-1">distance</th>
                       <th className="px-2 py-1">security</th>
                       <th className="px-2 py-1">mode</th>
                       <th className="px-2 py-1">flags</th>
+                      <th className="px-2 py-1">avis</th>
+                      <th className="px-2 py-1"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -776,6 +901,15 @@ function APTreeView({
                           )}
                         </td>
                         <td className="px-2 py-0.5 text-[10px]">{n.bssid}</td>
+                        <td className="px-2 py-0.5 text-[10px]">
+                          <VendorLogo
+                            slug={n.vendor_slug}
+                            vendor={n.vendor}
+                            isRandomized={n.is_randomized}
+                            withLabel
+                            size="sm"
+                          />
+                        </td>
                         <td
                           className={cn(
                             "px-2 py-0.5",
@@ -794,17 +928,36 @@ function APTreeView({
                         <td className="px-2 py-0.5">{n.security}</td>
                         <td className="px-2 py-0.5">{n.ht_mode}</td>
                         <td className="px-2 py-0.5 text-[10px]">
-                          {n.is_wps_enabled && (
-                            <span className="text-amber-300">WPS</span>
-                          )}
-                          {n.is_randomized && (
-                            <span
-                              className="text-amber-300 ml-1"
-                              title="MAC randomisée (U/L bit)"
-                            >
-                              🎭
-                            </span>
-                          )}
+                          <div className="inline-flex items-center gap-1">
+                            {n.is_wps_enabled && (
+                              <span className="text-amber-300">WPS</span>
+                            )}
+                            {n.is_randomized && (
+                              <span
+                                className="text-amber-300"
+                                title="MAC randomisée (U/L bit)"
+                              >
+                                🎭
+                              </span>
+                            )}
+                            <VAPSeenBadge n={n} />
+                          </div>
+                        </td>
+                        <td className="px-2 py-0.5 text-[10px]">
+                          <VAPStatusBadge n={n} />
+                        </td>
+                        <td className="px-2 py-0.5 text-[10px]">
+                          <button
+                            onClick={() => openBssidReview(g, n)}
+                            className="cyber-button-ghost px-1.5 py-0.5 text-[9px]"
+                            title={
+                              n.review_status_own
+                                ? "Éditer l'override BSSID"
+                                : "Override BSSID (remplace le statut du groupe pour ce BSSID uniquement)"
+                            }
+                          >
+                            {n.review_status_own ? "éditer" : "override"}
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -815,7 +968,50 @@ function APTreeView({
           </div>
         );
       })}
+      <ApReviewModal
+        open={reviewSeed !== null}
+        onClose={() => setReviewSeed(null)}
+        seed={reviewSeed}
+      />
     </div>
+  );
+}
+
+/** Effective-status badge for one VAP row. Atténué (italique + dim border)
+ *  quand le statut est hérité du groupe, plein quand c'est un override
+ *  propre au BSSID. */
+function VAPStatusBadge({ n }: { n: NeighborAPView }) {
+  const own = n.review_status_own;
+  const effective = n.review_status_effective;
+  if (!effective) {
+    return <span className="text-[color:var(--color-cyber-muted)]">—</span>;
+  }
+  const rev = statusConfig(effective as ReviewStatus);
+  if (!rev) return null;
+  const inherited = !own;
+  return (
+    <span
+      className={cn(
+        "font-mono text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1",
+        inherited && "italic",
+      )}
+      style={{
+        color: rev.color,
+        border: `1px ${inherited ? "dashed" : "solid"} ${rev.color}${inherited ? "55" : "aa"}`,
+        background: inherited ? "transparent" : `${rev.color}14`,
+        opacity: inherited ? 0.85 : 1,
+      }}
+      title={
+        inherited
+          ? `hérité du groupe — ${rev.hint}`
+          : `override BSSID — ${rev.hint}`
+      }
+    >
+      {rev.icon} {rev.label}
+      {inherited && (
+        <span className="text-[8px] opacity-70">hérité</span>
+      )}
+    </span>
   );
 }
 
@@ -830,44 +1026,12 @@ function historyToDisplayed(d: ScanHistoryDetail): DisplayedScan {
     band: n.band as WifiBand,
     is_ours: false,
   }));
-  // Rebuild physical AP groups client-side from the persisted ap_root.
-  const buckets = new Map<string, NeighborAPView[]>();
-  for (const n of neighbors) {
-    const key = n.ap_root || n.bssid;
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key)!.push(n);
-  }
-  const groups: PhysicalAPGroupView[] = [];
-  for (const [key, members] of buckets) {
-    const ssids = Array.from(
-      new Set(members.filter((m) => m.ssid).map((m) => m.ssid)),
-    ).sort();
-    const hidden = members.filter((m) => m.hidden).length;
-    const rssis = members.map((m) => m.rssi_dbm).sort((a, b) => a - b);
-    const med = rssis[Math.floor(rssis.length / 2)] ?? -100;
-    let vendor = "";
-    let vendor_slug = "";
-    for (const m of members) {
-      if (!m.is_randomized && m.vendor) {
-        vendor = m.vendor;
-        vendor_slug = m.vendor_slug;
-        break;
-      }
-    }
-    groups.push({
-      ap_root: key,
-      channel: members[0]?.channel ?? 0,
-      rssi_dbm: med,
-      vendor,
-      vendor_slug,
-      is_all_randomized: members.every((m) => m.is_randomized),
-      has_wps: members.some((m) => m.is_wps_enabled),
-      ssids,
-      hidden_count: hidden,
-      member_count: members.length,
-      bssids: members.map((m) => m.bssid),
-    });
-  }
+  // Trust the server: backend already rebuilt groups from the persisted
+  // neighbours AND overlaid the operator's review status.
+  const groups: PhysicalAPGroupView[] = (d.physical_aps ?? []).map((g) => ({
+    ...g,
+    review_status: g.review_status ?? null,
+  }));
   groups.sort((a, b) => b.rssi_dbm - a.rssi_dbm);
   const result: ScanResponse = {
     band: d.band as WifiBand,
@@ -875,7 +1039,9 @@ function historyToDisplayed(d: ScanHistoryDetail): DisplayedScan {
     duration_s: d.duration_s,
     started_at: new Date(d.started_at).getTime() / 1000,
     neighbors,
-    channel_scores: [],
+    // Recomputed server-side from persisted neighbours, so the heat-map
+    // restores identically when an old scan is reloaded.
+    channel_scores: d.channel_scores ?? [],
     recommended_channel: d.recommended_channel,
     current_channel: d.current_channel,
     threats: [],
@@ -914,6 +1080,24 @@ function ScanPicker({
       qc.invalidateQueries({ queryKey: ["scan-history"] }),
   });
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  // Recompute position whenever the dropdown opens or the window resizes.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open]);
   const handlePick = async (row: ScanHistoryRow) => {
     setOpen(false);
     try {
@@ -926,6 +1110,7 @@ function ScanPicker({
   return (
     <div className="relative">
       <button
+        ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={list.isLoading}
@@ -936,13 +1121,37 @@ function ScanPicker({
         scans précédents ({list.data?.length ?? 0})
         <ChevronDown className="inline h-3 w-3 ml-1" />
       </button>
-      {open && (
-        <div
-          className="absolute right-0 top-full mt-1 z-20 cyber-card p-2 min-w-[380px] max-h-[400px] overflow-y-auto"
-          style={{ background: "var(--color-cyber-surface)" }}
-        >
+      {open && pos && createPortal(
+        <>
+          {/* Click-outside backdrop */}
+          <div
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-40"
+          />
+          <div
+            className="fixed z-50 w-[440px] max-h-[420px] overflow-y-auto rounded-sm shadow-2xl"
+            style={{
+              top: pos.top,
+              right: pos.right,
+              background: "var(--color-cyber-surface)",
+              border: "1px solid var(--color-cyber-border)",
+              color: "var(--color-cyber-fg)",
+            }}
+          >
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[color:var(--color-cyber-border)]/60 sticky top-0 bg-[color:var(--color-cyber-surface)] z-10">
+            <span className="text-[10px] uppercase tracking-wider text-[color:var(--color-cyber-muted)]">
+              scans {BAND_LABEL[band]} précédents
+            </span>
+            <button
+              onClick={() => setOpen(false)}
+              className="text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)] text-xs"
+              title="Fermer"
+            >
+              ✕
+            </button>
+          </div>
           {list.data && list.data.length === 0 && (
-            <p className="text-xs text-[color:var(--color-cyber-muted)] p-2">
+            <p className="text-xs text-[color:var(--color-cyber-muted)] p-3">
               aucun scan {BAND_LABEL[band]} enregistré encore
             </p>
           )}
@@ -950,33 +1159,47 @@ function ScanPicker({
             <div
               key={row.id}
               className={cn(
-                "flex items-center gap-2 p-1.5 text-xs border-b border-[color:var(--color-cyber-border)]/30 hover:bg-[color:var(--color-cyber-bg-2)]/60",
+                "flex items-start gap-2 px-3 py-2 text-xs border-b border-[color:var(--color-cyber-border)]/30 hover:bg-[color:var(--color-cyber-bg-2)]/60",
                 row.id === activeLoadedId && "bg-[color:var(--color-cyber-accent)]/10",
               )}
             >
               <button
                 onClick={() => handlePick(row)}
-                className="flex-1 text-left"
+                className="flex-1 min-w-0 text-left"
               >
-                <div className="font-mono">
-                  #{row.id} · {row.neighbors_count} SSIDs
+                <div className="font-mono flex items-center gap-2 flex-wrap">
+                  <span className="text-[color:var(--color-cyber-fg)]">
+                    #{row.id}
+                  </span>
+                  <span className="text-[color:var(--color-cyber-muted)]">·</span>
+                  <span>{row.neighbors_count} SSIDs</span>
                   {row.threats_count > 0 && (
-                    <span className="ml-2 text-amber-300">⚠ {row.threats_count}</span>
+                    <span className="text-amber-300">⚠ {row.threats_count}</span>
+                  )}
+                  {row.id === activeLoadedId && (
+                    <span className="text-[9px] cyber-chip text-[color:var(--color-cyber-accent)]">
+                      chargé
+                    </span>
                   )}
                 </div>
-                <div className="text-[10px] text-[color:var(--color-cyber-muted)] flex items-center gap-2">
-                  <Clock className="h-3 w-3" />
-                  {new Date(row.started_at).toLocaleString("fr-FR", {
-                    dateStyle: "short",
-                    timeStyle: "short",
-                  })}
+                <div className="text-[10px] text-[color:var(--color-cyber-muted)] mt-1 flex items-center gap-1.5 flex-wrap">
+                  <Clock className="h-3 w-3 shrink-0" />
+                  <span>
+                    {new Date(row.started_at).toLocaleString("fr-FR", {
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    })}
+                  </span>
                   {row.lat != null && row.lon != null && (
                     <>
-                      <MapPin className="h-3 w-3" />
+                      <span className="text-[color:var(--color-cyber-border)]">·</span>
+                      <MapPin className="h-3 w-3 shrink-0" />
                       <span className="font-mono">
                         {row.lat.toFixed(3)}, {row.lon.toFixed(3)}
                       </span>
-                      <span className="cyber-chip text-[9px]">{row.source}</span>
+                      <span className="cyber-chip text-[9px] uppercase">
+                        {row.source}
+                      </span>
                     </>
                   )}
                 </div>
@@ -988,16 +1211,121 @@ function ScanPicker({
                   }
                 }}
                 disabled={delMut.isPending}
-                className="cyber-button-ghost p-1 text-[10px]"
+                className="shrink-0 p-1 text-[color:var(--color-cyber-muted)] hover:text-amber-300"
                 title="Supprimer ce scan"
               >
-                <Trash2 className="h-3 w-3" />
+                <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
           ))}
-        </div>
+          </div>
+        </>,
+        document.body,
       )}
     </div>
+  );
+}
+
+/** Duration options for the scan selector.
+ *  Single-pass (~3-25s depending on band) is the default ("standard").
+ *  Multi-pass loops `iw scan` until the budget is spent and merges by
+ *  BSSID — useful to catch rarely-beaconing APs or to time-average RSSI. */
+const SCAN_DURATIONS: ReadonlyArray<{
+  value: number;
+  label: string;
+  hint: string;
+}> = [
+  { value: 0, label: "standard", hint: "1 passe (~3-25s)" },
+  { value: 120, label: "2 min", hint: "scan approfondi" },
+  { value: 300, label: "5 min", hint: "patrouille — capte les APs rares" },
+  { value: 600, label: "10 min", hint: "surveillance courte — RSSI moyenné" },
+];
+
+function ScanDurationSelect({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  disabled: boolean;
+}) {
+  const current = SCAN_DURATIONS.find((d) => d.value === value);
+  return (
+    <select
+      value={String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+      disabled={disabled}
+      className="cyber-input text-[10px] py-1 px-2"
+      title={current ? current.hint : "Durée du scan"}
+    >
+      {SCAN_DURATIONS.map((d) => (
+        <option key={d.value} value={d.value}>
+          {d.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** Live countdown shown inside the START SCAN button while scanning.
+ *  For single-pass we just show a spinner ; for multi-pass we count
+ *  down from the chosen budget so the operator sees actual progress. */
+function ScanningButtonContent({ durationS }: { durationS: number }) {
+  const [elapsedS, setElapsedS] = useState(0);
+  useEffect(() => {
+    if (durationS <= 0) return;
+    const t0 = Date.now();
+    const id = window.setInterval(() => {
+      setElapsedS(Math.floor((Date.now() - t0) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [durationS]);
+  if (durationS <= 0) {
+    return (
+      <>
+        <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+        scan en cours…
+      </>
+    );
+  }
+  const remaining = Math.max(0, durationS - elapsedS);
+  const mm = Math.floor(remaining / 60);
+  const ss = String(remaining % 60).padStart(2, "0");
+  return (
+    <>
+      <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+      scan… {mm}:{ss}
+    </>
+  );
+}
+
+/** Badge "vu N×" + range RSSI quand seen_count > 1 (donc multi-pass). */
+function VAPSeenBadge({ n }: { n: NeighborAPView }) {
+  const seen = n.seen_count ?? 1;
+  if (seen <= 1) return null;
+  const max = n.rssi_max ?? n.rssi_dbm;
+  const min = n.rssi_min ?? n.rssi_dbm;
+  const drift = max - min;
+  return (
+    <span
+      className="inline-flex items-center gap-1 font-mono text-[9px] px-1 py-0.5 rounded"
+      style={{
+        color: "var(--color-cyber-muted)",
+        border: "1px dashed var(--color-cyber-border)",
+      }}
+      title={`Vu ${seen}× pendant le scan · RSSI ${min}…${max} dBm (drift ${drift} dB)`}
+    >
+      ×{seen}
+      {drift > 8 && (
+        <span
+          className="text-amber-300"
+          title="RSSI varie > 8 dB — probablement device mobile"
+        >
+          ~
+        </span>
+      )}
+    </span>
   );
 }
 
