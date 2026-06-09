@@ -19,11 +19,13 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { api } from "@/api/client";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
 
 export default function SlateScreen() {
+  const t = useT();
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,16 +76,16 @@ export default function SlateScreen() {
       <header className="mb-6">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Camera className="cyber-glow h-3 w-3" />
-          live mirror · /dev/fb0 → png
+          {t("remote.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="SLATE SCREEN"
+          data-text={t("remote.title").toUpperCase()}
         >
-          SLATE SCREEN
+          {t("remote.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Capture du framebuffer ST7789 · 320×240 landscape
+          {t("remote.description")}
         </p>
       </header>
 

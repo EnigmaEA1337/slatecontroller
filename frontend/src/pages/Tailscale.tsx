@@ -18,6 +18,8 @@ import {
   getTailscaleStatus,
   logoutTailscale,
   pingTailscale,
+  previewSyncTailscaleRoutes,
+  syncTailscaleRoutes,
   tracerouteTailscale,
 } from "@/api/tailscale";
 import { listNetworks } from "@/api/networks";
@@ -27,6 +29,7 @@ import type {
 } from "@/types/tailscale";
 import { ClickableHost } from "@/components/ClickableHost";
 import TailscaleHAPanel from "@/components/TailscaleHAPanel";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -51,6 +54,7 @@ const STATE_LABEL: Record<TailscaleBackendState, string> = {
 };
 
 export default function Tailscale() {
+  const t = useT();
   const qc = useQueryClient();
   const statusQ = useQuery({
     queryKey: ["tailscale", "status"],
@@ -63,13 +67,15 @@ export default function Tailscale() {
   });
 
   // Connection form state.
+  // NOTE: les routes annoncées (subnet routing) ne sont plus saisies
+  // ici. Elles sont calculées en aval depuis le catalogue des networks
+  // (flag expose_to_tailnet) et poussées par le RouteSyncPanel — une
+  // seule source de vérité, plus de risque de divergence entre intent
+  // form et catalogue.
   const [authKey, setAuthKey] = useState("");
   const [hostname, setHostname] = useState("");
   const [acceptRoutes, setAcceptRoutes] = useState(true);
   const [acceptDns, setAcceptDns] = useState(false);
-  const [advertiseRoutes, setAdvertiseRoutes] = useState(
-    "10.137.42.0/24,10.91.18.0/24,10.204.5.0/24,10.66.211.0/24,10.183.7.0/24",
-  );
   const [advertiseExitNode, setAdvertiseExitNode] = useState(false);
   const [exitNode, setExitNode] = useState("");
   const [shieldsUp, setShieldsUp] = useState(false);
@@ -87,10 +93,9 @@ export default function Tailscale() {
         hostname: hostname.trim() || undefined,
         accept_routes: acceptRoutes,
         accept_dns: acceptDns,
-        advertise_routes: advertiseRoutes
-          .split(/[,\s]+/)
-          .map((s) => s.trim())
-          .filter(Boolean),
+        // advertise_routes est intentionnellement omis ici : géré par le
+        // RouteSyncPanel qui calcule la liste depuis le catalogue.
+        advertise_routes: [],
         advertise_exit_node: advertiseExitNode,
         exit_node: exitNode.trim(),
         shields_up: shieldsUp,
@@ -149,11 +154,12 @@ export default function Tailscale() {
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <NetworkIcon className="cyber-glow h-5 w-5" />
-          <h1 className="cyber-display cyber-glow text-2xl">TAILSCALE</h1>
+          <h1 className="cyber-display cyber-glow text-2xl">
+            {t("tailscale.title").toUpperCase()}
+          </h1>
         </div>
         <p className="text-xs uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-          Mesh VPN — canal de remote admin + accès LAN home depuis le Slate en
-          mobilité.
+          {t("tailscale.subtitle")}
         </p>
       </div>
 
@@ -301,6 +307,14 @@ export default function Tailscale() {
         </a>
       </div>
 
+      {/* Subnet route sync (catalog → Slate advertise-routes) */}
+      <RouteSyncPanel />
+
+      {/* Le panneau de routage inverse (LAN → tailnet) a été déplacé
+          dans chaque carte réseau de la page Networks. Voir
+          NetworkTailscaleRoutingWidget : la config par sous-réseau vit
+          désormais à côté des autres policies (DNS, isolation, VLAN). */}
+
       {/* HA exit-node watchdog */}
       <TailscaleHAPanel />
 
@@ -349,19 +363,6 @@ export default function Tailscale() {
             value={hostname}
             onChange={(e) => setHostname(e.target.value)}
             placeholder="slate-7-pro"
-            className="w-full border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)] px-2 py-1.5 font-mono text-xs text-[color:var(--color-cyber-fg)] outline-none focus:border-[color:var(--color-cyber-accent)]"
-          />
-        </Field>
-
-        <Field
-          label="Routes annoncées (subnet routing)"
-          hint="Subnets que le Slate publie aux autres peers Tailscale. Activer 'Subnet routes' dans admin Tailscale pour qu'elles soient acceptées."
-        >
-          <input
-            type="text"
-            value={advertiseRoutes}
-            onChange={(e) => setAdvertiseRoutes(e.target.value)}
-            placeholder="10.137.42.0/24,10.91.18.0/24,..."
             className="w-full border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)] px-2 py-1.5 font-mono text-xs text-[color:var(--color-cyber-fg)] outline-none focus:border-[color:var(--color-cyber-accent)]"
           />
         </Field>
@@ -765,6 +766,217 @@ function Toggle({
         )}
       </div>
     </label>
+  );
+}
+
+/* =========================================================================
+ * RouteSyncPanel — diff entre les routes attendues (calculées depuis le
+ * catalogue des réseaux exposés au tailnet) et celles réellement annoncées
+ * par le Slate. Un bouton « Re-pousser routes » exécute `tailscale set
+ * --advertise-routes=...` côté Slate et, si un PAT tailnet est configuré,
+ * approuve la liste via l'API admin pour que les peers reçoivent les
+ * routes immédiatement.
+ * ========================================================================= */
+function RouteSyncPanel() {
+  const qc = useQueryClient();
+  const preview = useQuery({
+    queryKey: ["tailscale", "sync-routes", "preview"],
+    queryFn: previewSyncTailscaleRoutes,
+    refetchInterval: 30_000,
+  });
+  const sync = useMutation({
+    mutationFn: syncTailscaleRoutes,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tailscale", "sync-routes", "preview"] });
+      qc.invalidateQueries({ queryKey: ["tailscale", "status"] });
+    },
+  });
+  const d = preview.data;
+  const drift = !!d && !d.in_sync;
+  const pending =
+    !!d &&
+    d.not_yet_approved !== null &&
+    d.not_yet_approved.length > 0;
+
+  return (
+    <div className="cyber-panel space-y-3 p-5">
+      <header className="flex items-center justify-between gap-3">
+        <h2 className="cyber-display cyber-glow text-base">
+          Routes Tailscale (subnet router)
+        </h2>
+        <button
+          type="button"
+          onClick={() => preview.refetch()}
+          disabled={preview.isFetching}
+          className="cyber-button-ghost px-2 py-1 text-[10px]"
+          title="Re-lire l'état actuel sans rien modifier"
+        >
+          <RefreshCw
+            className={cn("h-3 w-3", preview.isFetching && "animate-spin")}
+          />
+        </button>
+      </header>
+
+      <p className="text-[11px] text-[color:var(--color-cyber-muted)] max-w-2xl">
+        Liste des sous-réseaux que le Slate annonce au tailnet, calculée
+        depuis le drapeau <code>expose_to_tailnet</code> de chaque réseau du
+        catalogue. Le bouton ci-dessous pousse la liste attendue côté Slate
+        et — si un PAT d'administration tailnet est configuré — approuve
+        également la liste pour que les pairs la reçoivent sans intervention
+        manuelle.
+      </p>
+
+      {preview.isLoading && (
+        <div className="text-[11px] text-[color:var(--color-cyber-muted)]">
+          Lecture de l'état des routes…
+        </div>
+      )}
+      {preview.isError && (
+        <div className="text-[11px] text-[color:var(--color-cyber-warn)]">
+          ⚠ {errorMessage(preview.error)}
+        </div>
+      )}
+
+      {d && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+          <RouteList
+            label="Attendues (catalogue)"
+            items={d.expected}
+            tone="accent"
+          />
+          <RouteList
+            label="Annoncées (Slate)"
+            items={d.current_advertised}
+            tone="muted"
+          />
+          <RouteList
+            label="Approuvées (tailnet)"
+            items={d.current_approved ?? ["— PAT non configuré"]}
+            tone={d.current_approved === null ? "muted" : "ok"}
+          />
+        </div>
+      )}
+
+      {d && drift && (
+        <div className="text-[11px] text-[color:var(--color-cyber-warn)] flex items-start gap-2">
+          <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+          <div>
+            <div>Dérive détectée :</div>
+            {d.to_add.length > 0 && (
+              <div>
+                à ajouter :{" "}
+                <code className="text-[color:var(--color-cyber-fg)]">
+                  {d.to_add.join(", ")}
+                </code>
+              </div>
+            )}
+            {d.to_remove.length > 0 && (
+              <div>
+                à retirer :{" "}
+                <code className="text-[color:var(--color-cyber-fg)]">
+                  {d.to_remove.join(", ")}
+                </code>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {d && !drift && pending && (
+        <div className="text-[11px] text-[color:var(--color-cyber-warn)] flex items-start gap-2">
+          <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+          <div>
+            Routes annoncées correctement mais{" "}
+            {d.not_yet_approved!.length} en attente d'approbation côté
+            tailnet admin :{" "}
+            <code className="text-[color:var(--color-cyber-fg)]">
+              {d.not_yet_approved!.join(", ")}
+            </code>
+            . Configure un PAT pour permettre l'auto-approbation.
+          </div>
+        </div>
+      )}
+
+      {d && d.in_sync && !pending && d.current_approved !== null && (
+        <div className="text-[11px] text-[color:var(--color-cyber-ok)] flex items-center gap-2">
+          <CheckCircle2 className="h-3 w-3" />
+          Routes synchronisées et approuvées ; aucune action nécessaire.
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 pt-2 border-t border-[color:var(--color-cyber-border)]">
+        <button
+          type="button"
+          onClick={() => sync.mutate()}
+          disabled={sync.isPending}
+          className="cyber-button px-4 py-2 text-xs disabled:opacity-50"
+        >
+          {sync.isPending ? (
+            <>
+              <RefreshCw className="mr-2 inline h-3 w-3 animate-spin" />
+              Application en cours…
+            </>
+          ) : (
+            <>Re-pousser les routes ▸</>
+          )}
+        </button>
+        {sync.error && (
+          <span className="text-[11px] text-[color:var(--color-cyber-warn)]">
+            ⚠ {errorMessage(sync.error)}
+          </span>
+        )}
+        {sync.data && (
+          <span className="text-[11px] text-[color:var(--color-cyber-muted)]">
+            {sync.data.applied.length > 0
+              ? `Appliqué : ${sync.data.applied.join(", ")}`
+              : "Aucun changement appliqué"}
+            {sync.data.approval.attempted && sync.data.approval.approved && (
+              <> · approuvé via PAT</>
+            )}
+            {sync.data.approval.attempted && sync.data.approval.error && (
+              <> · approbation PAT en échec ({sync.data.approval.error})</>
+            )}
+            {!sync.data.approval.attempted && (
+              <> · approbation manuelle requise ({sync.data.approval.reason})</>
+            )}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RouteList({
+  label,
+  items,
+  tone,
+}: {
+  label: string;
+  items: string[];
+  tone: "accent" | "muted" | "ok";
+}) {
+  const toneClass = {
+    accent: "text-[color:var(--color-cyber-accent)]",
+    muted: "text-[color:var(--color-cyber-muted)]",
+    ok: "text-[color:var(--color-cyber-ok)]",
+  }[tone];
+  return (
+    <div className="space-y-1">
+      <div className="cyber-label text-[10px]">{label}</div>
+      {items.length === 0 ? (
+        <div className="text-[10px] text-[color:var(--color-cyber-muted)]">
+          (vide)
+        </div>
+      ) : (
+        <ul className="space-y-0.5 font-mono text-[10px]">
+          {items.map((it) => (
+            <li key={it} className={toneClass}>
+              {it}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

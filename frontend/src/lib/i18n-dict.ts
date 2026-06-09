@@ -188,6 +188,187 @@ const FR: DictTree = {
     none: "—",
   },
 
+  // --- Tailscale -----------------------------------------------------
+  tailscale: {
+    title: "Tailscale",
+    subtitle:
+      "VPN maillé — canal d'administration à distance et accès au LAN domestique depuis le Slate en déplacement.",
+    section_connection: "Connexion",
+    section_network_test: "Test réseau",
+    state_label: "État",
+  },
+
+  // --- Proton VPN ----------------------------------------------------
+  proton: {
+    title: "Proton VPN",
+    subtitle: "Tunnel WireGuard via Proton VPN",
+    description:
+      "Pilotage du tunnel WireGuard fourni par Proton VPN. Sélection des serveurs, application du kill switch et supervision de l'état de connexion.",
+  },
+
+  // --- Wifi (catalogue SSIDs) ---------------------------------------
+  wifi: {
+    title: "SSIDs",
+    subtitle: "Catalogue Wi-Fi · {n} SSID",
+    subtitle_plural: "Catalogue Wi-Fi · {n} SSIDs",
+    description:
+      "Liste des SSID gérés par le contrôleur, leur réseau de rattachement, leur sécurité et leur état de diffusion.",
+    new: "Nouveau SSID",
+  },
+
+  // --- Firewall ------------------------------------------------------
+  firewall: {
+    title: "Pare-feu",
+    subtitle: "Zones, règles personnalisées et journalisation",
+    description:
+      "Vue des zones UCI, des règles injectées par le contrôleur (préfixe SC_FR_*) et de la traçabilité des actions.",
+    section_zones: "Zones",
+  },
+
+  // --- Vulnérabilités -----------------------------------------------
+  vulnerabilities: {
+    title: "Vulnérabilités",
+    subtitle:
+      "Bill of Materials opkg confronté à OSV et CVE2CAPEC. Identification des CVE applicables et reconstitution des chemins d'attaque.",
+  },
+
+  // --- Air Watch -----------------------------------------------------
+  air_watch: {
+    title: "Surveillance Air Watch",
+    subtitle:
+      "Audit radio passif : détection des jumeaux malveillants, des trames de désauthentification, des activités WPS et des voisins co-canal à forte puissance.",
+  },
+
+  // --- Anti-vol ------------------------------------------------------
+  anti_theft: {
+    title: "Anti-vol",
+    subtitle:
+      "Mode autonome de défense : verrouillage du PIN avec escalade, effacement à seuil dépassé, alertes via les webhooks Slate vers le contrôleur.",
+  },
+
+  // --- Settings / sous-pages ----------------------------------------
+  set_agent: {
+    subtitle: "Agent local du Slate",
+    title: "Agent",
+    description:
+      "Déploiement et supervision de l'agent slate-ctrl sur le Slate. Profils en JSON, application hors ligne, intégration du bouton physique.",
+  },
+  set_communication: {
+    subtitle: "Communication",
+    title: "Messages",
+    description:
+      "Activation des messages sur l'écran tactile et envoi de tests à la demande.",
+  },
+  set_connectivity: {
+    subtitle: "Connectivité du contrôleur",
+    title: "URLs de rappel",
+    description:
+      "URL exposées par le contrôleur et consommées par les webhooks Slate (touchscreen watcher, anti-vol).",
+  },
+  set_controller_https: {
+    subtitle: "HTTPS du contrôleur",
+    title: "HTTPS",
+    description:
+      "Exposition du contrôleur en HTTPS sur le tailnet via Tailscale Serve. Certificat Let's Encrypt automatique.",
+  },
+  set_internal_ca: {
+    subtitle: "Autorité de certification interne",
+    title: "Autorité de certification",
+    description:
+      "Autorité racine locale et certificat valide pour 192.168.8.1, utile en environnement hôtelier hors ligne.",
+  },
+  set_setup_status: {
+    subtitle: "État de la configuration",
+    title: "Configuration",
+    description:
+      "Vue agrégée du déploiement : Tailscale, autorité de certification, clé SSH, Slate, rappels.",
+  },
+  set_ssh_key: {
+    subtitle: "Paire de clés SSH",
+    title: "Clé SSH",
+    description:
+      "Authentification par clé exclusive sur le Slate. Génération et déploiement de la clé publique en un clic.",
+  },
+  set_tailnet_admin: {
+    subtitle: "Pairs administrateurs du tailnet",
+    title: "Administration tailnet",
+    description:
+      "Liste blanche des pairs Tailscale autorisés à atteindre les interfaces d'administration. Pilote le drapeau admin_only des profils.",
+  },
+
+  // --- Networks / sous-pages ----------------------------------------
+  net_interfaces: {
+    title: "Interfaces",
+    subtitle:
+      "État live des interfaces physiques et logiques du Slate (Ethernet, ponts, VLAN, VPN).",
+  },
+  net_diagnostic: {
+    title: "Diagnostic",
+    subtitle:
+      "Outils de diagnostic réseau : ping, traceroute, lookup DNS, mesure de débit.",
+  },
+  net_ambient: {
+    title: "Veille radio",
+    subtitle:
+      "Surveillance permanente du spectre Wi-Fi (planificateur APScheduler par bande). Détection lente, faible coût en bande passante.",
+  },
+  net_surveillance: {
+    title: "Sessions de surveillance",
+    subtitle:
+      "Sessions nommées, chronologie classifiée des points d'accès rencontrés, contexte et notes par session.",
+    new_session: "Nouvelle session",
+  },
+  net_radio_history: {
+    title: "Historique radio",
+    subtitle:
+      "Historique des scans planifiés et manuels. Sert de référence pour comparer une configuration RF dans le temps.",
+  },
+  net_radio_map: {
+    title: "Carte radio",
+    subtitle:
+      "Visualisation géographique des découvertes RF associées au Slate (Leaflet, données locales).",
+  },
+
+  // --- Tailscale audit -----------------------------------------------
+  tailscale_audit: {
+    title: "Audit Tailscale",
+    subtitle:
+      "Audit local de la posture du Slate via SSH et lecture de la politique tailnet via l'API d'administration (PAT requis).",
+  },
+
+  // --- Remote control (Slate screen) --------------------------------
+  remote: {
+    title: "Pilotage à distance",
+    subtitle: "Écran tactile distant",
+    description:
+      "Téléchargement de l'écran tactile (capture périodique) et envoi de messages à l'opérateur sur place.",
+  },
+
+  // --- Profile form --------------------------------------------------
+  profile_form: {
+    title_new: "Nouveau profil",
+    title_edit: "Édition du profil",
+    subtitle:
+      "Configuration contextuelle : SSID, VPN, DNS, niveau de filtrage, fond d'écran et règles spécifiques.",
+  },
+
+  // --- Wifi orphans --------------------------------------------------
+  wifi_orphans: {
+    title: "SSIDs orphelins",
+    subtitle:
+      "Sections wireless présentes sur le Slate mais non référencées par le catalogue du contrôleur. Permet de nettoyer les résidus d'anciens provisionnements ou les tests SSH.",
+  },
+
+  // --- Tor -----------------------------------------------------------
+  tor: {
+    title_audit: "Audit Tor",
+    audit_subtitle:
+      "État du démon, ponts utilisés, circuits actifs et qualité de la sortie. Vérification de la non-fuite DNS.",
+    title_networks: "Tor",
+    networks_subtitle:
+      "Routage Tor par réseau : transparent pour tout le trafic ou SOCKS uniquement. DNS sur Tor et kill switch optionnels.",
+  },
+
   // --- Login ---------------------------------------------------------
   login: {
     page_label: "Authentification du contrôleur",
@@ -561,6 +742,173 @@ const EN: DictTree = {
     state_enabled: "enabled",
     state_disabled: "disabled",
     none: "—",
+  },
+
+  tailscale: {
+    title: "Tailscale",
+    subtitle:
+      "Mesh VPN — remote administration channel and access to the home LAN from the Slate while on the road.",
+    section_connection: "Connection",
+    section_network_test: "Network test",
+    state_label: "State",
+  },
+
+  proton: {
+    title: "Proton VPN",
+    subtitle: "WireGuard tunnel via Proton VPN",
+    description:
+      "Manages the WireGuard tunnel provided by Proton VPN: server selection, kill switch enforcement and connection state supervision.",
+  },
+
+  wifi: {
+    title: "SSIDs",
+    subtitle: "Wi-Fi catalog · {n} SSID",
+    subtitle_plural: "Wi-Fi catalog · {n} SSIDs",
+    description:
+      "Lists the SSIDs managed by the controller, their bound network, their security and their broadcast state.",
+    new: "New SSID",
+  },
+
+  firewall: {
+    title: "Firewall",
+    subtitle: "Zones, custom rules and audit trail",
+    description:
+      "UCI zones, rules injected by the controller (SC_FR_* prefix) and traceability of actions.",
+    section_zones: "Zones",
+  },
+
+  vulnerabilities: {
+    title: "Vulnerabilities",
+    subtitle:
+      "opkg Bill of Materials confronted with OSV and CVE2CAPEC. Identifies applicable CVEs and reconstructs attack paths.",
+  },
+
+  air_watch: {
+    title: "Air Watch surveillance",
+    subtitle:
+      "Passive radio audit: evil twin detection, deauthentication frames, WPS activity and strong co-channel neighbours.",
+  },
+
+  anti_theft: {
+    title: "Anti-theft",
+    subtitle:
+      "Autonomous defence mode: PIN lockout with escalation, threshold-based wipe, alerts dispatched from the Slate to the controller via webhooks.",
+  },
+
+  set_agent: {
+    subtitle: "Local Slate agent",
+    title: "Agent",
+    description:
+      "Deployment and supervision of the slate-ctrl agent: JSON profiles, offline application, physical-button integration.",
+  },
+  set_communication: {
+    subtitle: "Communication",
+    title: "Messages",
+    description:
+      "Toggles on-screen messages and sends a test message on demand.",
+  },
+  set_connectivity: {
+    subtitle: "Controller connectivity",
+    title: "Callback URLs",
+    description:
+      "URLs exposed by the controller and consumed by the Slate-side webhooks (touchscreen watcher, anti-theft).",
+  },
+  set_controller_https: {
+    subtitle: "Controller HTTPS",
+    title: "HTTPS",
+    description:
+      "Exposes the controller in HTTPS on the tailnet through Tailscale Serve. Automatic Let's Encrypt certificate.",
+  },
+  set_internal_ca: {
+    subtitle: "Internal certificate authority",
+    title: "Certificate authority",
+    description:
+      "Local root CA and certificate valid for 192.168.8.1, useful in offline hotel environments.",
+  },
+  set_setup_status: {
+    subtitle: "Setup status",
+    title: "Configuration",
+    description:
+      "Aggregated deployment view: Tailscale, certificate authority, SSH key, Slate, callbacks.",
+  },
+  set_ssh_key: {
+    subtitle: "SSH key pair",
+    title: "SSH key",
+    description:
+      "Key-only authentication on the Slate. Public-key generation and deployment in one click.",
+  },
+  set_tailnet_admin: {
+    subtitle: "Tailnet admin peers",
+    title: "Tailnet administration",
+    description:
+      "Allow-list of Tailscale peers permitted to reach the administration interfaces. Drives the admin_only flag on profiles.",
+  },
+
+  net_interfaces: {
+    title: "Interfaces",
+    subtitle:
+      "Live state of the Slate's physical and logical interfaces (Ethernet, bridges, VLANs, VPN).",
+  },
+  net_diagnostic: {
+    title: "Diagnostic",
+    subtitle:
+      "Network diagnostic toolbox: ping, traceroute, DNS lookup and throughput measurement.",
+  },
+  net_ambient: {
+    title: "Radio watch",
+    subtitle:
+      "Continuous Wi-Fi spectrum monitoring (APScheduler job per band). Slow detection, low bandwidth cost.",
+  },
+  net_surveillance: {
+    title: "Surveillance sessions",
+    subtitle:
+      "Named sessions with classified timeline of observed access points, contextual notes and per-session metadata.",
+    new_session: "New session",
+  },
+  net_radio_history: {
+    title: "Radio history",
+    subtitle:
+      "History of scheduled and manual scans. Useful to compare RF configurations over time.",
+  },
+  net_radio_map: {
+    title: "Radio map",
+    subtitle:
+      "Geographic visualisation of RF discoveries linked to the Slate (Leaflet, local data).",
+  },
+
+  tailscale_audit: {
+    title: "Tailscale audit",
+    subtitle:
+      "Local Slate posture audit via SSH and tailnet policy retrieved through the admin API (PAT required).",
+  },
+
+  remote: {
+    title: "Remote control",
+    subtitle: "Remote touchscreen",
+    description:
+      "Periodic screenshot of the Slate touchscreen and ability to push messages to the on-site operator.",
+  },
+
+  profile_form: {
+    title_new: "New profile",
+    title_edit: "Edit profile",
+    subtitle:
+      "Contextual configuration: SSIDs, VPN, DNS, filtering level, wallpaper and dedicated rules.",
+  },
+
+  wifi_orphans: {
+    title: "Orphan SSIDs",
+    subtitle:
+      "Wireless sections present on the Slate but not referenced by the controller catalog. Useful to clean up leftover provisioning or SSH-side experiments.",
+  },
+
+  tor: {
+    title_audit: "Tor audit",
+    audit_subtitle:
+      "Daemon state, active bridges, current circuits and exit quality. Validates DNS non-leakage.",
+    title_networks: "Tor",
+    networks_subtitle:
+      "Per-network Tor routing: transparent for all traffic or SOCKS-only. Optional DNS-over-Tor and kill switch.",
   },
 
   login: {

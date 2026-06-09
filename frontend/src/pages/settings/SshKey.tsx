@@ -21,6 +21,7 @@ import {
   getSshKeypairStatus,
   revokeSshKeypair,
 } from "@/api/settings";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage, formatDate } from "@/lib/error-utils";
 
@@ -488,18 +489,22 @@ function SshKeypairSection() {
 }
 
 export default function SshKey() {
+  const t = useT();
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Cog className="cyber-glow h-3 w-3" />
-          settings · ssh keypair
+          {t("set_ssh_key.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="SSH KEY">
-          SSH KEY
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("set_ssh_key.title").toUpperCase()}
+        >
+          {t("set_ssh_key.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Auth clé-only sur le Slate · plus de mot de passe en clair
+          {t("set_ssh_key.description")}
         </p>
       </header>
 

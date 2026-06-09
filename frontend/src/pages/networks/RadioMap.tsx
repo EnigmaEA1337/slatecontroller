@@ -31,6 +31,7 @@ import "leaflet/dist/leaflet.css";
 import { getDeviceLocations } from "@/api/device-locations";
 import { listScanHistory } from "@/api/scan-history";
 import { errorMessage } from "@/lib/error-utils";
+import { useT } from "@/lib/i18n";
 import type { WifiBand } from "@/types/wifi";
 
 // SVG marker factory — colour-and-size-configurable so we can render
@@ -87,6 +88,7 @@ function FitToMarkers({ points }: { points: MapPoint[] }) {
 }
 
 export default function RadioMap() {
+  const t = useT();
   const locations = useQuery({
     queryKey: ["device-locations"],
     queryFn: getDeviceLocations,
@@ -122,9 +124,11 @@ export default function RadioMap() {
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="cyber-display cyber-glow text-2xl">RADIO · CARTE</h1>
+        <h1 className="cyber-display cyber-glow text-2xl">
+          {t("net_radio_map.title").toUpperCase()}
+        </h1>
         <p className="cyber-label text-[10px] mt-1">
-          Positions du device + scans géolocalisés · OSM tiles
+          {t("net_radio_map.subtitle")}
         </p>
       </header>
 

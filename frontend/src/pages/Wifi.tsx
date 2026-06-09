@@ -36,6 +36,7 @@ import {
   type WifiSsidPublic,
   type WifiSsidWrite,
 } from "@/types/wifi";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -661,6 +662,7 @@ function WifiRow({
 // ---------------------------- Page ---------------------------- #
 
 export default function Wifi() {
+  const t = useT();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<WifiSsidPublic | null>(null);
   const [creating, setCreating] = useState(false);
@@ -681,16 +683,21 @@ export default function Wifi() {
         <div>
           <div className="cyber-label mb-2 flex items-center gap-2">
             <WifiIcon className="cyber-glow h-3 w-3" />
-            radio catalog · {ssids.data?.length ?? 0} ssid(s)
+            {t(
+              (ssids.data?.length ?? 0) === 1
+                ? "wifi.subtitle"
+                : "wifi.subtitle_plural",
+              { n: ssids.data?.length ?? 0 },
+            )}
           </div>
           <h1
             className="cyber-display cyber-glitch text-4xl"
-            data-text="RADIO"
+            data-text={t("wifi.title").toUpperCase()}
           >
-            RADIO
+            {t("wifi.title").toUpperCase()}
           </h1>
           <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-            SSIDs · bandes · sécurité · flags — le mapping réseau se fait par profil
+            {t("wifi.description")}
           </p>
         </div>
         {!creating && !editing && (
@@ -700,7 +707,7 @@ export default function Wifi() {
             className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
-            Nouveau SSID
+            {t("wifi.new")}
           </button>
         )}
       </header>

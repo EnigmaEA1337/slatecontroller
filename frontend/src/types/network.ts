@@ -51,6 +51,11 @@ export interface NetworkPublic {
   // reach hosts in this subnet via the Slate's tailscale0.
   expose_to_tailnet: boolean;
 
+  // Per-destination reverse routing : which tailnet subnets the clients
+  // of THIS network are allowed to reach, with the NAT mode applied
+  // per entry. Empty = no reverse routing.
+  tailnet_destinations: TailnetDestination[];
+
   // Per-network Tor routing (see backend NetworkRow docstring).
   tor_route_mode: "off" | "transparent" | "socks_only";
   tor_dns_over_tor: boolean;
@@ -58,6 +63,22 @@ export interface NetworkPublic {
 
   created_at: string;
   updated_at: string;
+}
+
+/** Egress path for one destination CIDR.
+ *  - "tailnet" : route via tailscale0 (default).
+ *  - "wan"     : route via the WAN interface (eth0/apcli0/etc).
+ *  - "proton"  : Proton VPN tunnel (NOT YET IMPLEMENTED in the backend).
+ *  - "tor"     : Tor TransPort      (NOT YET IMPLEMENTED in the backend).
+ */
+export type TailnetDestinationVia = "tailnet" | "wan" | "proton" | "tor";
+
+export interface TailnetDestination {
+  cidr: string;
+  /** "routed" = real client IP visible to peer ; "snat" = NAT to egress IP. */
+  mode: "routed" | "snat";
+  /** Egress path. Default: "tailnet". */
+  via: TailnetDestinationVia;
 }
 
 export interface NetworkWrite {
@@ -77,6 +98,7 @@ export interface NetworkWrite {
   admin_ui_access: boolean;
   ssh_access: boolean;
   expose_to_tailnet: boolean;
+  tailnet_destinations: TailnetDestination[];
   tor_route_mode: "off" | "transparent" | "socks_only";
   tor_dns_over_tor: boolean;
   tor_kill_switch: boolean;

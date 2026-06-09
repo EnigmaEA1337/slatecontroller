@@ -20,6 +20,7 @@ import {
   getAirWatchSummary,
   restoreThreat,
 } from "@/api/wifi-radio";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 import { cn } from "@/lib/utils";
 import type { ThreatEventDb, ThreatLevel } from "@/types/wifi-radio";
@@ -38,6 +39,7 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 export default function AirWatch() {
+  const t = useT();
   const qc = useQueryClient();
   const summary = useQuery({
     queryKey: ["air-watch"],
@@ -68,18 +70,16 @@ export default function AirWatch() {
     <div className="space-y-6">
       <header>
         <h1 className="cyber-display cyber-glow text-2xl">
-          AIR WATCH · RF DETECTIONS
+          {t("air_watch.title").toUpperCase()}
         </h1>
         <p className="cyber-label text-[10px] mt-1">
-          Détections du scanner WiFi (evil twin · WPS · crypto déprécié ·
-          voisins forts). Lancer un scan depuis{" "}
+          {t("air_watch.subtitle")}{" "}
           <Link
             to="/networks/radio"
             className="text-[color:var(--color-cyber-accent)] underline"
           >
-            Réseau → Radio
-          </Link>{" "}
-          alimente cette page.
+            Air Wave → Scanner RF
+          </Link>
         </p>
       </header>
 

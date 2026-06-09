@@ -35,6 +35,7 @@ import {
 import { ClickableHost } from "@/components/ClickableHost";
 import { getTailscaleStatus } from "@/api/tailscale";
 import { errorMessage } from "@/lib/error-utils";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 // Mirror of `ADMIN_PORTS_TCP` in backend/app/slate_agent/sync.py. Kept in
@@ -43,6 +44,7 @@ import { cn } from "@/lib/utils";
 const ADMIN_PORTS = [22, 80, 443, 3000, 3443, 8000, 8080, 8443];
 
 export default function TailnetAdmin() {
+  const t = useT();
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["settings", "tailnet-admin-ips"],
@@ -113,16 +115,16 @@ export default function TailnetAdmin() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Shield className="cyber-glow h-3 w-3" />
-          settings · tailnet admin IPs
+          {t("set_tailnet_admin.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="TAILNET ADMIN"
+          data-text={t("set_tailnet_admin.title").toUpperCase()}
         >
-          TAILNET ADMIN
+          {t("set_tailnet_admin.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          peers tailnet autorisés à atteindre l'admin du Slate
+          {t("set_tailnet_admin.description")}
         </p>
       </header>
 

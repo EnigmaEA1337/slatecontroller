@@ -40,6 +40,127 @@ export async function disconnectTailscale(): Promise<void> {
   await api.post("/api/tailscale/disconnect", undefined, { timeout: 20_000 });
 }
 
+// --- Subnet route sync (catalog → Slate advertise-routes) -----------
+
+export interface SyncRoutesPreview {
+  expected: string[];
+  current_advertised: string[];
+  /** null when no PAT is configured — UI shows "approval unknown". */
+  current_approved: string[] | null;
+  to_add: string[];
+  to_remove: string[];
+  /** Routes expected but not yet approved in the tailnet admin. null
+   *  when no PAT is configured. */
+  not_yet_approved: string[] | null;
+  in_sync: boolean;
+}
+
+export interface SyncRoutesApprovalReport {
+  attempted: boolean;
+  reason?: string;
+  approved?: string[];
+  error?: string;
+}
+
+export interface SyncRoutesResult {
+  ok: boolean;
+  expected: string[];
+  applied: string[];
+  approval: SyncRoutesApprovalReport;
+  status: TailscaleStatus;
+}
+
+export async function previewSyncTailscaleRoutes(): Promise<SyncRoutesPreview> {
+  const { data } = await api.get<SyncRoutesPreview>(
+    "/api/tailscale/sync-routes/preview",
+    { timeout: 30_000 },
+  );
+  return data;
+}
+
+export async function syncTailscaleRoutes(): Promise<SyncRoutesResult> {
+  const { data } = await api.post<SyncRoutesResult>(
+    "/api/tailscale/sync-routes",
+    undefined,
+    { timeout: 60_000 },
+  );
+  return data;
+}
+
+// --- Subnet routing inverse — LAN clients → tailnet peers ----------
+
+/** "routed" = pas de NAT, le pair distant voit l'IP réelle du client (et
+ *  doit donc avoir `--accept-routes` + la route approuvée dans le tailnet).
+ *  "snat" = SNAT vers l'IP Tailscale du Slate, marche partout sans config
+ *  côté pair distant mais perd la visibilité du client. */
+export type ReverseRoutingMode = "routed" | "snat";
+
+export interface TailnetDestinationCandidate {
+  cidr: string;
+  /** Hosts qui annoncent ce subnet dans le tailnet. Au moins un élément. */
+  peers: string[];
+}
+
+export interface TailnetForwardingActivePair {
+  zone: string;
+  dest_cidr: string;
+}
+
+export interface ReverseRoutingSubnet {
+  slug: string;
+  zone: string;
+  iface: string;
+  cidr: string;
+  ipaddr: string;
+}
+
+export interface ReverseRoutingState {
+  tailscale_zone_exists: boolean;
+  tailscale_self_ip: string | null;
+  subnets: ReverseRoutingSubnet[];
+  active_fwd: TailnetForwardingActivePair[];
+  active_snat: TailnetForwardingActivePair[];
+}
+
+export interface ReverseRoutingReconcileReport {
+  ok: boolean;
+  applied_rules: number;
+  active_fwd: [string, string][];
+  active_snat: [string, string][];
+  reload_output?: string;
+}
+
+export async function getReverseRouting(): Promise<ReverseRoutingState> {
+  const { data } = await api.get<ReverseRoutingState>(
+    "/api/tailscale/forwarding",
+    { timeout: 30_000 },
+  );
+  return data;
+}
+
+export async function listTailnetDestinationCandidates(): Promise<
+  TailnetDestinationCandidate[]
+> {
+  const { data } = await api.get<{
+    destinations: TailnetDestinationCandidate[];
+  }>("/api/tailscale/destinations", { timeout: 30_000 });
+  return data.destinations;
+}
+
+/** Trigger a reconciliation : the backend walks every Network row,
+ *  reads its `tailnet_destinations` list, and rebuilds the live
+ *  iptables rules to match. Idempotent. */
+export async function reconcileReverseRouting(): Promise<
+  ReverseRoutingReconcileReport
+> {
+  const { data } = await api.post<ReverseRoutingReconcileReport>(
+    "/api/tailscale/forwarding/reconcile",
+    undefined,
+    { timeout: 60_000 },
+  );
+  return data;
+}
+
 export async function logoutTailscale(): Promise<void> {
   await api.post("/api/tailscale/logout", undefined, { timeout: 20_000 });
 }

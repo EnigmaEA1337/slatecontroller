@@ -10,6 +10,59 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 TorRouteMode = Literal["off", "transparent", "socks_only"]
 
+# Per-destination NAT mode for one (source LAN, destination CIDR) pair.
+#   "routed" — packet leaves with its original LAN source IP, requires the
+#              destination side (peer or upstream) to know how to route
+#              the LAN back.
+#   "snat"   — SNAT to the egress iface's IP. Works with zero config on
+#              the destination side ; loses client-IP visibility.
+TailnetRouteMode = Literal["routed", "snat"]
+
+# Which egress path the destination is reached through.
+#   "tailnet" — out of tailscale0 (the historical default).
+#   "wan"     — out of the WAN interface. Useful for routing a CIDR via
+#              a kernel-installed static route (e.g. a remote /24 behind
+#              another router on the LAN).
+#   "proton"  — out of the Proton VPN tunnel (WireGuard). NOT IMPLEMENTED
+#              YET in the reconciler ; the model accepts the value so the
+#              UI is forward-compatible and a stored config doesn't break.
+#   "tor"     — through the Tor TransPort. NOT IMPLEMENTED YET — same
+#              forward-compat rationale.
+TailnetRouteVia = Literal["tailnet", "wan", "proton", "tor"]
+
+
+class TailnetDestination(BaseModel):
+    """One destination CIDR the parent LAN is allowed to reach + the NAT
+    mode and egress path. Stored as a JSON list on
+    `NetworkRow.tailnet_destinations`.
+
+    The field name `tailnet_destinations` is kept for backward
+    compatibility — the concept now covers any egress route, not only
+    those that exit through tailscale0.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cidr: str = Field(
+        min_length=9, max_length=64,
+        description="Destination CIDR. For via='tailnet' this is one of "
+                    "the subnets advertised by a tailnet peer and approved "
+                    "in the admin ; for other via values the CIDR just "
+                    "needs a kernel route via the chosen interface.",
+    )
+    mode: TailnetRouteMode = Field(
+        default="snat",
+        description="Per-destination NAT mode. Default 'snat' is the safest "
+                    "(works without configuring the destination side).",
+    )
+    via: TailnetRouteVia = Field(
+        default="tailnet",
+        description="Egress path. 'tailnet' (default) routes via "
+                    "tailscale0 ; 'wan' via the WAN interface ; 'proton' "
+                    "via the Proton VPN tunnel (NOT YET IMPLEMENTED) ; "
+                    "'tor' via the Tor TransPort (NOT YET IMPLEMENTED).",
+    )
+
 
 class NetworkPublic(BaseModel):
     """Network record as exposed by the API."""
@@ -35,6 +88,8 @@ class NetworkPublic(BaseModel):
     ssh_access: bool
     # Tailnet exposure (Tailscale subnet routing).
     expose_to_tailnet: bool
+    # Per-destination reverse routing.
+    tailnet_destinations: list[TailnetDestination] = []
     # Per-network Tor routing. See db/models.py NetworkRow for the
     # semantics of each field.
     tor_route_mode: TorRouteMode = "off"
@@ -130,6 +185,19 @@ class NetworkWrite(BaseModel):
             "any tailnet peer can reach hosts in this subnet via the "
             "Slate's tailscale0 interface (useful for e.g. remote Plex "
             "access from a phone)."
+        ),
+    )
+    tailnet_destinations: list[TailnetDestination] = Field(
+        default_factory=list,
+        description=(
+            "Reverse routing — for each tailnet subnet listed here, the "
+            "clients of THIS network are allowed to reach it. The mode "
+            "per entry decides whether the destination peer sees the "
+            "original client IP ('routed') or the Slate's tailnet IP "
+            "('snat'). An empty list disables reverse routing for this "
+            "network. Destinations are discovered from `tailscale "
+            "status --json` (subnets advertised by other peers and "
+            "approved in the tailnet admin)."
         ),
     )
 

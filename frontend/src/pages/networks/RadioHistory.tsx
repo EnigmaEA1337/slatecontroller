@@ -23,6 +23,7 @@ import {
   type ScanHistoryRow,
 } from "@/api/scan-history";
 import { errorMessage } from "@/lib/error-utils";
+import { useT } from "@/lib/i18n";
 import {
   bucketColor,
   bucketFromRssi,
@@ -33,6 +34,7 @@ import { cn } from "@/lib/utils";
 import type { WifiBand } from "@/types/wifi";
 
 export default function RadioHistory() {
+  const t = useT();
   const qc = useQueryClient();
   const [bandFilter, setBandFilter] = useState<WifiBand | "all">("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -63,10 +65,10 @@ export default function RadioHistory() {
     <div className="space-y-6">
       <header>
         <h1 className="cyber-display cyber-glow text-2xl">
-          RADIO · HISTORIQUE
+          {t("net_radio_history.title").toUpperCase()}
         </h1>
         <p className="cyber-label text-[10px] mt-1">
-          Timeline des scans pour ce device · géoloc associée si épinglée
+          {t("net_radio_history.subtitle")}
         </p>
       </header>
 

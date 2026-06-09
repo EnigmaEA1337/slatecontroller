@@ -72,6 +72,7 @@ import type {
   SnapshotDetail,
 } from "@/types/security";
 import mitreData from "@/data/mitre_attack.json";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage, formatDate } from "@/lib/error-utils";
 import { createPortal } from "react-dom";
@@ -128,6 +129,7 @@ type VulnsPreset = "must_fix" | "critical_exploitable" | null;
 type CveSubset = { label: string; ids: string[] } | null;
 
 export default function Vulnerabilities() {
+  const t = useT();
   const qc = useQueryClient();
   const [tab, setTab] = useState<TabId>("vulns");
   // Lifted filters so the matrix + risk-score breakdown can drive the other tabs.
@@ -185,11 +187,11 @@ export default function Vulnerabilities() {
         <div className="flex items-center gap-2">
           <ScanLine className="cyber-glow h-5 w-5" />
           <h1 className="cyber-display cyber-glow text-2xl">
-            SECURITY DEVICE STATUS
+            {t("vulnerabilities.title").toUpperCase()}
           </h1>
         </div>
         <p className="text-xs uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-          SBOM + match CVE pour le Slate. Source primaire : OSV.dev.
+          {t("vulnerabilities.subtitle")}
         </p>
       </div>
 

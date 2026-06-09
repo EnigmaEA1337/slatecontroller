@@ -19,10 +19,19 @@ import {
   listNetworks,
   updateNetwork,
 } from "@/api/networks";
+import {
+  listTailnetDestinationCandidates,
+  reconcileReverseRouting,
+} from "@/api/tailscale";
 import { ClickableHost } from "@/components/ClickableHost";
 import DnsProtectionWidget from "@/components/DnsProtectionWidget";
-import type { NetworkPublic, NetworkWrite } from "@/types/network";
+import type {
+  NetworkPublic,
+  NetworkWrite,
+  TailnetDestinationVia,
+} from "@/types/network";
 import { useT } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
 
@@ -78,6 +87,45 @@ function NetworkForm({
     initial?.expose_to_tailnet ?? false,
   );
 
+  // Per-destination reverse routing : which subnets THIS LAN is allowed
+  // to reach, with NAT mode AND egress path per entry.
+  //   mode : "off" | "routed" | "snat" ("off" omits the entry on save)
+  //   via  : "tailnet" | "wan" | "proton" | "tor"
+  // Form state lives as two parallel maps indexed by CIDR so the rest of
+  // the rendering code can read either independently.
+  const initialDestState: Record<string, "off" | "routed" | "snat"> = {};
+  const initialDestVia: Record<string, "tailnet" | "wan" | "proton" | "tor"> = {};
+  for (const d of initial?.tailnet_destinations ?? []) {
+    initialDestState[d.cidr] = d.mode;
+    initialDestVia[d.cidr] = d.via ?? "tailnet";
+  }
+  const [tailnetDestState, setTailnetDestState] = useState<
+    Record<string, "off" | "routed" | "snat">
+  >(initialDestState);
+  const [tailnetDestVia, setTailnetDestVia] = useState<
+    Record<string, "tailnet" | "wan" | "proton" | "tor">
+  >(initialDestVia);
+  const tailnetDestQ = useQuery({
+    queryKey: ["tailnet", "destinations"],
+    queryFn: listTailnetDestinationCandidates,
+    staleTime: 30_000,
+  });
+  // CIDR custom en cours de saisie (entrée libre). Quand l'opérateur
+  // clique « Ajouter », on injecte juste l'entrée dans tailnetDestState
+  // (par défaut mode 'snat' qui est le mode le plus permissif et qui
+  // marche sans coopération du peer distant).
+  const [newDestCidr, setNewDestCidr] = useState("");
+  const [newDestError, setNewDestError] = useState<string | null>(null);
+  // Sanity check on CIDR : two checks suffit pour intercepter les
+  // typos (vraie validation se fait côté backend reconcile via iptables).
+  const isValidCidr = (s: string) =>
+    /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(s) &&
+    s.split(".").every((p, i) => {
+      const n = parseInt(i === 3 ? p.split("/")[0]! : p, 10);
+      return n >= 0 && n <= 255;
+    }) &&
+    parseInt(s.split("/")[1]!, 10) <= 32;
+
   // Per-network Tor. `off` is the sane default — opt in per network.
   // `transparent` redirects every TCP via Tor's TransPort (slow, anonymous).
   // `socks_only` keeps direct WAN but exposes SOCKS5 on the gateway IP.
@@ -122,6 +170,19 @@ function NetworkForm({
         admin_ui_access: adminUiAccess,
         ssh_access: sshAccess,
         expose_to_tailnet: exposeToTailnet,
+        // Convert the {cidr -> mode|"off"} form-state into the
+        // canonical list excluding off entries.
+        tailnet_destinations: Object.entries(tailnetDestState)
+          .filter(([, mode]) => mode === "routed" || mode === "snat")
+          .map(([cidr, mode]) => ({
+            cidr,
+            mode,
+            via: tailnetDestVia[cidr] ?? "tailnet",
+          })) as {
+          cidr: string;
+          mode: "routed" | "snat";
+          via: "tailnet" | "wan" | "proton" | "tor";
+        }[],
         tor_route_mode: torMode,
         tor_dns_over_tor: torDnsOverTor,
         tor_kill_switch: torKillSwitch,
@@ -130,8 +191,20 @@ function NetworkForm({
         ? updateNetwork(initial!.slug, body)
         : createNetwork({ ...body, slug });
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ["networks"] });
+      // After saving the catalog row, push the firewall reconciliation
+      // so the new tailnet_destinations take effect on the Slate. We
+      // fire-and-forget the error : if the SSH push fails (no Slate
+      // online), the row is still saved and a later reconcile will
+      // catch up.
+      try {
+        await reconcileReverseRouting();
+        queryClient.invalidateQueries({ queryKey: ["tailscale", "forwarding"] });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("post-save reverse routing reconcile failed", e);
+      }
       onClose();
     },
   });
@@ -421,12 +494,239 @@ function NetworkForm({
                 <Share2 className="h-3 w-3" />
                 exposer ce réseau sur le tailnet
               </span>
-              <span className="block text-[10px] text-[color:var(--color-cyber-dim)]">
+              <span className="block text-[10px] text-[color:var(--color-cyber-muted)]">
                 ▸ ajoute le CIDR à `tailscale --advertise-routes`, joignable
                 depuis tes peers tailnet (téléphone, laptop…)
               </span>
             </span>
           </label>
+
+          {/* Per-destination reverse routing : grille cochable des
+              subnets que les pairs Tailscale annoncent. Pour chaque
+              entrée l'opérateur choisit Désactivé / Routé / NAT. */}
+          <div className="mt-3 rounded border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)]/30 p-2">
+            <div className="cyber-label !text-[9px] mb-1 text-[color:var(--color-cyber-muted)]">
+              destinations atteignables depuis ce réseau (routage inverse)
+            </div>
+            <p className="mb-2 text-[10px] text-[color:var(--color-cyber-muted)] max-w-prose">
+              Choisir, pour chaque sous-réseau annoncé par les peers
+              Tailscale, si les clients de ce réseau peuvent l'atteindre,
+              et avec quel mode :
+              <strong> Routé</strong> conserve l'IP source originale (le
+              peer distant doit accepter la route),
+              <strong> NAT</strong> réécrit la source vers l'IP Tailscale
+              du Slate (marche partout sans config côté peer).
+            </p>
+            {tailnetDestQ.isLoading && (
+              <div className="text-[10px] text-[color:var(--color-cyber-muted)]">
+                Lecture des destinations…
+              </div>
+            )}
+            {tailnetDestQ.isError && (
+              <div className="text-[10px] text-[color:var(--color-cyber-warn)]">
+                ⚠ Tailscale injoignable : impossible de lister les
+                destinations.
+              </div>
+            )}
+            {/*
+              Lignes affichées = union de :
+                - destinations découvertes via tailscale status (avec
+                  leurs peers annonceurs)
+                - destinations « custom » présentes dans le state local
+                  (saisies manuellement par l'opérateur ou héritées d'un
+                  initial.tailnet_destinations qui contient un CIDR pas
+                  encore annoncé par un peer)
+              Une destination custom marque `discovered=false` → la
+              colonne « annoncée par » indique « personnalisée » + un
+              bouton ✕ pour la retirer (les découvertes ne se retirent
+              pas : leur mode = "off" les enlève déjà).
+            */}
+            {(() => {
+              const rows: {
+                cidr: string;
+                peers: string[];
+                discovered: boolean;
+              }[] = [];
+              const seen = new Set<string>();
+              for (const d of tailnetDestQ.data ?? []) {
+                rows.push({ cidr: d.cidr, peers: d.peers, discovered: true });
+                seen.add(d.cidr);
+              }
+              for (const cidr of Object.keys(tailnetDestState)) {
+                if (seen.has(cidr)) continue;
+                rows.push({ cidr, peers: ["personnalisée"], discovered: false });
+              }
+              rows.sort((a, b) => a.cidr.localeCompare(b.cidr));
+              return rows.length > 0 ? (
+                <table className="cyber-table">
+                  <colgroup>
+                    <col />
+                    <col className="w-32" />
+                    <col className="w-48" />
+                    <col className="w-32" />
+                    <col className="w-8" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Destination</th>
+                      <th>Source</th>
+                      <th>Mode</th>
+                      <th>Sortie via</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((d) => {
+                      const m = tailnetDestState[d.cidr] ?? "off";
+                      const v = tailnetDestVia[d.cidr] ?? "tailnet";
+                      return (
+                        <tr key={d.cidr}>
+                          <td className="font-mono text-[10px]">{d.cidr}</td>
+                          <td className="font-mono text-[10px] text-[color:var(--color-cyber-muted)]">
+                            {d.peers.join(", ")}
+                          </td>
+                          <td>
+                            <div className="flex gap-3 text-[10px]">
+                              {(["off", "routed", "snat"] as const).map(
+                                (val) => (
+                                  <label
+                                    key={val}
+                                    className="inline-flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`tsdest-${d.cidr}`}
+                                      checked={m === val}
+                                      onChange={() =>
+                                        setTailnetDestState((prev) => ({
+                                          ...prev,
+                                          [d.cidr]: val,
+                                        }))
+                                      }
+                                    />
+                                    <span
+                                      className={cn(
+                                        m === val
+                                          ? "text-[color:var(--color-cyber-fg)]"
+                                          : "text-[color:var(--color-cyber-muted)]",
+                                      )}
+                                    >
+                                      {val === "off"
+                                        ? "Désactivé"
+                                        : val === "routed"
+                                          ? "Routé"
+                                          : "NAT"}
+                                    </span>
+                                  </label>
+                                ),
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            <select
+                              value={v}
+                              onChange={(e) =>
+                                setTailnetDestVia((prev) => ({
+                                  ...prev,
+                                  [d.cidr]: e.target
+                                    .value as TailnetDestinationVia,
+                                }))
+                              }
+                              disabled={m === "off"}
+                              className="cyber-input w-full px-1 py-0.5 text-[10px]"
+                              title={
+                                m === "off"
+                                  ? "Activer le mode pour choisir la sortie"
+                                  : undefined
+                              }
+                            >
+                              <option value="tailnet">Tailscale</option>
+                              <option value="wan">WAN</option>
+                              <option value="proton" disabled>
+                                Proton (à venir)
+                              </option>
+                              <option value="tor" disabled>
+                                Tor (à venir)
+                              </option>
+                            </select>
+                          </td>
+                          <td>
+                            {!d.discovered && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setTailnetDestState((prev) => {
+                                    const next = { ...prev };
+                                    delete next[d.cidr];
+                                    return next;
+                                  })
+                                }
+                                className="text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-warn)]"
+                                title="Retirer cette destination personnalisée"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : null;
+            })()}
+
+            {/* Ajout d'une destination CIDR libre. Sert quand l'opérateur
+                veut router vers une plage qui n'est pas annoncée par un
+                peer Tailscale (encore) — par exemple une route qui sera
+                approuvée plus tard, ou un sous-réseau accessible via une
+                route statique côté kernel. Le firewall reconcile traite
+                ce CIDR exactement comme les autres : forward + SNAT
+                optionnel. Le routage kernel doit gérer la sortie (sinon
+                le paquet est drop). */}
+            <div className="mt-2 flex items-center gap-2 text-[10px]">
+              <input
+                type="text"
+                value={newDestCidr}
+                onChange={(e) => {
+                  setNewDestCidr(e.target.value);
+                  setNewDestError(null);
+                }}
+                placeholder="10.50.0.0/16"
+                className="cyber-input w-44 px-2 py-1 font-mono text-[10px]"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const c = newDestCidr.trim();
+                  if (!isValidCidr(c)) {
+                    setNewDestError("CIDR invalide (ex: 10.50.0.0/16)");
+                    return;
+                  }
+                  if (tailnetDestState[c]) {
+                    setNewDestError("Destination déjà présente");
+                    return;
+                  }
+                  setTailnetDestState((prev) => ({ ...prev, [c]: "snat" }));
+                  setNewDestCidr("");
+                  setNewDestError(null);
+                }}
+                className="cyber-button-ghost px-2 py-1"
+              >
+                ➕ Ajouter destination personnalisée
+              </button>
+              {newDestError && (
+                <span className="text-[color:var(--color-cyber-warn)]">
+                  ⚠ {newDestError}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-[10px] text-[color:var(--color-cyber-muted)]">
+              Une destination personnalisée nécessite qu'une route kernel
+              existe vers <code>tailscale0</code> (ou autre, à venir en
+              Phase 2 avec choix d'interface de sortie).
+            </p>
+          </div>
         </div>
 
         {/* Per-network Tor. The global daemon switch + bridges live in

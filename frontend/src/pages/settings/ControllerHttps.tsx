@@ -35,9 +35,11 @@ import {
   getControllerHttpsState,
 } from "@/api/controllerHttps";
 import { errorMessage } from "@/lib/error-utils";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 export default function ControllerHttps() {
+  const t = useT();
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["settings", "controller-https"],
@@ -66,21 +68,23 @@ export default function ControllerHttps() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Lock className="cyber-glow h-3 w-3" />
-          controller settings · accès HTTPS
+          {t("set_controller_https.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="HTTPS">
-          HTTPS CONTROLLER
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("set_controller_https.title").toUpperCase()}
+        >
+          {t("set_controller_https.title").toUpperCase()}
         </h1>
         <p className="mt-2 max-w-2xl text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Expose ce controller en HTTPS sur ton tailnet via Tailscale Serve.
-          Cert Let's Encrypt auto, port 443 jamais public, zéro renewal cron.
+          {t("set_controller_https.description")}
         </p>
       </header>
 
       {q.isLoading && (
         <div className="cyber-panel flex items-center gap-3 p-4 text-xs text-[color:var(--color-cyber-muted)]">
           <RefreshCw className="h-4 w-4 animate-spin" />
-          chargement de l'état Tailscale…
+          {t("common.loading")}
         </div>
       )}
 

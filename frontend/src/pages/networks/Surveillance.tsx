@@ -28,9 +28,11 @@ import {
 } from "@/api/surveillance";
 import NewSessionModal from "@/components/NewSessionModal";
 import { usePinConfirm } from "@/hooks/usePinConfirm";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 export default function SurveillancePage() {
+  const t = useT();
   const qc = useQueryClient();
   const sessions = useQuery({
     queryKey: ["wifi", "surveillance", "list"],
@@ -92,24 +94,23 @@ export default function SurveillancePage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between">
         <div className="cyber-label flex items-center gap-2">
-          <RadioTower className="h-3 w-3" /> sessions de surveillance
+          <RadioTower className="h-3 w-3" /> {t("net_surveillance.title")}
         </div>
         <button
           onClick={() => setCreateOpen(true)}
           className="cyber-button px-3 py-1.5 text-xs"
         >
-          <Plus className="h-3 w-3 inline mr-1" /> nouvelle session
+          <Plus className="h-3 w-3 inline mr-1" /> {t("net_surveillance.new_session")}
         </button>
       </header>
 
       <p className="text-xs text-[color:var(--color-cyber-muted)] max-w-3xl">
-        Une session lance un scan WiFi à intervalle r&eacute;gulier sur la dur&eacute;e
-        choisie. Chaque passe est persist&eacute;e. La timeline classe chaque BSSID
-        en <span className="text-emerald-300">stable</span> /{" "}
-        <span className="text-amber-300">edge</span> /{" "}
-        <span className="text-cyan-300">drifting</span> /{" "}
-        <span className="text-slate-400">transient</span> selon sa pr&eacute;sence et
-        son drift RSSI.
+        {t("net_surveillance.subtitle")} La chronologie classe chaque BSSID
+        en <span className="text-emerald-300">stable</span> ·{" "}
+        <span className="text-amber-300">en limite</span> ·{" "}
+        <span className="text-cyan-300">dérivant</span> ·{" "}
+        <span className="text-slate-400">transitoire</span> selon sa présence
+        et la variation de RSSI.
       </p>
 
       {active.length > 0 && (

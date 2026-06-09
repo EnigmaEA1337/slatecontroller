@@ -15,6 +15,7 @@ import {
   uploadVPNConfig,
 } from "@/api/vpn";
 import type { VPNConfigPublic } from "@/types/vpn";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 
 
@@ -177,6 +178,7 @@ const ConfigRow = memo(function ConfigRow({
 });
 
 export default function ProtonVPN() {
+  const t = useT();
   const queryClient = useQueryClient();
   const { data, isLoading, isError, error } = useQuery<VPNConfigPublic[]>({
     queryKey: ["vpn-configs"],
@@ -195,16 +197,16 @@ export default function ProtonVPN() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Network className="cyber-glow h-3 w-3" />
-          vpn / wireguard / proton
+          {t("proton.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="PROTON VPN"
+          data-text={t("proton.title").toUpperCase()}
         >
-          PROTON VPN
+          {t("proton.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Upload manuel des configs WireGuard ·{" "}
+          {t("proton.description")}{" "}
           <a
             href="https://account.proton.me/u/0/vpn/WireGuard"
             target="_blank"

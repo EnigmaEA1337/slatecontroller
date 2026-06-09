@@ -212,6 +212,15 @@ class NetworkRow(Base):
     # this flag set (and only those — networks the user explicitly
     # cloisonne stay invisible to remote tailnet peers).
     expose_to_tailnet: Mapped[bool] = mapped_column(default=False)
+    # Per-destination reverse routing : list of tailnet subnets THIS LAN
+    # is allowed to reach, with the NAT mode applied per entry. Stored as
+    # `[{"cidr": "10.13.69.0/24", "mode": "routed"|"snat"}, ...]`. The
+    # firewall reconciler converts this list into iptables rules pinned
+    # to (src=this LAN CIDR, dst=destination CIDR) so different
+    # destinations can run in different modes for the same source LAN.
+    # An empty list disables reverse routing for the network. See
+    # `app/tailscale/forwarding.py` for the apply logic.
+    tailnet_destinations: Mapped[list[dict]] = mapped_column(JSON, default=list)
 
     # ── Per-network Tor routing ──────────────────────────────────────
     # ``tor_route_mode``  off / transparent / socks_only

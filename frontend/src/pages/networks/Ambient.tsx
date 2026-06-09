@@ -24,6 +24,7 @@ import {
   runAmbientNow,
   upsertAmbientConfig,
 } from "@/api/ambient-scan";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { WifiBand } from "@/types/wifi";
 
@@ -39,6 +40,7 @@ const BAND_ICON: Record<WifiBand, string> = {
 };
 
 export default function AmbientPage() {
+  const t = useT();
   const qc = useQueryClient();
   const configs = useQuery({
     queryKey: ["wifi", "ambient", "configs"],
@@ -55,13 +57,10 @@ export default function AmbientPage() {
   return (
     <div className="space-y-4">
       <header className="cyber-label flex items-center gap-2">
-        <RadioTower className="h-3 w-3" /> scan ambient · arrière-plan
+        <RadioTower className="h-3 w-3" /> {t("net_ambient.title")}
       </header>
       <p className="text-xs text-[color:var(--color-cyber-muted)] max-w-2xl">
-        Lance un scan WiFi en arrière-plan à intervalle r&eacute;gulier. Chaque passe
-        est persist&eacute;e comme un scan normal (visible dans la liste d&eacute;roulante
-        de la page Radio). La r&eacute;tention purge automatiquement les anciennes
-        passes — les scans manuels ne sont jamais touch&eacute;s.
+        {t("net_ambient.subtitle")}
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

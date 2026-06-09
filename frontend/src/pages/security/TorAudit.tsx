@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { api } from "@/api/client";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -135,6 +136,7 @@ function CounterBox({
  *     collapsible — fail/warn auto-expanded.
  */
 export default function SecurityTorAudit() {
+  const t = useT();
   const qc = useQueryClient();
   const auditQ = useQuery({
     queryKey: ["security", "tor-audit"],
@@ -193,10 +195,12 @@ export default function SecurityTorAudit() {
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <ShieldAlert className="cyber-glow h-5 w-5" />
-          <h1 className="cyber-display cyber-glow text-2xl">TOR AUDIT</h1>
+          <h1 className="cyber-display cyber-glow text-2xl">
+            {t("tor.title_audit").toUpperCase()}
+          </h1>
         </div>
         <p className="text-xs uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
-          Posture sécurité de la passerelle Tor — checks live sur le device (netstat, ip6tables, conntrack).
+          {t("tor.audit_subtitle")}
         </p>
       </div>
 

@@ -49,6 +49,7 @@ import {
   updateCAConfig,
 } from "@/api/internalCa";
 import { errorMessage } from "@/lib/error-utils";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const KEY_ALGORITHMS: { value: KeyAlgorithm; label: string; rgs: string }[] = [
@@ -67,6 +68,7 @@ const HASHES: { value: SignatureHash; label: string }[] = [
 ];
 
 export default function InternalCa() {
+  const t = useT();
   const qc = useQueryClient();
   const status = useQuery({
     queryKey: ["internal-ca", "status"],
@@ -93,19 +95,18 @@ export default function InternalCa() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <ShieldCheck className="cyber-glow h-3 w-3" />
-          controller settings · PKI interne (RGS)
+          {t("set_internal_ca.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="TRUST CONTROLLER"
+          data-text={t("set_internal_ca.title").toUpperCase()}
         >
-          TRUST CONTROLLER
+          {t("set_internal_ca.title").toUpperCase()}
         </h1>
         <p className="mt-2 max-w-2xl text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Autorité de certification interne RGS-compliant. Émission, suivi et
-          révocation des certificats serveur pour la flotte (Slate +
-          équipements futurs). Profils RGS 1★ / 2★ / 3★ sélectionnables —
-          défaut RGS 2★ (ECDSA P-384, SHA-384, 10 ans CA, 825 jours feuille).
+          {t("set_internal_ca.description")} Profils RGS 1★ / 2★ / 3★
+          sélectionnables ; le défaut est RGS 2★ (ECDSA P-384, SHA-384, autorité
+          valide 10 ans, feuille 825 jours).
         </p>
       </header>
 

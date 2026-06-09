@@ -18,10 +18,12 @@ import {
   deleteWifiOrphan,
   listWifiOrphans,
 } from "@/api/wifi-orphans";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
 export default function WifiOrphansPage() {
+  const t = useT();
   const qc = useQueryClient();
   const list = useQuery({
     queryKey: ["wifi", "orphans"],
@@ -70,16 +72,11 @@ export default function WifiOrphansPage() {
   return (
     <div className="space-y-4">
       <header className="cyber-label flex items-center gap-2">
-        <Wifi className="h-3 w-3" /> SSIDs orphelins · cleanup catalog (Phase 2)
+        <Wifi className="h-3 w-3" /> {t("wifi_orphans.title")}
       </header>
 
       <p className="text-xs text-[color:var(--color-cyber-muted)] max-w-3xl">
-        Liste des sections <code>wireless</code> sur le Slate qui ne sont
-        PAS marquées <code>slate_ctrl_managed=1</code> par le contrôleur.
-        Ce sont typiquement : restes de profils OEM, ifaces créées en SSH
-        pour test, ou résidus d'un ancien provisioning. La suppression
-        est définitive — refusée automatiquement si la section porte
-        notre marque managed.
+        {t("wifi_orphans.subtitle")}
       </p>
 
       <section className="cyber-card p-3">

@@ -32,6 +32,7 @@ import {
   getSshKeypairStatus,
   getTailnetAdminIps,
 } from "@/api/settings";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type CheckStatus = "ok" | "warn" | "missing" | "error" | "loading";
@@ -46,6 +47,7 @@ interface CheckRow {
 }
 
 export default function SetupStatus() {
+  const t = useT();
   const sshQ = useQuery({
     queryKey: ["setup", "ssh"],
     queryFn: getSshKeypairStatus,
@@ -296,19 +298,16 @@ export default function SetupStatus() {
       <header className="mb-6">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <CheckCircle2 className="cyber-glow h-3 w-3" />
-          controller settings · état de configuration
+          {t("set_setup_status.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="SETUP STATUS"
+          data-text={t("set_setup_status.title").toUpperCase()}
         >
-          SETUP STATUS
+          {t("set_setup_status.title").toUpperCase()}
         </h1>
         <p className="mt-2 max-w-2xl text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Vue agrégée de la configuration du controller. Permet de vérifier
-          d'un coup d'œil que toutes les briques (Tailscale, CA, SSH, Slate,
-          callbacks) sont opérationnelles avant un déploiement ou après une
-          mise à jour.
+          {t("set_setup_status.description")}
         </p>
       </header>
 

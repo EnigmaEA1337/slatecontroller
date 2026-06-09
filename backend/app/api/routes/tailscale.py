@@ -20,11 +20,17 @@ from pydantic import BaseModel
 from app.api.deps import get_slate_ssh
 from app.auth import User, get_current_user
 from app.db.database import make_session_factory
+from app.networks.store import NetworkStore
 from app.slate.ssh import SlateSSH
 from app.tailscale.admin_api import TailscaleAdminAPI, TailscaleAdminAPIError
 from app.tailscale.admin_store import TailscaleAdminStore
 from app.tailscale.audit import TailscaleAuditor
 from app.tailscale.client import TailscaleClient
+from app.tailscale.forwarding import (
+    DesiredRule as TailnetDesiredRule,
+    apply_state as apply_forwarding_state,
+    discover_state as discover_forwarding_state,
+)
 from app.tailscale.ha_store import (
     FAILSAFE_MODES,
     MAX_CHECK_INTERVAL,
@@ -98,6 +104,342 @@ async def get_config(
 ) -> dict:
     """Last-applied config + has-auth-key flag. No secrets returned."""
     return await _store(request).get_metadata()
+
+
+@router.get("/sync-routes/preview")
+async def preview_sync_routes(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Diff between expected (from network catalog) and currently
+    advertised routes on the Slate. Used by the UI to decide whether to
+    show the « Re-pousser routes » button as actionable or as a no-op.
+
+    Read-only — does not modify any state.
+    """
+    expected = await _expected_routes(request)
+    client = TailscaleClient(ssh)
+    state = await client.get_status()
+    current = list(state.advertised_routes or [])
+    # `enabled` are the routes the tailnet admin has approved; `expected
+    # but not enabled` means « advertised but waiting for approval ».
+    enabled = await _enabled_routes_from_pat(request, _ipv4(state.tailscale_ips))
+    to_add = [r for r in expected if r not in current]
+    to_remove = [r for r in current if r not in expected]
+    not_yet_approved = (
+        [r for r in expected if enabled is not None and r not in enabled]
+        if enabled is not None else None
+    )
+    return {
+        "expected": expected,
+        "current_advertised": current,
+        "current_approved": enabled,  # null when no PAT configured
+        "to_add": to_add,
+        "to_remove": to_remove,
+        "not_yet_approved": not_yet_approved,
+        "in_sync": not to_add and not to_remove,
+    }
+
+
+@router.post("/sync-routes")
+async def sync_routes(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Push the canonical advertise-routes list to the Slate.
+
+    Computes the expected list from the network catalog (any network
+    with `expose_to_tailnet=True`), calls `tailscale set --advertise-
+    routes=...` over SSH, and — if a PAT is configured — also approves
+    the routes via the tailnet admin API so peers immediately receive
+    them. Idempotent : running twice with no catalog change is a no-op.
+    """
+    expected = await _expected_routes(request)
+    client = TailscaleClient(ssh)
+
+    # 1. Push the advertise list to the Slate. apply_overrides uses
+    # `tailscale set` (no session reset) — safe over a live link.
+    ok, applied = await client.apply_overrides(advertise_routes=expected)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"tailscale set failed: {' '.join(applied)}",
+        )
+
+    # 2. Persist intent in the store so /status overlay reflects the change.
+    try:
+        meta = await _store(request).get_metadata()
+        cfg = ((meta or {}).get("config") or {}).copy()
+        cfg["advertise_routes"] = expected
+        await _store(request).save(auth_key=None, last_applied_config=cfg)
+    except Exception as exc:  # noqa: BLE001 - non-fatal persistence
+        logger.warning("tailscale.sync_routes.persist_failed", error=str(exc))
+
+    # 3. Auto-approve via PAT if available. Best-effort : if the PAT is
+    # missing or scoped without routes:write, we surface the failure in
+    # the response but don't fail the whole call.
+    state = await client.get_status()
+    approval = await _approve_routes_via_pat(
+        request, _ipv4(state.tailscale_ips), expected,
+    )
+
+    logger.info(
+        "tailscale.sync_routes",
+        username=user.username,
+        expected=expected,
+        applied=applied,
+        approval=approval,
+    )
+    return {
+        "ok": True,
+        "expected": expected,
+        "applied": applied,
+        "approval": approval,
+        "status": state.model_dump(),
+    }
+
+
+async def _expected_routes(request: Request) -> list[str]:
+    """Aggregate IPv4 + IPv6 subnets of networks marked expose_to_tailnet."""
+    sf = make_session_factory(request.app.state.db_engine)
+    nets = await NetworkStore(sf).list_all()
+    out: list[str] = []
+    for n in nets:
+        if not n.expose_to_tailnet:
+            continue
+        if n.subnet_cidr:
+            out.append(n.subnet_cidr)
+        if getattr(n, "ipv6_enabled", False) and getattr(n, "ipv6_subnet_cidr", None):
+            out.append(n.ipv6_subnet_cidr)
+    return out
+
+
+async def _enabled_routes_from_pat(
+    request: Request, slate_ts_ip: str | None,
+) -> list[str] | None:
+    """Read tailnet-side approval state for the Slate. Returns None when
+    no PAT is configured (the UI then shows « approval unknown »)."""
+    if not slate_ts_ip:
+        return None
+    admin_store = _admin_store(request)
+    pat = await admin_store.get_pat()
+    if not pat:
+        return None
+    meta = await admin_store.get_metadata()
+    tailnet = (meta or {}).get("tailnet") or "-"
+    try:
+        async with TailscaleAdminAPI(pat, tailnet) as api:
+            device_id = await _find_device_id_by_ip(api, slate_ts_ip)
+            if not device_id:
+                return None
+            data = await api.device_routes(device_id)
+            return list(data.get("enabledRoutes") or [])
+    except TailscaleAdminAPIError:
+        return None
+
+
+async def _approve_routes_via_pat(
+    request: Request, slate_ts_ip: str | None, routes: list[str],
+) -> dict:
+    """Approve `routes` on the Slate device via the tailnet admin API.
+
+    Returns a dict describing the outcome — used by the response and
+    the audit log. Never raises ; reports failure in the payload.
+    """
+    if not slate_ts_ip:
+        return {"attempted": False, "reason": "slate tailscale ip unknown"}
+    admin_store = _admin_store(request)
+    pat = await admin_store.get_pat()
+    if not pat:
+        return {"attempted": False, "reason": "no PAT configured"}
+    meta = await admin_store.get_metadata()
+    tailnet = (meta or {}).get("tailnet") or "-"
+    try:
+        async with TailscaleAdminAPI(pat, tailnet) as api:
+            device_id = await _find_device_id_by_ip(api, slate_ts_ip)
+            if not device_id:
+                return {"attempted": False, "reason": "Slate device not found in tailnet"}
+            await api.set_device_routes(device_id, routes)
+        return {"attempted": True, "approved": routes}
+    except TailscaleAdminAPIError as exc:
+        return {"attempted": True, "error": str(exc)}
+
+
+async def _find_device_id_by_ip(
+    api: TailscaleAdminAPI, ts_ip: str,
+) -> str | None:
+    """Match a Tailscale IP back to its tailnet device ID."""
+    for d in await api.devices():
+        addrs = d.get("addresses") or []
+        if ts_ip in addrs:
+            return str(d.get("id") or "") or None
+    return None
+
+
+def _ipv4(ips: list[str]) -> str | None:
+    """Pick the IPv4 entry out of a TailscaleIPs list (skip ipv6 fd7a:...)."""
+    for ip in ips or []:
+        if "." in ip and ":" not in ip:
+            return ip
+    return None
+
+
+# ---- Subnet routing inverse — LAN clients → tailnet peers --------------
+
+
+@router.get("/destinations")
+async def get_tailnet_destinations(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """List the tailnet subnets reachable from the Slate.
+
+    Read `tailscale status --json`, walk every peer's `PrimaryRoutes`
+    (subnets the peer advertises and that the tailnet admin has approved)
+    and return them as flat entries. Used by the NetworkForm to populate
+    its « destinations atteignables » list — the operator then ticks
+    which ones THIS network should be allowed to reach.
+
+    Peer-own IPs (the /32 and /128 entries that every peer carries for
+    itself) are excluded so the UI doesn't display noise. CGNAT
+    (100.64.0.0/10) entries are also filtered out — they're the peers'
+    Tailscale own IPs, never useful as routed destinations.
+    """
+    import json as _json
+    try:
+        r = await ssh.run("tailscale status --json", timeout=15)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"tailscale status failed: {exc}",
+        ) from exc
+    try:
+        data = _json.loads(r.stdout)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"tailscale status returned invalid JSON: {exc}",
+        ) from exc
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for _pid, p in (data.get("Peer") or {}).items():
+        host = p.get("HostName") or p.get("DNSName") or "?"
+        for cidr in p.get("PrimaryRoutes") or []:
+            if cidr.endswith("/32") or cidr.endswith("/128"):
+                continue
+            if cidr.startswith("100."):
+                continue
+            if cidr in seen:
+                for entry in out:
+                    if entry["cidr"] == cidr and host not in entry["peers"]:
+                        entry["peers"].append(host)
+                continue
+            seen.add(cidr)
+            out.append({"cidr": cidr, "peers": [host]})
+    out.sort(key=lambda e: e["cidr"])
+    return {"destinations": out}
+
+
+@router.get("/forwarding")
+async def get_forwarding(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Live snapshot of the reverse-routing posture on the Slate.
+
+    Lists every L3-managed local subnet and the (zone, dest_cidr) pairs
+    currently active in iptables — both as ACCEPT forward rules and as
+    SNAT rules. The fine-grained editor lives in the NetworkForm and
+    persists into `NetworkRow.tailnet_destinations` ; this endpoint is
+    read-only and used for diff/preview displays.
+    """
+    state = await discover_forwarding_state(ssh)
+    return {
+        "tailscale_zone_exists": state.tailscale_zone_exists,
+        "tailscale_self_ip": state.tailscale_self_ip,
+        "subnets": [
+            {
+                "slug": s.slug,
+                "zone": s.zone,
+                "iface": s.iface,
+                "cidr": s.cidr,
+                "ipaddr": s.ipaddr,
+            }
+            for s in state.subnets
+        ],
+        "active_fwd": [
+            {"zone": z, "dest_cidr": c} for z, c in sorted(state.active_fwd)
+        ],
+        "active_snat": [
+            {"zone": z, "dest_cidr": c} for z, c in sorted(state.active_snat)
+        ],
+    }
+
+
+@router.post("/forwarding/reconcile")
+async def reconcile_forwarding_from_catalog(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Recompute the reverse routing from the Network catalog and apply.
+
+    Walks every Network row, reads its `tailnet_destinations` list, and
+    builds the canonical (src_zone, src_cidr, dest_cidr, mode) rule set.
+    Then calls the forwarding reconciler to align the live firewall.
+    Idempotent. Called after a NetworkForm save and from any « re-pousser
+    le routage LAN » button.
+    """
+    sf = make_session_factory(request.app.state.db_engine)
+    from app.networks.store import NetworkStore  # noqa: PLC0415 - lazy
+    nets = await NetworkStore(sf).list_all()
+    state = await discover_forwarding_state(ssh)
+    zone_by_slug = {s.slug: s.zone for s in state.subnets}
+    cidr_by_slug = {s.slug: s.cidr for s in state.subnets}
+
+    rules: list[TailnetDesiredRule] = []
+    for n in nets:
+        src_zone = zone_by_slug.get(n.slug)
+        src_cidr = cidr_by_slug.get(n.slug) or n.subnet_cidr
+        if not src_zone:
+            continue
+        for dest in n.tailnet_destinations or []:
+            cidr = dest.cidr if hasattr(dest, "cidr") else dest.get("cidr")
+            mode = dest.mode if hasattr(dest, "mode") else dest.get("mode")
+            via = (
+                dest.via if hasattr(dest, "via") else dest.get("via", "tailnet")
+            )
+            if not cidr or mode not in ("routed", "snat"):
+                continue
+            if via not in ("tailnet", "wan", "proton", "tor"):
+                via = "tailnet"
+            rules.append(
+                TailnetDesiredRule(
+                    src_zone=src_zone,
+                    src_cidr=src_cidr,
+                    dest_cidr=cidr,
+                    mode=mode,
+                    via=via,
+                )
+            )
+
+    try:
+        report = await apply_forwarding_state(ssh, desired_rules=rules)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc),
+        ) from exc
+    logger.info(
+        "tailscale.forwarding.reconciled",
+        username=user.username,
+        rules=len(rules),
+        snat=sum(1 for r in rules if r.mode == "snat"),
+        routed=sum(1 for r in rules if r.mode == "routed"),
+    )
+    return report
 
 
 @router.post("/connect", response_model=TailscaleConnectResponse)

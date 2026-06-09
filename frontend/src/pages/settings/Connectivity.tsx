@@ -27,11 +27,13 @@ import {
   getControllerUrls,
   updateControllerUrls,
 } from "@/api/settings";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
 
 export default function Connectivity() {
+  const t = useT();
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["settings", "controller-urls"],
@@ -76,16 +78,16 @@ export default function Connectivity() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Globe className="cyber-glow h-3 w-3" />
-          settings · connectivity
+          {t("set_connectivity.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="CONNECTIVITY"
+          data-text={t("set_connectivity.title").toUpperCase()}
         >
-          CONNECTIVITY
+          {t("set_connectivity.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          URLs où le Slate peut JOINDRE le controller (callbacks)
+          {t("set_connectivity.description")}
         </p>
       </header>
 

@@ -142,3 +142,44 @@ class TailscaleAdminAPI:
             if exc.status_code in (403, 404):
                 return {}
             raise
+
+    # ---- Subnet route approval (POST helpers) -------------------------
+
+    async def device_routes(self, device_id: str) -> dict[str, Any]:
+        """Return `{advertisedRoutes, enabledRoutes}` for one device.
+
+        `advertisedRoutes` is what the node asked the control plane to
+        publish ; `enabledRoutes` is the subset the tailnet admin has
+        approved — those are the only routes the peers actually use.
+        """
+        return await self._get(f"/device/{device_id}/routes")
+
+    async def set_device_routes(
+        self, device_id: str, routes: list[str],
+    ) -> dict[str, Any]:
+        """Approve the given list as the enabled routes for `device_id`.
+
+        Replaces the previous set (idempotent across calls). Empty list
+        clears all approved routes for the device. Tailscale only enables
+        routes that are also in `advertisedRoutes` — passing a route the
+        device hasn't asked to publish is a no-op for that route.
+        """
+        try:
+            r = await self._client.post(
+                f"/device/{device_id}/routes",
+                json={"routes": routes},
+            )
+        except httpx.HTTPError as exc:
+            raise TailscaleAdminAPIError(f"network error: {exc}") from exc
+        if r.status_code == 401:
+            raise TailscaleAdminAPIError("PAT rejected (401)", 401)
+        if r.status_code == 403:
+            raise TailscaleAdminAPIError("PAT lacks routes:write (403)", 403)
+        if r.status_code >= 400:
+            raise TailscaleAdminAPIError(
+                f"HTTP {r.status_code}: {r.text[:200]}", r.status_code,
+            )
+        try:
+            return r.json()
+        except ValueError:
+            return {"ok": True}

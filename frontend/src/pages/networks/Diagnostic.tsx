@@ -6,19 +6,24 @@
  */
 
 import NetworkDiagPanel from "@/components/NetworkDiagPanel";
+import { useT } from "@/lib/i18n";
 
 export default function NetworkDiagnostic() {
+  const t = useT();
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
-          diagnostic réseau · live L2/L3
+          {t("nav.section_network")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="DIAGNOSTIC">
-          DIAGNOSTIC
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("net_diagnostic.title").toUpperCase()}
+        >
+          {t("net_diagnostic.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          interfaces · routes · voisins ARP/NDP · règles — sondé en direct sur le Slate
+          {t("net_diagnostic.subtitle")}
         </p>
       </header>
 

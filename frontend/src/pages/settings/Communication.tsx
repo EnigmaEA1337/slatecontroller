@@ -23,6 +23,7 @@ import {
   updateSlateComms,
   type SlateComms,
 } from "@/api/settings";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -74,6 +75,7 @@ function PreviewThumb({ kind, title, target }: { kind: MessageKind; title: strin
 
 
 export default function Communication() {
+  const t = useT();
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["settings", "slate-comms"],
@@ -126,16 +128,16 @@ export default function Communication() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <MessageSquare className="cyber-glow h-3 w-3" />
-          settings · communication
+          {t("set_communication.subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="COMMUNICATION"
+          data-text={t("set_communication.title").toUpperCase()}
         >
-          COMMUNICATION
+          {t("set_communication.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          Ce que le controller affiche sur l'écran du Slate
+          {t("set_communication.description")}
         </p>
       </header>
 

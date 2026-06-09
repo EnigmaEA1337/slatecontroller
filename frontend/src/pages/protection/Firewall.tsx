@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { api } from "@/api/client";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 
 type Origin = "slate-ctrl" | "gl-inet" | "openwrt" | "user";
@@ -138,6 +139,7 @@ function protoLabel(p: string | string[] | null): string {
 }
 
 export default function FirewallPage() {
+  const t = useT();
   const q = useQuery({
     queryKey: ["firewall", "snapshot"],
     queryFn: fetchSnapshot,
@@ -174,13 +176,16 @@ export default function FirewallPage() {
       <header className="mb-6">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Flame className="cyber-glow h-3 w-3" />
-          protection · firewall
+          {t("firewall.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="FIREWALL">
-          FIREWALL
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("firewall.title").toUpperCase()}
+        >
+          {t("firewall.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          snapshot live des règles UCI sur le Slate · refresh 30 s · read-only
+          {t("firewall.description")}
         </p>
       </header>
 

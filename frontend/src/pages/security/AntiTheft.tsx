@@ -23,9 +23,11 @@ import {
   testAntiTheftAction,
   updateAntiTheftConfig,
 } from "@/api/anti-theft";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 export default function AntiTheftPage() {
+  const t = useT();
   const qc = useQueryClient();
   const cfg = useQuery({
     queryKey: ["security", "anti-theft"],
@@ -73,7 +75,7 @@ export default function AntiTheftPage() {
   if (!cfg.data) {
     return (
       <div className="cyber-card p-4 text-xs text-[color:var(--color-cyber-muted)]">
-        Chargement de la politique anti-theft…
+        {t("common.loading")}
       </div>
     );
   }
@@ -97,14 +99,11 @@ export default function AntiTheftPage() {
   return (
     <div className="space-y-4">
       <header className="cyber-label flex items-center gap-2">
-        <ShieldAlert className="h-3 w-3" /> anti-theft · mode autonome
+        <ShieldAlert className="h-3 w-3" /> {t("anti_theft.title")}
       </header>
 
       <p className="text-xs text-[color:var(--color-cyber-muted)] max-w-2xl">
-        Quand le mode autonome est activ&eacute;, un d&eacute;passement du seuil de PIN
-        rat&eacute;s d&eacute;clenche l'action choisie automatiquement. La protection 3
-        tentatives / 60s reste active dans tous les cas — l'autonome ajoute
-        une escalade au-dessus.
+        {t("anti_theft.subtitle")}
       </p>
 
       <section className="cyber-card p-4 space-y-3">

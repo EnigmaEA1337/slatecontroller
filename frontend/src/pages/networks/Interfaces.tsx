@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import { api } from "@/api/client";
+import { useT } from "@/lib/i18n";
 import { errorMessage } from "@/lib/error-utils";
 
 interface DiagAddress {
@@ -134,6 +135,7 @@ function OperBadge({ state }: { state: string | null }) {
 }
 
 export default function NetworkInterfacesPage() {
+  const t = useT();
   const q = useQuery({
     queryKey: ["networks", "interfaces"],
     queryFn: fetchDiag,
@@ -156,13 +158,16 @@ export default function NetworkInterfacesPage() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Cable className="cyber-glow h-3 w-3" />
-          réseau · interfaces
+          {t("nav.section_network")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="INTERFACES">
-          INTERFACES
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("net_interfaces.title").toUpperCase()}
+        >
+          {t("net_interfaces.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          live snapshot des ifaces L2/L3 du Slate · refresh 10 s
+          {t("net_interfaces.subtitle")}
         </p>
       </header>
 

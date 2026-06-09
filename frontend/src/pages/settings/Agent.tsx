@@ -34,11 +34,13 @@ import {
   type AgentApplyResult,
 } from "@/api/agent";
 import ButtonCyclePanel from "@/components/ButtonCyclePanel";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
 
 export default function Agent() {
+  const t = useT();
   const qc = useQueryClient();
   const status = useQuery({
     queryKey: ["agent", "status"],
@@ -71,13 +73,16 @@ export default function Agent() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Cpu className="cyber-glow h-3 w-3" />
-          settings · agent local
+          {t("set_agent.subtitle")}
         </div>
-        <h1 className="cyber-display cyber-glitch text-4xl" data-text="AGENT">
-          AGENT
+        <h1
+          className="cyber-display cyber-glitch text-4xl"
+          data-text={t("set_agent.title").toUpperCase()}
+        >
+          {t("set_agent.title").toUpperCase()}
         </h1>
         <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          slate-ctrl — apply local, profils en JSON, autonomie réseau
+          {t("set_agent.description")}
         </p>
       </header>
 

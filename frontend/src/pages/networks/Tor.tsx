@@ -17,6 +17,7 @@ import TorStatusCard from "@/components/TorStatusCard";
 import { getTorStatus } from "@/api/tor";
 import { listNetworks } from "@/api/networks";
 import { flagFor } from "@/lib/country-coords";
+import { useT } from "@/lib/i18n";
 import type { NetworkPublic } from "@/types/network";
 import type { TorCircuitInfo, TorRelayHop } from "@/types/tor";
 
@@ -35,6 +36,7 @@ import type { TorCircuitInfo, TorRelayHop } from "@/types/tor";
  * decisions next to their network.
  */
 export default function ProtectionTor() {
+  const t = useT();
   const networks = useQuery({
     queryKey: ["networks"],
     queryFn: listNetworks,
@@ -65,17 +67,14 @@ export default function ProtectionTor() {
       <header className="mb-8">
         <div className="cyber-label mb-2 flex items-center gap-2">
           <Shield className="cyber-glow h-3 w-3" />
-          réseau · routage anonymisé
+          {t("tor.networks_subtitle")}
         </div>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text="TOR"
+          data-text={t("tor.title_networks").toUpperCase()}
         >
-          TOR
+          {t("tor.title_networks").toUpperCase()}
         </h1>
-        <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
-          onion routing · 3 hops · anti-censure · per-network
-        </p>
         <p className="mt-3 max-w-2xl text-xs leading-relaxed text-zinc-400">
           Tor n'est <strong>pas un VPN</strong> — c'est un réseau d'anonymisation
           à 3 sauts (entry → middle → exit) où aucun relais ne sait à la fois

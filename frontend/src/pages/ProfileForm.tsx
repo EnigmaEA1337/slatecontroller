@@ -16,6 +16,7 @@ import type {
   TailscaleConnectionOverride,
   TailscaleHAOverride,
 } from "@/types/profile";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { errorMessage } from "@/lib/error-utils";
 
@@ -210,6 +211,7 @@ function CSVInput({
 // ---------------------------- form ---------------------------- #
 
 export default function ProfileForm() {
+  const t = useT();
   const { name } = useParams<{ name?: string }>();
   const isEdit = Boolean(name);
   const navigate = useNavigate();
@@ -300,14 +302,23 @@ export default function ProfileForm() {
           className="cyber-label mb-4 inline-flex items-center gap-1.5 hover:cyber-glow"
         >
           <ArrowLeft className="h-3 w-3" />
-          retour aux profils
+          {t("profiles.title")}
         </Link>
         <h1
           className="cyber-display cyber-glitch text-4xl"
-          data-text={isEdit ? "EDIT PROFILE" : "NEW PROFILE"}
+          data-text={(isEdit
+            ? t("profile_form.title_edit")
+            : t("profile_form.title_new")
+          ).toUpperCase()}
         >
-          {isEdit ? "EDIT PROFILE" : "NEW PROFILE"}
+          {(isEdit
+            ? t("profile_form.title_edit")
+            : t("profile_form.title_new")
+          ).toUpperCase()}
         </h1>
+        <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-[color:var(--color-cyber-muted)]">
+          {t("profile_form.subtitle")}
+        </p>
       </header>
 
       <form onSubmit={onSubmit} className="space-y-5">
