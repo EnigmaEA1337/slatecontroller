@@ -26,6 +26,11 @@ from app.tailscale.admin_api import TailscaleAdminAPI, TailscaleAdminAPIError
 from app.tailscale.admin_store import TailscaleAdminStore
 from app.tailscale.audit import TailscaleAuditor
 from app.tailscale.client import TailscaleClient
+from app.tailscale.dns_routing import (
+    DesiredDomainRule,
+    apply_state as apply_dns_routing_state,
+    discover_state as discover_dns_routing_state,
+)
 from app.tailscale.forwarding import (
     DesiredRule as TailnetDesiredRule,
     apply_state as apply_forwarding_state,
@@ -289,6 +294,22 @@ def _ipv4(ips: list[str]) -> str | None:
 # ---- Subnet routing inverse — LAN clients → tailnet peers --------------
 
 
+@router.get("/app-presets")
+async def get_app_presets(
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Catalogue of well-known application IP ranges (Netflix, Plex…).
+
+    Each entry is a labelled bundle of CIDRs. The NetworkForm UI shows
+    them as importable blocks ; on selection it expands the bundle into
+    individual TailnetDestination rows tagged with the preset's id as
+    `label`. Stateless read-only endpoint — the catalogue is hardcoded
+    in `app.tailscale.app_presets` for the MVP and refreshed manually.
+    """
+    from app.tailscale.app_presets import to_api_payload  # noqa: PLC0415
+    return {"presets": to_api_payload()}
+
+
 @router.get("/destinations")
 async def get_tailnet_destinations(
     ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
@@ -360,6 +381,9 @@ async def get_forwarding(
     return {
         "tailscale_zone_exists": state.tailscale_zone_exists,
         "tailscale_self_ip": state.tailscale_self_ip,
+        "wan_iface": state.wan_iface,
+        "proton_iface": state.proton_iface,
+        "tor_active": state.tor_active,
         "subnets": [
             {
                 "slug": s.slug,
@@ -375,6 +399,9 @@ async def get_forwarding(
         ],
         "active_snat": [
             {"zone": z, "dest_cidr": c} for z, c in sorted(state.active_snat)
+        ],
+        "active_tor": [
+            {"zone": z, "dest_cidr": c} for z, c in sorted(state.active_tor)
         ],
     }
 
@@ -438,6 +465,134 @@ async def reconcile_forwarding_from_catalog(
         rules=len(rules),
         snat=sum(1 for r in rules if r.mode == "snat"),
         routed=sum(1 for r in rules if r.mode == "routed"),
+    )
+    return report
+
+
+@router.get("/dns-routing")
+async def get_dns_routing(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Live snapshot of the DNS-based routing posture on the Slate.
+
+    Reports whether ipset is installed, where dnsmasq lives, the list of
+    active `slate_*` ipsets, and the (zone, label) pairs currently
+    matched by a mangle MARK rule. Used by the UI to flag config drift
+    and by the reconciler as the starting point of a diff/apply cycle.
+    """
+    state = await discover_dns_routing_state(ssh)
+    return {
+        "ipset_installed": state.ipset_installed,
+        "dnsmasq_path": state.dnsmasq_path,
+        "active_ipsets": sorted(state.active_ipsets),
+        "active_marks": [
+            {"zone": z, "label": l} for z, l in sorted(state.active_marks)
+        ],
+    }
+
+
+@router.post("/dns-routing/reconcile")
+async def reconcile_dns_routing_from_catalog(
+    request: Request,
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Recompute every DNS routing rule from the Network catalog and apply.
+
+    Walks every Network row, reads its `domain_routing_rules` list,
+    resolves the egress iface + SNAT source from the Slate's live
+    topology (Tailscale daemon, WAN default route, etc.) and builds the
+    canonical (zone, label, domains, via, mode, …) rule set. Then calls
+    the dns_routing reconciler. Idempotent.
+    """
+    sf = make_session_factory(request.app.state.db_engine)
+    from app.networks.store import NetworkStore  # noqa: PLC0415 - lazy
+    nets = await NetworkStore(sf).list_all()
+    fwd_state = await discover_forwarding_state(ssh)
+    zone_by_slug = {s.slug: s.zone for s in fwd_state.subnets}
+    iface_by_slug = {s.slug: s.iface for s in fwd_state.subnets}
+
+    rules: list[DesiredDomainRule] = []
+    for n in nets:
+        zone = zone_by_slug.get(n.slug)
+        iface = iface_by_slug.get(n.slug)
+        if not zone or not iface:
+            continue
+        for raw in n.domain_routing_rules or []:
+            r = raw if hasattr(raw, "label") else type(
+                "_R", (object,), {
+                    "label": raw.get("label"),
+                    "domains": raw.get("domains") or [],
+                    "mode": raw.get("mode") or "snat",
+                    "via": raw.get("via") or "tailnet",
+                },
+            )
+            if not r.label or not r.domains:
+                continue
+            mode = r.mode if r.mode in ("routed", "snat") else "snat"
+            via = r.via if r.via in ("tailnet", "wan", "proton", "tor") else "tailnet"
+            # Resolve the egress runtime info from the snapshot.
+            if via == "tailnet":
+                if not fwd_state.tailscale_zone_exists or not fwd_state.tailscale_self_ip:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=(
+                            f"rule '{r.label}' asks for via=tailnet but "
+                            "Tailscale isn't ready (no zone or no self IP)."
+                        ),
+                    )
+                egress = "tailscale0"
+                snat_ip = fwd_state.tailscale_self_ip or ""
+            elif via == "wan":
+                if not fwd_state.wan_iface:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"rule '{r.label}' asks for via=wan but no WAN iface detected.",
+                    )
+                egress = fwd_state.wan_iface
+                snat_ip = ""
+            elif via == "proton":
+                if not fwd_state.proton_iface:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"rule '{r.label}' asks for via=proton but no Proton tunnel found.",
+                    )
+                egress = fwd_state.proton_iface
+                snat_ip = ""
+            else:
+                # via=tor : DNS-based Tor routing not supported in this MVP.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"rule '{r.label}' uses via=tor — not supported "
+                        "via DNS routing yet. Use the per-network Tor "
+                        "switch (tor_route_mode) instead."
+                    ),
+                )
+            rules.append(
+                DesiredDomainRule(
+                    zone=zone,
+                    src_iface=iface,
+                    label=r.label,
+                    domains=list(r.domains),
+                    mode=mode,
+                    via=via,
+                    egress_iface=egress,
+                    egress_snat_ip=snat_ip,
+                )
+            )
+
+    try:
+        report = await apply_dns_routing_state(ssh, desired=rules)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc),
+        ) from exc
+    logger.info(
+        "tailscale.dns_routing.reconciled",
+        username=user.username,
+        rules=len(rules),
     )
     return report
 

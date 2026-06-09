@@ -48,6 +48,7 @@ def _to_public(row: NetworkRow) -> NetworkPublic:
         ssh_access=row.ssh_access,
         expose_to_tailnet=row.expose_to_tailnet,
         tailnet_destinations=list(row.tailnet_destinations or []),  # type: ignore[arg-type]
+        domain_routing_rules=list(row.domain_routing_rules or []),  # type: ignore[arg-type]
         tor_route_mode=row.tor_route_mode,  # type: ignore[arg-type]
         tor_dns_over_tor=row.tor_dns_over_tor,
         tor_kill_switch=row.tor_kill_switch,
@@ -104,6 +105,7 @@ def _copy_write_fields(row: NetworkRow, body: NetworkWrite) -> None:
     row.expose_to_tailnet = body.expose_to_tailnet
     # Pydantic model -> plain dict for JSON column persistence.
     row.tailnet_destinations = [d.model_dump() for d in body.tailnet_destinations]
+    row.domain_routing_rules = [r.model_dump() for r in body.domain_routing_rules]
     row.tor_route_mode = body.tor_route_mode
     row.tor_dns_over_tor = body.tor_dns_over_tor
     row.tor_kill_switch = body.tor_kill_switch

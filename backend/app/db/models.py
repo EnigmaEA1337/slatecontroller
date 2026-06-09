@@ -221,6 +221,13 @@ class NetworkRow(Base):
     # An empty list disables reverse routing for the network. See
     # `app/tailscale/forwarding.py` for the apply logic.
     tailnet_destinations: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # Domain-based routing rules : list of `{label, domains[], mode, via}`.
+    # Reconciler converts each rule into a dnsmasq `ipset=` directive +
+    # an iptables mangle MARK rule + a policy-routing entry, so every IP
+    # the LAN's clients resolve for one of the listed domains is steered
+    # out through the chosen egress (`via`). See `app/tailscale/dns_
+    # routing.py` for the apply logic.
+    domain_routing_rules: Mapped[list[dict]] = mapped_column(JSON, default=list)
 
     # ── Per-network Tor routing ──────────────────────────────────────
     # ``tor_route_mode``  off / transparent / socks_only

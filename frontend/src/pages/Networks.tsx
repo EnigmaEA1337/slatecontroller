@@ -1,4 +1,5 @@
 import { FormEvent, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Globe,
@@ -20,8 +21,12 @@ import {
   updateNetwork,
 } from "@/api/networks";
 import {
+  getReverseRouting,
+  listAppPresets,
   listTailnetDestinationCandidates,
+  reconcileDnsRouting,
   reconcileReverseRouting,
+  type AppPreset,
 } from "@/api/tailscale";
 import { ClickableHost } from "@/components/ClickableHost";
 import DnsProtectionWidget from "@/components/DnsProtectionWidget";
@@ -95,9 +100,11 @@ function NetworkForm({
   // the rendering code can read either independently.
   const initialDestState: Record<string, "off" | "routed" | "snat"> = {};
   const initialDestVia: Record<string, "tailnet" | "wan" | "proton" | "tor"> = {};
+  const initialDestLabel: Record<string, string> = {};
   for (const d of initial?.tailnet_destinations ?? []) {
     initialDestState[d.cidr] = d.mode;
     initialDestVia[d.cidr] = d.via ?? "tailnet";
+    if (d.label) initialDestLabel[d.cidr] = d.label;
   }
   const [tailnetDestState, setTailnetDestState] = useState<
     Record<string, "off" | "routed" | "snat">
@@ -105,11 +112,53 @@ function NetworkForm({
   const [tailnetDestVia, setTailnetDestVia] = useState<
     Record<string, "tailnet" | "wan" | "proton" | "tor">
   >(initialDestVia);
+  /** Label per CIDR — pure UI metadata used to display the source app
+   *  for destinations imported from a preset. */
+  const [tailnetDestLabel, setTailnetDestLabel] = useState<
+    Record<string, string>
+  >(initialDestLabel);
+  const appPresetsQ = useQuery({
+    queryKey: ["tailscale", "app-presets"],
+    queryFn: listAppPresets,
+    staleTime: 5 * 60_000,
+  });
+  const [presetModalOpen, setPresetModalOpen] = useState(false);
+
+  // Domain-based routing rules — independent list from
+  // tailnet_destinations. Each rule = (label, domains[], mode, via).
+  const [domainRules, setDomainRules] = useState<
+    {
+      label: string;
+      domains: string[];
+      mode: "routed" | "snat";
+      via: "tailnet" | "wan" | "proton" | "tor";
+    }[]
+  >(
+    (initial?.domain_routing_rules ?? []).map((r) => ({
+      label: r.label,
+      domains: [...r.domains],
+      mode: r.mode,
+      via: r.via,
+    })),
+  );
+  const [newDomainRuleLabel, setNewDomainRuleLabel] = useState("");
+  const [newDomainRuleDomains, setNewDomainRuleDomains] = useState("");
+  const [domainRuleError, setDomainRuleError] = useState<string | null>(null);
   const tailnetDestQ = useQuery({
     queryKey: ["tailnet", "destinations"],
     queryFn: listTailnetDestinationCandidates,
     staleTime: 30_000,
   });
+  // Live state of the egress paths — used to enable/disable the « via »
+  // dropdown options. Cached and shared across NetworkCards.
+  const routingStateQ = useQuery({
+    queryKey: ["tailscale", "forwarding"],
+    queryFn: getReverseRouting,
+    staleTime: 30_000,
+  });
+  const wanReady = !!routingStateQ.data?.wan_iface;
+  const protonReady = !!routingStateQ.data?.proton_iface;
+  const torReady = !!routingStateQ.data?.tor_active;
   // CIDR custom en cours de saisie (entrée libre). Quand l'opérateur
   // clique « Ajouter », on injecte juste l'entrée dans tailnetDestState
   // (par défaut mode 'snat' qui est le mode le plus permissif et qui
@@ -178,11 +227,14 @@ function NetworkForm({
             cidr,
             mode,
             via: tailnetDestVia[cidr] ?? "tailnet",
+            label: tailnetDestLabel[cidr] ?? "",
           })) as {
           cidr: string;
           mode: "routed" | "snat";
           via: "tailnet" | "wan" | "proton" | "tor";
+          label: string;
         }[],
+        domain_routing_rules: domainRules,
         tor_route_mode: torMode,
         tor_dns_over_tor: torDnsOverTor,
         tor_kill_switch: torKillSwitch,
@@ -204,6 +256,13 @@ function NetworkForm({
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn("post-save reverse routing reconcile failed", e);
+      }
+      try {
+        await reconcileDnsRouting();
+        queryClient.invalidateQueries({ queryKey: ["tailscale", "dns-routing"] });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("post-save DNS routing reconcile failed", e);
       }
       onClose();
     },
@@ -546,17 +605,33 @@ function NetworkForm({
                 cidr: string;
                 peers: string[];
                 discovered: boolean;
+                label: string;
               }[] = [];
               const seen = new Set<string>();
               for (const d of tailnetDestQ.data ?? []) {
-                rows.push({ cidr: d.cidr, peers: d.peers, discovered: true });
+                rows.push({
+                  cidr: d.cidr,
+                  peers: d.peers,
+                  discovered: true,
+                  label: tailnetDestLabel[d.cidr] ?? "",
+                });
                 seen.add(d.cidr);
               }
               for (const cidr of Object.keys(tailnetDestState)) {
                 if (seen.has(cidr)) continue;
-                rows.push({ cidr, peers: ["personnalisée"], discovered: false });
+                const lbl = tailnetDestLabel[cidr] ?? "";
+                rows.push({
+                  cidr,
+                  peers: [lbl ? `📦 ${lbl}` : "personnalisée"],
+                  discovered: false,
+                  label: lbl,
+                });
               }
-              rows.sort((a, b) => a.cidr.localeCompare(b.cidr));
+              // Group by label first (apps grouped together), CIDR within.
+              rows.sort((a, b) =>
+                (a.label || "zzz").localeCompare(b.label || "zzz") ||
+                a.cidr.localeCompare(b.cidr),
+              );
               return rows.length > 0 ? (
                 <table className="cyber-table">
                   <colgroup>
@@ -641,12 +716,16 @@ function NetworkForm({
                               }
                             >
                               <option value="tailnet">Tailscale</option>
-                              <option value="wan">WAN</option>
-                              <option value="proton" disabled>
-                                Proton (à venir)
+                              <option value="wan" disabled={!wanReady}>
+                                WAN{!wanReady ? " (non détecté)" : ""}
                               </option>
-                              <option value="tor" disabled>
-                                Tor (à venir)
+                              <option value="proton" disabled={!protonReady}>
+                                Proton VPN
+                                {!protonReady ? " (tunnel inactif)" : ""}
+                              </option>
+                              <option value="tor" disabled={!torReady}>
+                                Tor
+                                {!torReady ? " (daemon arrêté)" : ""}
                               </option>
                             </select>
                           </td>
@@ -675,6 +754,23 @@ function NetworkForm({
                 </table>
               ) : null;
             })()}
+
+            {/* Import preset bundle (e.g. Netflix → 9 CIDRs in one shot). */}
+            <div className="mt-2 flex items-center gap-2 text-[10px]">
+              <button
+                type="button"
+                onClick={() => setPresetModalOpen(true)}
+                className="cyber-button-ghost px-2 py-1"
+                title="Importer en un clic les CIDR connus d'une application (Netflix, Plex, etc.)"
+              >
+                📦 Importer un préset d'application
+              </button>
+              {appPresetsQ.data && (
+                <span className="text-[color:var(--color-cyber-muted)]">
+                  {appPresetsQ.data.length} presets disponibles
+                </span>
+              )}
+            </div>
 
             {/* Ajout d'une destination CIDR libre. Sert quand l'opérateur
                 veut router vers une plage qui n'est pas annoncée par un
@@ -726,6 +822,205 @@ function NetworkForm({
               existe vers <code>tailscale0</code> (ou autre, à venir en
               Phase 2 avec choix d'interface de sortie).
             </p>
+
+            {/* === Domain-based routing rules ============================== */}
+            <div className="mt-4 rounded border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)]/30 p-2">
+              <div className="cyber-label !text-[9px] mb-1 text-[color:var(--color-cyber-muted)]">
+                routage par nom de domaine
+              </div>
+              <p className="mb-2 text-[10px] text-[color:var(--color-cyber-muted)] max-w-prose">
+                Chaque règle pousse les IPs résolues pour les domaines listés
+                dans un <code>ipset</code> côté Slate, puis route ces paquets
+                vers la sortie choisie. Marche en temps réel — pas besoin de
+                connaître les CIDR à l'avance, dnsmasq les pousse au fil des
+                résolutions DNS.
+              </p>
+
+              {domainRules.length === 0 ? (
+                <div className="text-[10px] text-[color:var(--color-cyber-muted)]">
+                  Aucune règle. Ajouter une règle ci-dessous ou utiliser le
+                  bouton « 📦 Importer un préset » qui propose aussi des
+                  patterns de domaines.
+                </div>
+              ) : (
+                <table className="cyber-table">
+                  <colgroup>
+                    <col className="w-24" />
+                    <col />
+                    <col className="w-44" />
+                    <col className="w-36" />
+                    <col className="w-8" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Label</th>
+                      <th>Domaines</th>
+                      <th>Mode</th>
+                      <th>Sortie via</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {domainRules.map((rule, idx) => (
+                      <tr key={`${rule.label}-${idx}`}>
+                        <td className="font-mono text-[10px]">{rule.label}</td>
+                        <td className="font-mono text-[10px] text-[color:var(--color-cyber-muted)]">
+                          {rule.domains.join(", ")}
+                        </td>
+                        <td>
+                          <div className="flex gap-3 text-[10px]">
+                            {(["routed", "snat"] as const).map((val) => (
+                              <label
+                                key={val}
+                                className="inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <input
+                                  type="radio"
+                                  name={`dnsrule-mode-${idx}`}
+                                  checked={rule.mode === val}
+                                  onChange={() =>
+                                    setDomainRules((prev) =>
+                                      prev.map((r, i) =>
+                                        i === idx ? { ...r, mode: val } : r,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <span>
+                                  {val === "routed" ? "Routé" : "NAT"}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </td>
+                        <td>
+                          <select
+                            value={rule.via}
+                            onChange={(e) =>
+                              setDomainRules((prev) =>
+                                prev.map((r, i) =>
+                                  i === idx
+                                    ? {
+                                        ...r,
+                                        via: e.target
+                                          .value as typeof rule.via,
+                                      }
+                                    : r,
+                                ),
+                              )
+                            }
+                            className="cyber-input w-full px-1 py-0.5 text-[10px]"
+                          >
+                            <option value="tailnet">Tailscale</option>
+                            <option value="wan" disabled={!wanReady}>
+                              WAN{!wanReady ? " (non détecté)" : ""}
+                            </option>
+                            <option value="proton" disabled={!protonReady}>
+                              Proton VPN
+                              {!protonReady ? " (tunnel inactif)" : ""}
+                            </option>
+                            <option value="tor" disabled>
+                              Tor (DNS routing N/A)
+                            </option>
+                          </select>
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDomainRules((prev) =>
+                                prev.filter((_, i) => i !== idx),
+                              )
+                            }
+                            className="text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-warn)]"
+                            title="Retirer cette règle"
+                          >
+                            ✕
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <div className="mt-2 flex flex-wrap items-end gap-2 text-[10px]">
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-[color:var(--color-cyber-muted)]">
+                    label
+                  </div>
+                  <input
+                    type="text"
+                    value={newDomainRuleLabel}
+                    onChange={(e) => {
+                      setNewDomainRuleLabel(
+                        e.target.value.toLowerCase().replace(
+                          /[^a-z0-9_]/g,
+                          "",
+                        ),
+                      );
+                      setDomainRuleError(null);
+                    }}
+                    placeholder="netflix"
+                    className="cyber-input w-28 px-2 py-1 font-mono text-[10px]"
+                  />
+                </div>
+                <div className="flex-1 min-w-[200px]">
+                  <div className="text-[9px] uppercase tracking-wider text-[color:var(--color-cyber-muted)]">
+                    domaines (virgule ou espace)
+                  </div>
+                  <input
+                    type="text"
+                    value={newDomainRuleDomains}
+                    onChange={(e) => {
+                      setNewDomainRuleDomains(e.target.value);
+                      setDomainRuleError(null);
+                    }}
+                    placeholder="netflix.com, nflxvideo.net"
+                    className="cyber-input w-full px-2 py-1 font-mono text-[10px]"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const lbl = newDomainRuleLabel.trim();
+                    const domains = newDomainRuleDomains
+                      .split(/[,\s]+/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    if (!lbl) {
+                      setDomainRuleError("Label requis");
+                      return;
+                    }
+                    if (domains.length === 0) {
+                      setDomainRuleError("Au moins un domaine requis");
+                      return;
+                    }
+                    if (domainRules.some((r) => r.label === lbl)) {
+                      setDomainRuleError(
+                        "Une règle avec ce label existe déjà",
+                      );
+                      return;
+                    }
+                    setDomainRules((prev) => [
+                      ...prev,
+                      { label: lbl, domains, mode: "snat", via: "tailnet" },
+                    ]);
+                    setNewDomainRuleLabel("");
+                    setNewDomainRuleDomains("");
+                    setDomainRuleError(null);
+                  }}
+                  className="cyber-button-ghost px-2 py-1"
+                >
+                  ➕ Ajouter règle
+                </button>
+                {domainRuleError && (
+                  <span className="text-[color:var(--color-cyber-warn)]">
+                    ⚠ {domainRuleError}
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -856,7 +1151,144 @@ function NetworkForm({
           Annuler
         </button>
       </div>
+
+      {presetModalOpen && appPresetsQ.data && (
+        <AppPresetImportModal
+          presets={appPresetsQ.data}
+          alreadyChosen={tailnetDestState}
+          onImport={(preset) => {
+            // Add CIDRs to the destinations list.
+            setTailnetDestState((prev) => {
+              const next = { ...prev };
+              for (const cidr of preset.cidrs) next[cidr] = "snat";
+              return next;
+            });
+            setTailnetDestVia((prev) => {
+              const next = { ...prev };
+              for (const cidr of preset.cidrs) {
+                if (!next[cidr]) next[cidr] = "tailnet";
+              }
+              return next;
+            });
+            setTailnetDestLabel((prev) => {
+              const next = { ...prev };
+              for (const cidr of preset.cidrs) next[cidr] = preset.id;
+              return next;
+            });
+            // Also add a matching domain rule if the preset carries
+            // DNS patterns and no rule with this label exists yet.
+            if (preset.domains.length > 0) {
+              setDomainRules((prev) => {
+                if (prev.some((r) => r.label === preset.id)) return prev;
+                return [
+                  ...prev,
+                  {
+                    label: preset.id,
+                    domains: [...preset.domains],
+                    mode: "snat",
+                    via: "tailnet",
+                  },
+                ];
+              });
+            }
+            setPresetModalOpen(false);
+          }}
+          onClose={() => setPresetModalOpen(false)}
+        />
+      )}
     </form>
+  );
+}
+
+function AppPresetImportModal({
+  presets,
+  alreadyChosen,
+  onImport,
+  onClose,
+}: {
+  presets: AppPreset[];
+  alreadyChosen: Record<string, "off" | "routed" | "snat">;
+  onImport: (preset: AppPreset) => void;
+  onClose: () => void;
+}) {
+  // Portal to document.body so the modal escapes the parent form's
+  // `clip-path` containing block (otherwise `position: fixed` would be
+  // clipped to the form rectangle instead of the viewport).
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="cyber-card cyber-card-accent w-full max-w-2xl p-5"
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="cyber-display cyber-glow text-lg">
+            IMPORTER UN PRESET D'APPLICATION
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="border border-transparent p-1.5 text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+          >
+            ✕
+          </button>
+        </div>
+        <p className="mb-3 text-[11px] text-[color:var(--color-cyber-muted)] max-w-prose">
+          Les CIDR connus de l'application sélectionnée seront ajoutés à la
+          liste des destinations atteignables (mode SNAT, via Tailscale par
+          défaut — modifiable ensuite ligne par ligne). Snapshot du
+          catalogue ; pour Netflix par exemple, les ranges de l'AS 2906
+          (Open Connect) sont preloadés. Toujours vérifier après import si
+          un nouveau range a été publié récemment.
+        </p>
+        <table className="cyber-table">
+          <colgroup>
+            <col className="w-32" />
+            <col />
+            <col className="w-20" />
+            <col className="w-24" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Application</th>
+              <th>Description</th>
+              <th>CIDRs</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {presets.map((p) => {
+              const overlap = p.cidrs.filter((c) => c in alreadyChosen).length;
+              return (
+                <tr key={p.id}>
+                  <td className="font-mono text-[11px]">{p.name}</td>
+                  <td className="text-[10px] text-[color:var(--color-cyber-muted)]">
+                    {p.description}
+                  </td>
+                  <td className="font-mono text-[10px] text-[color:var(--color-cyber-muted)]">
+                    {p.cidrs.length}
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      onClick={() => onImport(p)}
+                      className="cyber-button-ghost px-2 py-0.5 text-[10px]"
+                    >
+                      {overlap > 0
+                        ? `Importer (+${p.cidrs.length - overlap})`
+                        : "Importer"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

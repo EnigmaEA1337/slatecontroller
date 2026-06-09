@@ -117,9 +117,16 @@ export interface ReverseRoutingSubnet {
 export interface ReverseRoutingState {
   tailscale_zone_exists: boolean;
   tailscale_self_ip: string | null;
+  /** WAN egress interface auto-detected from the default route. */
+  wan_iface: string | null;
+  /** Proton VPN tunnel interface if one is configured + up. null = not ready. */
+  proton_iface: string | null;
+  /** True when the Tor daemon is running and TransPort is listening. */
+  tor_active: boolean;
   subnets: ReverseRoutingSubnet[];
   active_fwd: TailnetForwardingActivePair[];
   active_snat: TailnetForwardingActivePair[];
+  active_tor: TailnetForwardingActivePair[];
 }
 
 export interface ReverseRoutingReconcileReport {
@@ -136,6 +143,41 @@ export async function getReverseRouting(): Promise<ReverseRoutingState> {
     { timeout: 30_000 },
   );
   return data;
+}
+
+export interface AppPreset {
+  id: string;
+  name: string;
+  description: string;
+  cidrs: string[];
+  /** DNS names matching this app — fed to dnsmasq for the DNS-routing
+   *  mode. May be empty for very loose ASN-only presets. */
+  domains: string[];
+}
+
+export interface DnsRoutingReconcileReport {
+  ok: boolean;
+  applied_rules: number;
+  ipsets: string[];
+  destroyed_orphans: string[];
+  reload_output?: string;
+}
+
+export async function reconcileDnsRouting(): Promise<DnsRoutingReconcileReport> {
+  const { data } = await api.post<DnsRoutingReconcileReport>(
+    "/api/tailscale/dns-routing/reconcile",
+    undefined,
+    { timeout: 60_000 },
+  );
+  return data;
+}
+
+export async function listAppPresets(): Promise<AppPreset[]> {
+  const { data } = await api.get<{ presets: AppPreset[] }>(
+    "/api/tailscale/app-presets",
+    { timeout: 10_000 },
+  );
+  return data.presets;
 }
 
 export async function listTailnetDestinationCandidates(): Promise<

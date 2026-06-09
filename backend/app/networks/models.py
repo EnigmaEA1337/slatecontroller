@@ -31,6 +31,45 @@ TailnetRouteMode = Literal["routed", "snat"]
 TailnetRouteVia = Literal["tailnet", "wan", "proton", "tor"]
 
 
+class DomainRoutingRule(BaseModel):
+    """Route every IP that DNS resolves for `domains` out through `via`.
+
+    Concretely : the slate-ctrl agent pushes one
+    `ipset=/<domain>/slate_<zone>_<label>` directive to dnsmasq's
+    `/etc/dnsmasq.d/slate-ctrl-policies.conf` per (rule, domain). Each
+    time a client of the parent network resolves one of these domains
+    (through dnsmasq, the primary resolver on the Slate), the resolved
+    IP lands in the ipset. An iptables `mangle PREROUTING` rule then
+    matches that ipset on destination + slaps a fwmark on the packet.
+    Policy routing finally steers the packet out via the iface chosen
+    by `via`.
+
+    `mode` follows the same convention as `TailnetDestination` :
+      * routed : keep the LAN client source IP
+      * snat   : MASQUERADE/SNAT on the egress iface
+
+    `label` is mandatory and used as the ipset name suffix — keep it
+    short (~12 chars max), alphanumeric, no spaces. The full ipset name
+    is `slate_<zone>_<label>` and is capped at 31 chars by netfilter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(
+        min_length=1, max_length=24,
+        pattern=r"^[a-z0-9_]+$",
+        description="Short identifier (lowercase + digits + underscore).",
+    )
+    domains: list[str] = Field(
+        default_factory=list, min_length=1,
+        description="List of DNS names. Wildcards supported by dnsmasq : "
+                    "`.example.com` matches `example.com` and any subdomain. "
+                    "Plain `example.com` only matches that exact name.",
+    )
+    mode: TailnetRouteMode = Field(default="snat")
+    via: TailnetRouteVia = Field(default="tailnet")
+
+
 class TailnetDestination(BaseModel):
     """One destination CIDR the parent LAN is allowed to reach + the NAT
     mode and egress path. Stored as a JSON list on
@@ -59,8 +98,17 @@ class TailnetDestination(BaseModel):
         default="tailnet",
         description="Egress path. 'tailnet' (default) routes via "
                     "tailscale0 ; 'wan' via the WAN interface ; 'proton' "
-                    "via the Proton VPN tunnel (NOT YET IMPLEMENTED) ; "
-                    "'tor' via the Tor TransPort (NOT YET IMPLEMENTED).",
+                    "via the Proton VPN tunnel ; 'tor' via the Tor "
+                    "TransPort.",
+    )
+    label: str = Field(
+        default="",
+        max_length=64,
+        description="Optional free-form label, used by the UI to group "
+                    "destinations by the application preset they came from "
+                    "(e.g. 'netflix', 'plex'). Empty for manually entered "
+                    "destinations. Has no effect on the reconciler ; it's "
+                    "pure UI metadata.",
     )
 
 
@@ -90,6 +138,10 @@ class NetworkPublic(BaseModel):
     expose_to_tailnet: bool
     # Per-destination reverse routing.
     tailnet_destinations: list[TailnetDestination] = []
+    # Domain-based routing rules : route every IP resolved for a domain
+    # through a chosen egress. Backed by dnsmasq+ipset+fwmark+policy
+    # routing on the Slate. Empty list = no domain rules.
+    domain_routing_rules: list[DomainRoutingRule] = []
     # Per-network Tor routing. See db/models.py NetworkRow for the
     # semantics of each field.
     tor_route_mode: TorRouteMode = "off"
@@ -198,6 +250,17 @@ class NetworkWrite(BaseModel):
             "network. Destinations are discovered from `tailscale "
             "status --json` (subnets advertised by other peers and "
             "approved in the tailnet admin)."
+        ),
+    )
+    domain_routing_rules: list[DomainRoutingRule] = Field(
+        default_factory=list,
+        description=(
+            "Domain-based routing rules : each entry routes every IP "
+            "DNS resolves for `domains` out through `via`, using "
+            "dnsmasq+ipset+fwmark on the Slate. The clients keep using "
+            "the regular DNS resolver (AdGuard → dnsmasq) ; behind the "
+            "scenes the resolved IPs get added to a per-rule ipset and "
+            "policy routing steers them. Empty list = no domain rules."
         ),
     )
 

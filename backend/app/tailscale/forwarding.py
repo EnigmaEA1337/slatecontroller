@@ -64,6 +64,17 @@ logger = structlog.get_logger(__name__)
 TS_ZONE_NAME = "tailscale0"
 FWD_TAG_PREFIX = "SC_FR_TS_FWD_"
 SNAT_TAG_PREFIX = "SC_FR_TS_SNAT_"
+# Tor uses a different rule shape : DNAT REDIRECT in PREROUTING instead
+# of a FORWARD+SNAT pair. We tag those with their own prefix so the
+# flush + persistence steps know what to look for.
+TOR_TAG_PREFIX = "SC_FR_TS_TOR_"
+
+# Tor daemon listening ports — match the OpenWrt/GL.iNet defaults baked
+# into the `tor` UCI config. `TransPort` is the transparent-proxy TCP
+# port ; `DNSPort` resolves through the network so we don't leak DNS to
+# the WAN resolver.
+TOR_TRANS_PORT = 9040
+TOR_DNS_PORT = 9053
 
 BLOCK_BEGIN = (
     "### SC_FR_TS_SNAT block - managed by slate-controller - do not edit ###"
@@ -116,10 +127,20 @@ class ForwardingSnapshot:
     # WAN egress interface — needed by the reconciler when a rule asks
     # for via='wan'. None if the WAN can't be detected.
     wan_iface: str | None = None
+    # Proton VPN tunnel interface (if any). None when Proton is not set
+    # up. We accept any name that starts with `proton`, `wgproton`, or
+    # is a WireGuard `wg*` iface — the actual name depends on the user's
+    # Proton config (UCI `wireguard_proton`, manual `proton0`, etc.).
+    proton_iface: str | None = None
+    # True when a running Tor daemon listens on the expected TransPort.
+    # Used to validate via='tor' rules before applying them.
+    tor_active: bool = False
     # set of (zone, dest_cidr) pairs currently SNAT'd
     active_snat: set[tuple[str, str]] = field(default_factory=set)
     # set of (zone, dest_cidr) pairs currently FORWARD'd (routed or snat)
     active_fwd: set[tuple[str, str]] = field(default_factory=set)
+    # set of (zone, dest_cidr) pairs currently TOR-REDIRECT'd
+    active_tor: set[tuple[str, str]] = field(default_factory=set)
 
 
 def _dest_slug(cidr: str) -> str:
@@ -133,6 +154,10 @@ def _fwd_tag(zone: str, cidr: str) -> str:
 
 def _snat_tag(zone: str, cidr: str) -> str:
     return f"{SNAT_TAG_PREFIX}{zone.upper()}_{_dest_slug(cidr)}"
+
+
+def _tor_tag(zone: str, cidr: str, proto: str) -> str:
+    return f"{TOR_TAG_PREFIX}{zone.upper()}_{_dest_slug(cidr)}_{proto.upper()}"
 
 
 # ---------------------------------------------------------------------
@@ -157,19 +182,38 @@ async def discover_state(ssh: SlateSSH) -> ForwardingSnapshot:
         # when no default route is present.
         "ip -4 route show default 2>/dev/null | awk '{print $5}' | head -1 "
         "|| uci -q get network.wan.device || true; "
+        "echo '---PROTON_IFACE---'; "
+        # Any WireGuard / Proton-tagged interface. We grep the L3 set so
+        # an iface with no IPv4 (down) doesn't get reported.
+        "ip -4 -o addr show 2>/dev/null "
+        "| awk '{print $2}' "
+        "| grep -E '^(proton[0-9]*|wgproton[0-9]*|wg-proton|wg[0-9]+)$' "
+        "| head -1; "
+        "echo '---TOR_ACTIVE---'; "
+        # Tor daemon test : a real `tor` process (excluding lookups via "
+        # pgrep self-match), and TransPort actually listening.
+        "pgrep -x tor >/dev/null && "
+        f"netstat -tln 2>/dev/null | grep -q ':{TOR_TRANS_PORT} ' "
+        "&& echo yes || echo no; "
         "echo '---SNAT_TAGS---'; "
         f"iptables -t nat -S POSTROUTING 2>/dev/null "
         f"| grep -E -- '--comment {SNAT_TAG_PREFIX}' || true; "
         "echo '---FWD_TAGS---'; "
         f"iptables -S 2>/dev/null "
-        f"| grep -E -- '--comment {FWD_TAG_PREFIX}' || true"
+        f"| grep -E -- '--comment {FWD_TAG_PREFIX}' || true; "
+        "echo '---TOR_TAGS---'; "
+        f"iptables -t nat -S PREROUTING 2>/dev/null "
+        f"| grep -E -- '--comment {TOR_TAG_PREFIX}' || true"
     )
     try:
         r = await ssh.run(cmd, timeout=20)
     except SlateSSHError as exc:
         raise RuntimeError(f"SSH discover failed: {exc}") from exc
     parsed = _parse_uci_dump(r.stdout)
-    nets, zones, ts_ip, wan_iface, snat_tags, fwd_tags = parsed
+    (
+        nets, zones, ts_ip, wan_iface, proton_iface, tor_active,
+        snat_tags, fwd_tags, tor_tags,
+    ) = parsed
     ts_zone_exists = TS_ZONE_NAME in zones
 
     subnets: list[LocalSubnet] = []
@@ -196,14 +240,28 @@ async def discover_state(ssh: SlateSSH) -> ForwardingSnapshot:
     # Decode tags into (zone, dest_cidr) pairs.
     active_snat = _tags_to_pairs(snat_tags, SNAT_TAG_PREFIX, subnets)
     active_fwd = _tags_to_pairs(fwd_tags, FWD_TAG_PREFIX, subnets)
+    # Tor tags include a trailing _TCP/_UDP suffix — strip it so the
+    # (zone, dest_cidr) pair shape stays uniform with the other sets.
+    active_tor: set[tuple[str, str]] = set()
+    for t in tor_tags:
+        for suffix in ("_TCP", "_UDP"):
+            if t.endswith(suffix):
+                base = t[: -len(suffix)]
+                pair = _decode_tag(base, TOR_TAG_PREFIX, subnets)
+                if pair:
+                    active_tor.add(pair)
+                break
 
     return ForwardingSnapshot(
         subnets=subnets,
         tailscale_zone_exists=ts_zone_exists,
         tailscale_self_ip=ts_ip,
         wan_iface=wan_iface,
+        proton_iface=proton_iface,
+        tor_active=tor_active,
         active_snat=active_snat,
         active_fwd=active_fwd,
+        active_tor=active_tor,
     )
 
 
@@ -214,25 +272,32 @@ def _tags_to_pairs(
 ) -> set[tuple[str, str]]:
     """Reverse the `<PREFIX><UPPERZONE>_<DESTSLUG>` encoding into the
     canonical pairs (zone, dest_cidr)."""
-    zones_by_upper = {s.zone.upper(): s.zone for s in subnets}
     out: set[tuple[str, str]] = set()
     for tag in tags:
-        rest = tag[len(prefix):]
-        # The destslug is the *suffix* — we need the zone name first.
-        # Strategy : try every known zone, longest-prefix match.
-        for upper_zone in sorted(zones_by_upper.keys(), key=len, reverse=True):
-            if rest.startswith(upper_zone + "_"):
-                dest_slug = rest[len(upper_zone) + 1:]
-                # Reverse the slugify : underscores back to dots + one /.
-                # Heuristic : last underscore separates the prefix length.
-                if "_" not in dest_slug:
-                    break
-                parts = dest_slug.rsplit("_", 1)
-                head, prefix_len = parts[0], parts[1]
-                cidr = head.replace("_", ".") + "/" + prefix_len
-                out.add((zones_by_upper[upper_zone], cidr))
-                break
+        pair = _decode_tag(tag, prefix, subnets)
+        if pair:
+            out.add(pair)
     return out
+
+
+def _decode_tag(
+    tag: str, prefix: str, subnets: list[LocalSubnet],
+) -> tuple[str, str] | None:
+    """Decode one tag into (zone, dest_cidr). None when the tag doesn't
+    match the expected shape or references an unknown zone."""
+    zones_by_upper = {s.zone.upper(): s.zone for s in subnets}
+    if not tag.startswith(prefix):
+        return None
+    rest = tag[len(prefix):]
+    for upper_zone in sorted(zones_by_upper.keys(), key=len, reverse=True):
+        if rest.startswith(upper_zone + "_"):
+            dest_slug = rest[len(upper_zone) + 1:]
+            if "_" not in dest_slug:
+                return None
+            head, prefix_len = dest_slug.rsplit("_", 1)
+            cidr = head.replace("_", ".") + "/" + prefix_len
+            return (zones_by_upper[upper_zone], cidr)
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -258,19 +323,10 @@ async def apply_state(
     reach the tailnet" baseline.
     """
     state = await discover_state(ssh)
-    # Validate every rule's via= value : reject `proton` and `tor` early
-    # so the operator gets a clear error instead of a half-applied state.
-    unsupported = sorted({
-        r.via for r in desired_rules if r.via in ("proton", "tor")
-    })
-    if unsupported:
-        raise RuntimeError(
-            f"via={'/'.join(unsupported)} not yet implemented in the "
-            f"forwarding reconciler. Pick 'tailnet' or 'wan' for now."
-        )
-
     needs_ts = any(r.via == "tailnet" for r in desired_rules)
     needs_wan = any(r.via == "wan" for r in desired_rules)
+    needs_proton = any(r.via == "proton" for r in desired_rules)
+    needs_tor = any(r.via == "tor" for r in desired_rules)
     if needs_ts and not state.tailscale_zone_exists:
         raise RuntimeError(
             f"firewall zone '{TS_ZONE_NAME}' missing — re-run the slate-ctrl "
@@ -287,6 +343,17 @@ async def apply_state(
         raise RuntimeError(
             "cannot apply via=wan — couldn't resolve the WAN interface from "
             "the default route or UCI. Check the Slate's WAN configuration."
+        )
+    if needs_proton and not state.proton_iface:
+        raise RuntimeError(
+            "cannot apply via=proton — no Proton VPN tunnel interface "
+            "found on the Slate. Configure Proton (Wireguard) first."
+        )
+    if needs_tor and not state.tor_active:
+        raise RuntimeError(
+            "cannot apply via=tor — Tor daemon isn't running on the Slate "
+            f"or TransPort {TOR_TRANS_PORT} isn't listening. Start Tor "
+            "first (Réseau → Tor → Démarrer)."
         )
 
     operations: list[str] = []
@@ -309,16 +376,60 @@ async def apply_state(
         "  iptables -t nat -D POSTROUTING $rule 2>/dev/null; "
         "done; true"
     )
+    # Flush previous Tor REDIRECT entries in PREROUTING.
+    operations.append(
+        "iptables -t nat -S PREROUTING 2>/dev/null "
+        f"| grep -E -- '--comment {TOR_TAG_PREFIX}' "
+        "| while read line; do "
+        "  rule=$(echo \"$line\" | sed 's/^-A PREROUTING //'); "
+        "  iptables -t nat -D PREROUTING $rule 2>/dev/null; "
+        "done; true"
+    )
 
     # ---- 2. Inject the wanted rules. --------------------------------
     by_zone: dict[str, str] = {s.zone: s.cidr for s in state.subnets}
+    # Source iface per zone — needed by Tor PREROUTING REDIRECT, which
+    # matches packets by incoming iface (br-<zone> in practice).
+    iface_by_zone: dict[str, str] = {s.zone: s.iface for s in state.subnets}
     ts_ip = state.tailscale_self_ip or ""
     wan_iface = state.wan_iface or ""
+    proton_iface = state.proton_iface or ""
     for rule in desired_rules:
         if rule.src_zone not in by_zone:
             continue  # zone disappeared between snapshot and apply
+
+        # Tor takes a fundamentally different path : DNAT REDIRECT in
+        # PREROUTING towards the Tor daemon on lo. No FORWARD/SNAT pair
+        # because the Tor daemon eats the packet inside the same box.
+        if rule.via == "tor":
+            src_iface = iface_by_zone.get(rule.src_zone, "")
+            if not src_iface:
+                continue
+            for proto, port in (("tcp", TOR_TRANS_PORT),
+                                ("udp", TOR_DNS_PORT)):
+                tor_tag = _tor_tag(rule.src_zone, rule.dest_cidr, proto)
+                # For TCP we match any port ; for UDP we only redirect
+                # destination port 53 (DNS) to TOR_DNS_PORT — avoids
+                # blackholing every UDP flow.
+                if proto == "tcp":
+                    match = "-p tcp"
+                else:
+                    match = "-p udp --dport 53"
+                operations.append(
+                    f"iptables -t nat -I PREROUTING "
+                    f"-i {shlex.quote(src_iface)} "
+                    f"-d {shlex.quote(rule.dest_cidr)} "
+                    f"{match} -j REDIRECT --to-port {port} "
+                    f"-m comment --comment {shlex.quote(tor_tag)}"
+                )
+            continue  # Tor done — no forward/snat below
+
         # Resolve the egress interface from `via`. Already validated.
-        out_iface = TS_ZONE_NAME if rule.via == "tailnet" else wan_iface
+        out_iface = {
+            "tailnet": TS_ZONE_NAME,
+            "wan": wan_iface,
+            "proton": proton_iface,
+        }[rule.via]
         fwd_tag = _fwd_tag(rule.src_zone, rule.dest_cidr)
         chain = f"forwarding_{rule.src_zone}_rule"
         operations.append(
@@ -340,15 +451,15 @@ async def apply_state(
                     f"-j SNAT --to-source {shlex.quote(ts_ip)} "
                     f"-m comment --comment {shlex.quote(snat_tag)}"
                 )
-            elif rule.via == "wan":
-                # MASQUERADE on the WAN iface — the source IP is picked
-                # by conntrack so we don't bake the dynamic WAN address
-                # into the rule (it can change on DHCP renew).
+            elif rule.via in ("wan", "proton"):
+                # MASQUERADE on the egress iface — the source IP is
+                # picked by conntrack so we don't bake a dynamic address
+                # into the rule (WAN DHCP renew, Proton WG reconnect).
                 operations.append(
                     f"iptables -t nat -I POSTROUTING "
                     f"-s {shlex.quote(rule.src_cidr)} "
                     f"-d {shlex.quote(rule.dest_cidr)} "
-                    f"-o {shlex.quote(wan_iface)} "
+                    f"-o {shlex.quote(out_iface)} "
                     f"-j MASQUERADE "
                     f"-m comment --comment {shlex.quote(snat_tag)}"
                 )
@@ -357,13 +468,22 @@ async def apply_state(
     #         /etc/firewall.user so reload re-applies. The forwarding
     #         chain rules also need persistence (fw3 reloads flush them).
     persist_lines = _build_persist_lines(
-        desired_rules, by_zone, ts_ip, wan_iface,
+        desired_rules, by_zone, iface_by_zone, ts_ip, wan_iface, proton_iface,
     )
     operations.append(_rewrite_firewall_user_block(persist_lines))
 
-    cmd = " ; ".join(operations)
+    # The command list can grow large when an operator imports a preset
+    # (Netflix → 9 CIDRs × 4 lines each = ~36 lines plus the persistence
+    # block). One concatenated shell `;` chain crosses the SSH buffer
+    # limit and the link drops. Batch into chunks small enough to stay
+    # safely under the limit. ~20 operations per batch is a safe target.
+    BATCH_SIZE = 20
+    last_output = ""
     try:
-        r = await ssh.run(cmd, timeout=60)
+        for i in range(0, len(operations), BATCH_SIZE):
+            chunk = operations[i : i + BATCH_SIZE]
+            r = await ssh.run(" ; ".join(chunk), timeout=60)
+            last_output = r.stdout
     except SlateSSHError as exc:
         raise RuntimeError(f"apply failed: {exc}") from exc
 
@@ -380,15 +500,17 @@ async def apply_state(
         "applied_rules": len(desired_rules),
         "active_fwd": sorted(new_state.active_fwd),
         "active_snat": sorted(new_state.active_snat),
-        "reload_output": r.stdout.strip()[-300:],
+        "reload_output": last_output.strip()[-300:],
     }
 
 
 def _build_persist_lines(
     rules: list[DesiredRule],
     by_zone_cidr: dict[str, str],
+    iface_by_zone: dict[str, str],
     ts_ip: str,
     wan_iface: str,
+    proton_iface: str,
 ) -> list[str]:
     """Return the shell lines that recreate every active rule.
 
@@ -400,7 +522,37 @@ def _build_persist_lines(
     for rule in rules:
         if rule.src_zone not in by_zone_cidr:
             continue
-        out_iface = TS_ZONE_NAME if rule.via == "tailnet" else wan_iface
+
+        # Tor : DNAT REDIRECT in PREROUTING. No FORWARD/SNAT pair.
+        if rule.via == "tor":
+            src_iface = iface_by_zone.get(rule.src_zone, "")
+            if not src_iface:
+                continue
+            for proto, port in (("tcp", TOR_TRANS_PORT),
+                                ("udp", TOR_DNS_PORT)):
+                tor_tag = _tor_tag(rule.src_zone, rule.dest_cidr, proto)
+                if proto == "tcp":
+                    match = "-p tcp"
+                else:
+                    match = "-p udp --dport 53"
+                tor_tail = (
+                    f"-i {src_iface} -d {rule.dest_cidr} {match} "
+                    f"-j REDIRECT --to-port {port} "
+                    f"-m comment --comment {tor_tag}"
+                )
+                lines.append(
+                    f"iptables -t nat -D PREROUTING {tor_tail} 2>/dev/null"
+                )
+                lines.append(
+                    f"iptables -t nat -I PREROUTING {tor_tail}"
+                )
+            continue
+
+        out_iface = {
+            "tailnet": TS_ZONE_NAME,
+            "wan": wan_iface,
+            "proton": proton_iface,
+        }.get(rule.via, "")
         if not out_iface:
             continue
         fwd_tag = _fwd_tag(rule.src_zone, rule.dest_cidr)
@@ -419,9 +571,9 @@ def _build_persist_lines(
                     f"-j SNAT --to-source {ts_ip} "
                     f"-m comment --comment {snat_tag}"
                 )
-            elif rule.via == "wan":
+            elif rule.via in ("wan", "proton"):
                 snat_tail = (
-                    f"-s {rule.src_cidr} -d {rule.dest_cidr} -o {wan_iface} "
+                    f"-s {rule.src_cidr} -d {rule.dest_cidr} -o {out_iface} "
                     f"-j MASQUERADE "
                     f"-m comment --comment {snat_tag}"
                 )
@@ -464,6 +616,9 @@ def _parse_uci_dump(
     dict[str, dict[str, str]],
     str | None,
     str | None,
+    str | None,
+    bool,
+    set[str],
     set[str],
     set[str],
 ]:
@@ -471,8 +626,11 @@ def _parse_uci_dump(
     zones_raw: dict[str, dict[str, str]] = {}
     ts_ip: str | None = None
     wan_iface: str | None = None
+    proton_iface: str | None = None
+    tor_active = False
     snat_tags: set[str] = set()
     fwd_tags: set[str] = set()
+    tor_tags: set[str] = set()
     section = ""
     for raw in text.splitlines():
         line = raw.strip()
@@ -489,7 +647,15 @@ def _parse_uci_dump(
             if line and wan_iface is None:
                 wan_iface = line
             continue
-        if section in ("snat_tags", "fwd_tags"):
+        if section == "proton_iface":
+            if line and proton_iface is None:
+                proton_iface = line
+            continue
+        if section == "tor_active":
+            if line in ("yes", "no") and tor_active is False:
+                tor_active = (line == "yes")
+            continue
+        if section in ("snat_tags", "fwd_tags", "tor_tags"):
             idx = line.find("--comment ")
             if idx >= 0:
                 rest = line[idx + len("--comment ") :]
@@ -498,6 +664,8 @@ def _parse_uci_dump(
                     snat_tags.add(tag)
                 if section == "fwd_tags" and tag.startswith(FWD_TAG_PREFIX):
                     fwd_tags.add(tag)
+                if section == "tor_tags" and tag.startswith(TOR_TAG_PREFIX):
+                    tor_tags.add(tag)
             continue
         if "=" not in line:
             continue
@@ -518,7 +686,10 @@ def _parse_uci_dump(
         kv2 = dict(kv)
         kv2["_section"] = sec
         zones_by_name[nm] = kv2
-    return networks, zones_by_name, ts_ip, wan_iface, snat_tags, fwd_tags
+    return (
+        networks, zones_by_name, ts_ip, wan_iface, proton_iface, tor_active,
+        snat_tags, fwd_tags, tor_tags,
+    )
 
 
 def _zone_for_network(zones: dict, net_slug: str) -> str | None:

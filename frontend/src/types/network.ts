@@ -56,6 +56,11 @@ export interface NetworkPublic {
   // per entry. Empty = no reverse routing.
   tailnet_destinations: TailnetDestination[];
 
+  // Domain-based routing rules — each rule routes every IP DNS resolves
+  // for `domains` out through `via`. Backed by dnsmasq+ipset+fwmark on
+  // the Slate.
+  domain_routing_rules: DomainRoutingRule[];
+
   // Per-network Tor routing (see backend NetworkRow docstring).
   tor_route_mode: "off" | "transparent" | "socks_only";
   tor_dns_over_tor: boolean;
@@ -79,6 +84,18 @@ export interface TailnetDestination {
   mode: "routed" | "snat";
   /** Egress path. Default: "tailnet". */
   via: TailnetDestinationVia;
+  /** Free-form label used by the UI to group destinations by source
+   *  (e.g. "netflix"). Empty string for manually entered ones. */
+  label?: string;
+}
+
+export interface DomainRoutingRule {
+  /** Short identifier — used as the ipset name suffix. Lowercase, no spaces. */
+  label: string;
+  /** DNS names dnsmasq watches. Prefix `.example.com` matches all subdomains. */
+  domains: string[];
+  mode: "routed" | "snat";
+  via: TailnetDestinationVia;
 }
 
 export interface NetworkWrite {
@@ -99,6 +116,7 @@ export interface NetworkWrite {
   ssh_access: boolean;
   expose_to_tailnet: boolean;
   tailnet_destinations: TailnetDestination[];
+  domain_routing_rules: DomainRoutingRule[];
   tor_route_mode: "off" | "transparent" | "socks_only";
   tor_dns_over_tor: boolean;
   tor_kill_switch: boolean;
