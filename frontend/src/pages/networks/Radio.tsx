@@ -504,7 +504,12 @@ function ScanResultsView({
         band={result.band}
       />
 
-      <SpectrumChart neighbors={result.neighbors} band={result.band} />
+      <SpectrumChart
+        neighbors={result.neighbors}
+        band={result.band}
+        currentChannel={result.current_channel ?? undefined}
+        recommendedChannel={result.recommended_channel ?? undefined}
+      />
     </div>
   );
 }

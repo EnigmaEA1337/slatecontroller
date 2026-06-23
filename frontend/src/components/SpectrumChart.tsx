@@ -1,20 +1,27 @@
 // Spectrum chart — band-by-band visualisation à la WiFi Explorer Pro.
 //
-// Each detected AP is rendered as a coloured trapezoid : center on its
-// channel, half-width = bandwidth/2 (in channel-numbers for 5/6 GHz, in
-// frequency-MHz for 2.4 GHz), height proportional to RSSI. Stronger APs
-// fill more vertically + sit in front, weaker ones recede into the
-// background.
+// What changed (2026-06-23 rework) :
 //
-// Colour is hashed from ``ap_root`` so VAPs of the same physical AP
-// share their trapezoid colour with the tree-view group badge.
+//  - Dedupe by (ap_root, channel) instead of one trapezoid per VAP.
+//    A 6-VAP Ruckus that puts all six BSSIDs on the same channel used
+//    to draw six identical superposed trapezoids — visual noise that
+//    obscured the rest of the band. We now collapse to ONE trapezoid
+//    per (physical-box, channel) pair, picking the strongest member
+//    as the representative (loudest is the closest match to what the
+//    operator's antenna actually sees).
+//  - Channel markers : a vertical line on ``currentChannel`` (where
+//    we broadcast) and on ``recommendedChannel`` (where the scorer
+//    wants us to go). Operator reads "should I move ?" at a glance.
+//  - DFS zone shading on 5 GHz (channels 52–144) so the operator
+//    knows which slots can be radar-evicted. PSC slots on 6 GHz are
+//    marked with a discreet "PSC" badge below the axis.
+//  - Hover tooltip on each trapezoid : vendor + SSID count + RSSI.
 //
-// Input shape : the ``NeighborAPView`` list straight from the scanner.
-// We extract the bandwidth from ``ht_mode`` ("HT20"/"VHT80"/"HE160"/
-// "EHT320"/…) — when it's unparseable we default to 20 MHz so the AP
-// still shows up as a thin trapezoid rather than disappearing.
+// Input shape is unchanged : the ``NeighborAPView`` list straight
+// from the scanner. Bandwidth still comes from ``ht_mode`` — 20 MHz
+// default when unparseable so the AP doesn't disappear.
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import type { NeighborAPView } from "@/types/wifi-radio";
 import type { WifiBand } from "@/types/wifi";
@@ -24,6 +31,10 @@ interface Props {
   band: WifiBand;
   /** Optional height override — chart scales horizontally to its container. */
   height?: number;
+  /** Channel we currently broadcast on. Drawn as a solid vertical line. */
+  currentChannel?: number;
+  /** Channel the scorer recommends. Drawn as a dashed vertical line. */
+  recommendedChannel?: number;
 }
 
 // ---------- band geometry ----------
@@ -35,6 +46,10 @@ interface BandLayout {
   mhzPerStep: number;
   /** Pretty label printed below the axis. */
   label: string;
+  /** Channels in this band that are DFS (radar-restricted). */
+  dfsChannels?: Set<number>;
+  /** Preferred Scanning Channels (6 GHz client discovery). */
+  pscChannels?: Set<number>;
 }
 
 const BAND_LAYOUT: Record<WifiBand, BandLayout> = {
@@ -57,6 +72,10 @@ const BAND_LAYOUT: Record<WifiBand, BandLayout> = {
     ],
     mhzPerStep: 20,
     label: "5 GHz · 5180 → 5825 MHz",
+    dfsChannels: new Set([
+      52, 56, 60, 64,
+      100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    ]),
   },
   // 6 GHz : channels 1, 5, 9, …, 233 — every 20 MHz. We sample a
   // representative subset (channels with broad client compatibility
@@ -66,6 +85,9 @@ const BAND_LAYOUT: Record<WifiBand, BandLayout> = {
     channels: Array.from({ length: 59 }, (_, i) => 1 + i * 4),
     mhzPerStep: 20,
     label: "6 GHz · 5945 → 7115 MHz",
+    pscChannels: new Set([
+      5, 21, 37, 53, 69, 85, 101, 117, 133, 149, 165, 181, 197, 213, 229,
+    ]),
   },
 };
 
@@ -100,18 +122,84 @@ function rssiToHeightFraction(rssi: number): number {
   return (clamped - -100) / (-10 - -100);
 }
 
+// ---------- aggregation : 1 trapezoid per (ap_root, channel) ----------
+
+interface AggregatedAP {
+  /** Key for React + tooltip identity. */
+  key: string;
+  /** Cluster id — drives the colour. */
+  apRoot: string;
+  /** Channel this trapezoid sits on. */
+  channel: number;
+  /** Representative RSSI = the loudest member of the (ap_root, channel)
+   *  pair. The operator's antenna sees the loudest, so that's the
+   *  signal that matters for "what's this band sound like". */
+  rssiDbm: number;
+  /** Widest ht_mode observed in the pair (320 wins over 160 wins over …).
+   *  Real-world APs sometimes advertise different ht_modes on different
+   *  VAPs of the same radio ; the widest is the one that paints the
+   *  worst-case spectrum footprint. */
+  widthMhz: number;
+  /** Display strings. */
+  ssid: string;
+  vendor: string;
+  /** How many VAPs the (ap_root, channel) pair contains — shown in the
+   *  tooltip so the operator knows "this Ruckus has 6 SSIDs on this
+   *  channel" without expanding the tree. */
+  vapCount: number;
+}
+
+function aggregateForSpectrum(
+  neighbors: NeighborAPView[],
+): AggregatedAP[] {
+  const buckets = new Map<string, AggregatedAP>();
+  for (const n of neighbors) {
+    if (n.channel <= 0) continue;
+    const apRoot = n.ap_root || n.bssid;
+    const key = `${apRoot}@${n.channel}`;
+    const widthMhz = widthFromHtMode(n.ht_mode);
+    const prev = buckets.get(key);
+    if (prev === undefined) {
+      buckets.set(key, {
+        key,
+        apRoot,
+        channel: n.channel,
+        rssiDbm: n.rssi_dbm,
+        widthMhz,
+        ssid: n.ssid || "<hidden>",
+        vendor: n.vendor || "",
+        vapCount: 1,
+      });
+      continue;
+    }
+    prev.vapCount += 1;
+    if (widthMhz > prev.widthMhz) prev.widthMhz = widthMhz;
+    // Keep the loudest member as the representative ; its SSID + vendor
+    // anchor the tooltip text.
+    if (n.rssi_dbm > prev.rssiDbm) {
+      prev.rssiDbm = n.rssi_dbm;
+      if (n.ssid) prev.ssid = n.ssid;
+      if (n.vendor) prev.vendor = n.vendor;
+    }
+  }
+  return [...buckets.values()];
+}
+
 // ---------- component ----------
 
 export default function SpectrumChart({
   neighbors,
   band,
   height = 220,
+  currentChannel,
+  recommendedChannel,
 }: Props) {
   const layout = BAND_LAYOUT[band];
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
 
   // Filter to the band first ; ignore the rest (the tree handles cross-band).
   const items = useMemo(
-    () => neighbors.filter((n) => n.band === band && n.channel > 0),
+    () => aggregateForSpectrum(neighbors.filter((n) => n.band === band)),
     [neighbors, band],
   );
 
@@ -143,8 +231,15 @@ export default function SpectrumChart({
   // Sort weakest-first so strong APs paint over weak ones — same depth
   // ordering as WiFi Explorer.
   const sorted = useMemo(
-    () => [...items].sort((a, b) => a.rssi_dbm - b.rssi_dbm),
+    () => [...items].sort((a, b) => a.rssiDbm - b.rssiDbm),
     [items],
+  );
+
+  // Active hover row : pulled out so we can show its details in a card
+  // outside the SVG (SVG <title> tooltips are slow + ugly).
+  const hovered = useMemo(
+    () => (hoverKey ? items.find((n) => n.key === hoverKey) : null),
+    [items, hoverKey],
   );
 
   if (sorted.length === 0) {
@@ -155,12 +250,65 @@ export default function SpectrumChart({
     );
   }
 
+  // Pre-compute DFS shading rectangles (5 GHz only) as contiguous spans.
+  // We coalesce adjacent DFS channels into one rectangle to avoid 16
+  // tiny stripes (52, 56, 60, 64 → one 52-64 span).
+  const dfsSpans: Array<[number, number]> = [];
+  if (layout.dfsChannels) {
+    const sortedDfs = [...layout.dfsChannels].sort((a, b) => a - b);
+    let runStart = sortedDfs[0]!;
+    let runEnd = sortedDfs[0]!;
+    for (let i = 1; i < sortedDfs.length; i++) {
+      const ch = sortedDfs[i]!;
+      if (ch - runEnd <= 4) {
+        runEnd = ch;
+      } else {
+        dfsSpans.push([runStart, runEnd]);
+        runStart = ch;
+        runEnd = ch;
+      }
+    }
+    dfsSpans.push([runStart, runEnd]);
+  }
+
   return (
-    <div className="cyber-card p-3">
-      <header className="cyber-label text-[10px] mb-2 flex items-center justify-between">
+    <div className="cyber-card p-3 relative">
+      <header className="cyber-label text-[10px] mb-2 flex items-center justify-between gap-2 flex-wrap">
         <span>spectre · {layout.label}</span>
-        <span className="text-[color:var(--color-cyber-muted)]">
-          {sorted.length} APs
+        <span className="text-[color:var(--color-cyber-muted)] flex items-center gap-3">
+          {currentChannel !== undefined && (
+            <span className="flex items-center gap-1">
+              <span
+                className="inline-block w-3 h-0.5"
+                style={{ background: "var(--color-cyber-accent)" }}
+              />
+              actuel ch {currentChannel}
+            </span>
+          )}
+          {recommendedChannel !== undefined &&
+            recommendedChannel !== currentChannel && (
+              <span className="flex items-center gap-1">
+                <span
+                  className="inline-block w-3 h-0.5"
+                  style={{
+                    background: "#fbbf24",
+                    backgroundImage:
+                      "repeating-linear-gradient(to right, #fbbf24 0 4px, transparent 4px 6px)",
+                  }}
+                />
+                conseillé ch {recommendedChannel}
+              </span>
+            )}
+          {dfsSpans.length > 0 && (
+            <span className="flex items-center gap-1">
+              <span
+                className="inline-block w-3 h-2"
+                style={{ background: "rgba(251, 191, 36, 0.12)" }}
+              />
+              DFS
+            </span>
+          )}
+          <span>{sorted.length} cibles</span>
         </span>
       </header>
 
@@ -169,7 +317,24 @@ export default function SpectrumChart({
         className="w-full block"
         style={{ background: "var(--color-cyber-bg-2)" }}
         preserveAspectRatio="none"
+        onMouseLeave={() => setHoverKey(null)}
       >
+        {/* DFS zone shading (5 GHz). Painted under the gridlines + APs. */}
+        {dfsSpans.map(([from, to]) => {
+          const xFrom = xForChannel(from - 2);
+          const xTo = xForChannel(to + 2);
+          return (
+            <rect
+              key={`dfs-${from}-${to}`}
+              x={xFrom}
+              y={PADDING_T}
+              width={xTo - xFrom}
+              height={PLOT_H}
+              fill="rgba(251, 191, 36, 0.08)"
+            />
+          );
+        })}
+
         {/* dBm gridlines + labels (left side). */}
         {[-30, -50, -70, -90].map((dbm) => (
           <g key={dbm}>
@@ -203,34 +368,46 @@ export default function SpectrumChart({
               : band === "5"
                 ? idx % 2 !== 0 && ch !== channelMax && ch !== channelMin
                 : false;
-          if (skip) return null;
+          const isPsc = layout.pscChannels?.has(ch);
+          if (skip && !isPsc) return null;
           return (
-            <text
-              key={ch}
-              x={xForChannel(ch)}
-              y={VB_H - 10}
-              fontSize={9}
-              fill="var(--color-cyber-muted)"
-              textAnchor="middle"
-              fontFamily="monospace"
-            >
-              {ch}
-            </text>
+            <g key={ch}>
+              <text
+                x={xForChannel(ch)}
+                y={VB_H - 12}
+                fontSize={9}
+                fill="var(--color-cyber-muted)"
+                textAnchor="middle"
+                fontFamily="monospace"
+              >
+                {ch}
+              </text>
+              {isPsc && (
+                <text
+                  x={xForChannel(ch)}
+                  y={VB_H - 2}
+                  fontSize={6}
+                  fill="var(--color-cyber-accent)"
+                  textAnchor="middle"
+                  fontFamily="monospace"
+                  opacity={0.7}
+                >
+                  PSC
+                </text>
+              )}
+            </g>
           );
         })}
 
-        {/* AP trapezoids. */}
+        {/* AP trapezoids — aggregated to (ap_root, channel). */}
         {sorted.map((n) => {
-          const widthMhz = widthFromHtMode(n.ht_mode);
-          // Convert bandwidth to "channel-number steps" half-width.
+          const widthMhz = n.widthMhz;
           const halfWidthSteps = widthMhz / layout.mhzPerStep / 2;
           const xCenter = xForChannel(n.channel);
           const xLeft = xForChannel(n.channel - halfWidthSteps);
           const xRight = xForChannel(n.channel + halfWidthSteps);
-          const yPeak = yForRssi(n.rssi_dbm);
+          const yPeak = yForRssi(n.rssiDbm);
           const yFloor = VB_H - PADDING_B;
-          // A trapezoid : flat top across the channel width, sloping
-          // shoulders down to floor over a ~3 MHz roll-off.
           const shoulderMhz = 2.5;
           const shoulderSteps = shoulderMhz / layout.mhzPerStep;
           const xLeftFloor = xForChannel(
@@ -239,17 +416,22 @@ export default function SpectrumChart({
           const xRightFloor = xForChannel(
             n.channel + halfWidthSteps + shoulderSteps,
           );
-          const color = colorFromKey(n.ap_root || n.bssid);
+          const color = colorFromKey(n.apRoot);
           const path = `M ${xLeftFloor} ${yFloor} L ${xLeft} ${yPeak} L ${xRight} ${yPeak} L ${xRightFloor} ${yFloor} Z`;
-          const showLabel = xRight - xLeft > 50 && n.rssi_dbm > -85;
+          const showLabel = xRight - xLeft > 50 && n.rssiDbm > -85;
+          const isHovered = hoverKey === n.key;
           return (
-            <g key={n.bssid}>
+            <g
+              key={n.key}
+              onMouseEnter={() => setHoverKey(n.key)}
+              style={{ cursor: "pointer" }}
+            >
               <path
                 d={path}
                 fill={color}
-                fillOpacity={0.22}
+                fillOpacity={isHovered ? 0.42 : 0.22}
                 stroke={color}
-                strokeWidth={1.3}
+                strokeWidth={isHovered ? 2.2 : 1.3}
               />
               {showLabel && (
                 <text
@@ -259,17 +441,67 @@ export default function SpectrumChart({
                   fill={color}
                   textAnchor="middle"
                   fontFamily="monospace"
-                  style={{ paintOrder: "stroke" }}
+                  style={{ paintOrder: "stroke", pointerEvents: "none" }}
                   stroke="var(--color-cyber-bg-2)"
                   strokeWidth={3}
                 >
-                  {n.ssid || "<hidden>"}
+                  {n.ssid}
+                  {n.vapCount > 1 ? ` ×${n.vapCount}` : ""}
                 </text>
               )}
             </g>
           );
         })}
+
+        {/* Current + recommended channel markers — drawn last, on top. */}
+        {currentChannel !== undefined && (
+          <line
+            x1={xForChannel(currentChannel)}
+            x2={xForChannel(currentChannel)}
+            y1={PADDING_T}
+            y2={VB_H - PADDING_B}
+            stroke="var(--color-cyber-accent)"
+            strokeWidth={2}
+            strokeOpacity={0.9}
+          />
+        )}
+        {recommendedChannel !== undefined &&
+          recommendedChannel !== currentChannel && (
+            <line
+              x1={xForChannel(recommendedChannel)}
+              x2={xForChannel(recommendedChannel)}
+              y1={PADDING_T}
+              y2={VB_H - PADDING_B}
+              stroke="#fbbf24"
+              strokeWidth={2}
+              strokeOpacity={0.9}
+              strokeDasharray="4 3"
+            />
+          )}
       </svg>
+
+      {/* Hover panel — sticks below the chart, doesn't overlap. */}
+      {hovered && (
+        <div className="mt-2 text-[10px] font-mono flex items-center gap-3 flex-wrap text-[color:var(--color-cyber-muted)]">
+          <span
+            className="inline-block w-2 h-2 rounded"
+            style={{ background: colorFromKey(hovered.apRoot) }}
+          />
+          <span className="text-[color:var(--color-cyber-accent)]">
+            {hovered.ssid}
+          </span>
+          {hovered.vapCount > 1 && (
+            <span>
+              {hovered.vapCount} VAPs sur ce canal
+            </span>
+          )}
+          {hovered.vendor && <span>· {hovered.vendor}</span>}
+          <span>· ch {hovered.channel}</span>
+          <span>· {hovered.widthMhz} MHz</span>
+          <span>· {hovered.rssiDbm} dBm</span>
+          <span>· ap_root {hovered.apRoot}</span>
+        </div>
+      )}
     </div>
   );
 }
