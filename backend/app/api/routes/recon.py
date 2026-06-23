@@ -33,6 +33,11 @@ from app.recon.store import (
     STATUS_RUNNING,
     ReconStore,
 )
+from app.recon.tools import (
+    ReconToolStatus,
+    get_tool_status,
+    install_recon_tools,
+)
 from app.slate.ssh import SlateSSH
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +114,34 @@ class ReconPortView(BaseModel):
 class ReconScanDetail(ReconScanSummary):
     hosts: list[ReconHostView]
     ports: list[ReconPortView]
+
+
+class ReconToolStatusView(BaseModel):
+    has_nmap: bool
+    has_arp_scan: bool
+    has_gl_arp_scan: bool
+    nmap_version: str
+    arp_scan_version: str
+    overlay_free_mb: int
+    fully_installed: bool
+
+    @classmethod
+    def from_dc(cls, s: ReconToolStatus) -> "ReconToolStatusView":
+        return cls(
+            has_nmap=s.has_nmap,
+            has_arp_scan=s.has_arp_scan,
+            has_gl_arp_scan=s.has_gl_arp_scan,
+            nmap_version=s.nmap_version,
+            arp_scan_version=s.arp_scan_version,
+            overlay_free_mb=s.overlay_free_mb,
+            fully_installed=s.fully_installed,
+        )
+
+
+class ReconInstallReportView(BaseModel):
+    ok: bool
+    log: str
+    status: ReconToolStatusView
 
 
 # ---------------------------- helpers ---------------------------- #
@@ -291,4 +324,61 @@ async def delete_scan(
     logger.info(
         "recon.scan.deleted",
         username=user.username, device=conn.slug, scan_id=scan_id,
+    )
+
+
+# ---------------------------- tools ---------------------------- #
+
+
+@router.get("/tools", response_model=ReconToolStatusView)
+async def get_tools(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> ReconToolStatusView:
+    """Snapshot of the optional recon toolchain on the Slate."""
+    status_dc = await get_tool_status(ssh)
+    return ReconToolStatusView.from_dc(status_dc)
+
+
+@router.post("/tools/install", response_model=ReconInstallReportView)
+async def install_tools(
+    request: Request,
+    conn: Annotated[DeviceConnections, Depends(get_device_connections)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> ReconInstallReportView:
+    """Install ``nmap-full + arp-scan + arp-scan-database`` via opkg.
+
+    PIN-throttled (scope ``recon_install``) because this writes to the
+    Slate's /overlay filesystem and pulls packages from the internet —
+    a hostile token replay shouldn't be able to spam package installs.
+    Audit log records ip + user-agent.
+    """
+    lockout = getattr(request.app.state, "pin_lockout", None)
+    if request.client and request.client.host:
+        ip = request.client.host
+    else:
+        fwd = request.headers.get("x-forwarded-for") or ""
+        ip = fwd.split(",")[0].strip() or "unknown"
+    ua = (request.headers.get("user-agent") or "")[:200]
+
+    if lockout is not None:
+        await lockout.check_or_raise(ip, "recon_install")
+
+    report = await install_recon_tools(ssh)
+
+    if lockout is not None and report.ok:
+        await lockout.record_success(ip, "recon_install")
+    elif lockout is not None:
+        await lockout.record_failure(ip, "recon_install")
+
+    logger.warning(
+        "recon.tools.install",
+        username=user.username, device=conn.slug,
+        client_ip=ip, user_agent=ua, ok=report.ok,
+    )
+    return ReconInstallReportView(
+        ok=report.ok,
+        log=report.log,
+        status=ReconToolStatusView.from_dc(report.status),
     )

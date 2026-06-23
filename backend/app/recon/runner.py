@@ -21,10 +21,17 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from app.recon.discovery import fuse, ping_sweep, read_arp_cache
+from app.recon.discovery import (
+    DiscoveredHost,
+    arp_scan_layer2,
+    fuse,
+    ping_sweep,
+    read_arp_cache,
+)
 from app.recon.interfaces import ReconInterface, list_active_interfaces
 from app.recon.store import ReconStore
-from app.recon.tcp import DEFAULT_PORTS, grab_banners, probe_ports
+from app.recon.tcp import DEFAULT_PORTS, grab_banners, nmap_probe, probe_ports
+from app.recon.tools import get_tool_status
 from app.slate.ssh import SlateSSH
 
 logger = logging.getLogger(__name__)
@@ -79,29 +86,50 @@ async def _run_one_interface(
     scan_id: int,
     iface: ReconInterface,
     req: ScanRequest,
+    *,
+    has_arp_scan: bool,
+    has_nmap: bool,
     accumulated_open_ports: list[Any],
     accumulated_host_count_ref: list[int],
 ) -> None:
     """Drive ARP + ping + TCP probe on a single interface.
 
+    When ``arp-scan`` is installed, the ARP discovery uses raw layer-2
+    probes (catches silent hosts that never answer ICMP, finishes in
+    1-2s on a /24 vs ~12s for the ping pool). When ``nmap`` is
+    installed, the TCP+banner phase collapses into a single
+    ``nmap -sV`` invocation (much faster + cleaner version banners).
+    Both fall back to the busybox pipeline when the upgrade isn't
+    present.
+
     Banner grab is deferred to the caller : it batches all ifaces'
     open ports together so we can show one progress line for it.
     """
     label = iface.name
-    if req.do_arp:
-        await store.set_progress(scan_id, f"ARP {label}")
-    arp1 = await read_arp_cache(ssh, label) if req.do_arp else []
 
+    # ── 1) ARP discovery ──────────────────────────────────────────
+    arp1: list[DiscoveredHost] = []
+    if req.do_arp:
+        if has_arp_scan:
+            await store.set_progress(scan_id, f"arp-scan {label}")
+            arp1 = await arp_scan_layer2(ssh, label, iface.scan_cidr)
+            if not arp1:
+                # arp-scan returned nothing : fall back to the
+                # kernel ARP cache so we still get something.
+                arp1 = await read_arp_cache(ssh, label)
+        else:
+            await store.set_progress(scan_id, f"ARP cache {label}")
+            arp1 = await read_arp_cache(ssh, label)
+
+    # ── 2) Ping sweep (skip when arp-scan already enumerated L2) ──
     pinged: list[str] = []
-    if req.do_ping:
+    skip_ping = has_arp_scan and bool(arp1)
+    if req.do_ping and not skip_ping:
         async def _progress(done: int, total: int) -> None:
             await store.set_progress(
                 scan_id, f"ping {label} {done}/{total}"
             )
 
-        # ping_sweep takes a sync callback ; wrap into a coroutine
-        # we schedule via asyncio.create_task to avoid blocking the
-        # sweep on DB writes.
         pending_progress: list[asyncio.Task[None]] = []
 
         def _on_progress(done: int, total: int) -> None:
@@ -117,22 +145,17 @@ async def _run_one_interface(
         if pending_progress:
             await asyncio.gather(*pending_progress, return_exceptions=True)
 
-    arp2: list[Any] = []
-    if req.do_ping and req.do_arp:
+    arp2: list[DiscoveredHost] = []
+    if req.do_ping and req.do_arp and not skip_ping:
         # Re-read ARP after the sweep — many hosts that didn't answer
         # ICMP still got ARP-resolved by the ping attempt.
         await store.set_progress(scan_id, f"ARP {label} (post-sweep)")
         arp2 = await read_arp_cache(ssh, label)
 
     fused = fuse(arp1, pinged, arp2)
-    # Always include the gateway and the slate IP itself in the host
-    # list when known — they're trivially "discovered" from the
-    # interface enumeration, no probe needed.
     extra_ips = {ip for ip in (iface.gateway, iface.slate_ip) if ip}
     have_ips = {h.ip for h in fused}
     for extra_ip in extra_ips - have_ips:
-        from app.recon.discovery import DiscoveredHost  # local import to avoid cycle  # noqa: PLC0415
-
         fused.append(DiscoveredHost(ip=extra_ip, mac="", source="meta"))
     fused.sort(key=lambda h: tuple(int(o) for o in h.ip.split(".")))
 
@@ -145,23 +168,39 @@ async def _run_one_interface(
     )
     accumulated_host_count_ref[0] += len(fused)
 
+    # ── 3) TCP probe ──────────────────────────────────────────────
     if req.do_tcp and fused:
-        await store.set_progress(scan_id, f"TCP {label} 0/{len(fused) * len(DEFAULT_PORTS)}")
+        target_ips = [h.ip for h in fused if h.ip != iface.slate_ip]
+        if not target_ips:
+            return
+        if has_nmap:
+            await store.set_progress(scan_id, f"nmap -sV {label} 0/{len(target_ips)}")
+            pending_progress: list[asyncio.Task[None]] = []
 
-        pending_progress: list[asyncio.Task[None]] = []
+            def _on_progress(done: int, total: int) -> None:
+                pending_progress.append(asyncio.create_task(
+                    store.set_progress(scan_id, f"nmap {label} {done}/{total}")
+                ))
 
-        def _on_progress(done: int, total: int) -> None:
-            pending_progress.append(asyncio.create_task(
-                store.set_progress(scan_id, f"TCP {label} {done}/{total}")
-            ))
+            opens = await nmap_probe(
+                ssh, target_ips, on_progress=_on_progress,
+            )
+            if pending_progress:
+                await asyncio.gather(*pending_progress, return_exceptions=True)
+        else:
+            await store.set_progress(scan_id, f"TCP {label} 0/{len(target_ips) * len(DEFAULT_PORTS)}")
+            pending_progress = []
 
-        opens = await probe_ports(
-            ssh,
-            [h.ip for h in fused],
-            on_progress=_on_progress,
-        )
-        if pending_progress:
-            await asyncio.gather(*pending_progress, return_exceptions=True)
+            def _on_progress(done: int, total: int) -> None:
+                pending_progress.append(asyncio.create_task(
+                    store.set_progress(scan_id, f"TCP {label} {done}/{total}")
+                ))
+
+            opens = await probe_ports(
+                ssh, target_ips, on_progress=_on_progress,
+            )
+            if pending_progress:
+                await asyncio.gather(*pending_progress, return_exceptions=True)
         accumulated_open_ports.extend(opens)
 
 
@@ -188,14 +227,31 @@ async def run_scan(
             )
             return
 
+        # Detect the optional toolchain once at scan start. If the
+        # operator installed nmap/arp-scan via the settings page the
+        # runner uses them transparently ; otherwise it falls back
+        # to the busybox pipeline.
+        tools = await get_tool_status(ssh)
+        await store.set_progress(
+            scan_id,
+            f"engine : {'nmap' if tools.has_nmap else 'nc'} "
+            f"+ {'arp-scan' if tools.has_arp_scan else 'ping'}",
+        )
+
         open_ports: list[Any] = []
         host_count_ref = [0]
         for iface in ifaces:
             await _run_one_interface(
-                ssh, store, scan_id, iface, req, open_ports, host_count_ref,
+                ssh, store, scan_id, iface, req,
+                has_arp_scan=tools.has_arp_scan,
+                has_nmap=tools.has_nmap,
+                accumulated_open_ports=open_ports,
+                accumulated_host_count_ref=host_count_ref,
             )
 
-        if req.do_banner and open_ports:
+        # nmap -sV already collected banners. Only run the busybox
+        # banner pass when we used the fallback TCP probe.
+        if req.do_banner and open_ports and not tools.has_nmap:
             await store.set_progress(
                 scan_id, f"bannières 0/{len(open_ports)}"
             )

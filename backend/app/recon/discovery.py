@@ -73,6 +73,58 @@ async def read_arp_cache(ssh: SlateSSH, iface: str) -> list[DiscoveredHost]:
     return out
 
 
+# ``arp-scan -I <iface> -l --plain`` lines look like :
+#   192.168.8.42<TAB>aa:bb:cc:dd:ee:ff<TAB>Apple, Inc.
+# --plain strips the header/footer so we get clean tabs only.
+_ARP_SCAN_LINE = re.compile(
+    r"^(?P<ip>\d+\.\d+\.\d+\.\d+)\s+(?P<mac>[0-9a-f:]{17})\s*(?P<vendor>.*)$",
+    re.IGNORECASE,
+)
+
+
+async def arp_scan_layer2(
+    ssh: SlateSSH, iface: str, target_cidr: str,
+) -> list[DiscoveredHost]:
+    """Use ``arp-scan`` (when available) to enumerate L2 directly.
+
+    ``arp-scan`` fires raw ARP requests instead of relying on the
+    kernel ARP table — it sees silent hosts that never answer ICMP,
+    catches stealth devices that the ping sweep misses, and runs
+    parallel (1-2s for a /24 vs ~12s with our ping pool).
+
+    Returns ``[]`` when arp-scan isn't installed or errored. Callers
+    fall back to ``read_arp_cache`` + ``ping_sweep`` transparently.
+
+    ``-q`` skips the vendor lookup (we do our own OUI lookup) and
+    keeps the output compact ; ``-x`` strips the header so each
+    output line is ``IP<TAB>MAC<TAB>(vendor)``. ``-N`` skips the
+    cosmetic banner. ``--retry=2`` because hotel APs are sometimes
+    lossy on the first try.
+    """
+    cmd = (
+        f"arp-scan --interface={iface} --localnet --retry=2 "
+        f"--timeout=300 --plain 2>/dev/null || "
+        # If --localnet doesn't match the iface's network (e.g.
+        # clamped /24 different from the iface's /16), explicitly
+        # target the requested CIDR.
+        f"arp-scan --interface={iface} {target_cidr} --retry=2 "
+        f"--timeout=300 --plain 2>/dev/null"
+    )
+    try:
+        res = await ssh.run(cmd, timeout=60)
+    except SlateSSHError:
+        return []
+    out: list[DiscoveredHost] = []
+    for line in res.stdout.splitlines():
+        m = _ARP_SCAN_LINE.match(line.strip())
+        if not m:
+            continue
+        out.append(DiscoveredHost(
+            ip=m.group("ip"), mac=m.group("mac"), source="arp-scan",
+        ))
+    return out
+
+
 def _hosts_for_sweep(cidr: str, slate_ip: str) -> list[str]:
     """Return the addressable hosts in ``cidr``, minus the Slate itself."""
     net = ipaddress.ip_network(cidr, strict=False)

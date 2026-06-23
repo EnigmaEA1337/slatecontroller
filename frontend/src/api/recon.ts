@@ -103,3 +103,34 @@ export async function cancelReconScan(id: number): Promise<ReconScanSummary> {
 export async function deleteReconScan(id: number): Promise<void> {
   await api.delete(`/api/recon/scans/${id}`);
 }
+
+
+// ---------------------------- tools ---------------------------- //
+
+export interface ReconToolStatus {
+  has_nmap: boolean;
+  has_arp_scan: boolean;
+  has_gl_arp_scan: boolean;
+  nmap_version: string;
+  arp_scan_version: string;
+  overlay_free_mb: number;
+  fully_installed: boolean;
+}
+
+export interface ReconInstallReport {
+  ok: boolean;
+  log: string;
+  status: ReconToolStatus;
+}
+
+export async function getReconTools(): Promise<ReconToolStatus> {
+  const { data } = await api.get<ReconToolStatus>("/api/recon/tools");
+  return data;
+}
+
+export async function installReconTools(): Promise<ReconInstallReport> {
+  const { data } = await api.post<ReconInstallReport>(
+    "/api/recon/tools/install",
+  );
+  return data;
+}

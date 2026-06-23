@@ -238,6 +238,94 @@ def _refine_service(port: int, banner: str) -> str:
     return _SERVICE_HINT.get(port, "")
 
 
+async def nmap_probe(
+    ssh: SlateSSH,
+    ips: list[str],
+    *,
+    ports: tuple[int, ...] = DEFAULT_PORTS,
+    on_progress: "callable[[int, int], None] | None" = None,
+) -> list[ProbedPort]:
+    """Use nmap (when available) to probe + version-detect in one pass.
+
+    nmap parallelises the probe far better than our nc pool (round
+    trips amortised, native packet scheduling), and ``-sV`` produces
+    a proper service+version string from a known fingerprint database
+    instead of our hand-rolled banner parsing.
+
+    Returns ``[]`` when nmap isn't installed — the runner falls back
+    to ``probe_ports`` + ``grab_banners``.
+
+    nmap output (``-oG`` greppable format) per host :
+        Host: 192.168.8.42 () Ports: 22/open/tcp//ssh//OpenSSH 9.6 (protocol 2.0)/, 80/open/tcp//http//nginx/, ...
+    Each ``Ports:`` entry is ``port/state/proto//service//banner/``.
+    """
+    if not ips:
+        return []
+    port_csv = ",".join(str(p) for p in ports)
+    target_list = " ".join(ips)
+    # -Pn : skip ping (we already did our own discovery).
+    # -sV : service/version detection.
+    # --version-intensity=2 : lighter probes, faster, still catches the
+    #     90% case (full intensity is 7 = a lot of probes per service).
+    # -T4 : aggressive timing — fast hotel networks, OK to retry sparingly.
+    # --max-retries=2 : keep stragglers under control.
+    # -oG - : greppable output to stdout, easy to parse.
+    cmd = (
+        f"nmap -Pn -sV --version-intensity=2 -T4 --max-retries=2 "
+        f"-p {port_csv} -oG - {target_list} 2>/dev/null"
+    )
+    # nmap on a /24 with -sV typically completes in 30-90s ; the cap
+    # below accommodates the worst-case banner-stuck host.
+    try:
+        if on_progress is not None:
+            on_progress(0, len(ips))
+        res = await ssh.run(cmd, timeout=240)
+    except SlateSSHError:
+        return []
+
+    out: list[ProbedPort] = []
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("Host:") or "Ports:" not in line:
+            continue
+        # Extract IP between "Host:" and "()"
+        m = re.match(r"^Host:\s+(\S+)\s+\(\)\s+Ports:\s+(.+?)(?:\s+Ignored.*)?$", line)
+        if not m:
+            continue
+        ip = m.group(1)
+        ports_blob = m.group(2)
+        for entry in ports_blob.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            # entry = "22/open/tcp//ssh//OpenSSH 9.6 (protocol 2.0)/"
+            parts = entry.split("/")
+            if len(parts) < 7:
+                continue
+            try:
+                port = int(parts[0])
+            except ValueError:
+                continue
+            state = parts[1]
+            service_hint = parts[4]
+            banner = parts[6].strip()
+            if state != "open":
+                continue
+            service = service_hint or _SERVICE_HINT.get(port, "")
+            if banner:
+                service = f"{service} ({banner[:40]})" if service else banner[:64]
+            out.append(
+                ProbedPort(
+                    ip=ip, port=port, state="open",
+                    banner=banner[:256], service=service[:32],
+                )
+            )
+    out.sort(key=lambda p: (tuple(int(o) for o in p.ip.split(".")), p.port))
+    if on_progress is not None:
+        on_progress(len(ips), len(ips))
+    return out
+
+
 async def grab_banners(
     ssh: SlateSSH,
     opens: list[ProbedPort],

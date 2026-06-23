@@ -21,12 +21,14 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Download,
   Loader2,
   Play,
   Radar,
   Trash2,
   X,
   XCircle,
+  Zap,
 } from "lucide-react";
 
 import {
@@ -35,9 +37,12 @@ import {
   type ReconPort,
   type ReconScanSummary,
   type ReconStatus,
+  type ReconToolStatus,
   cancelReconScan,
   deleteReconScan,
   getReconScan,
+  getReconTools,
+  installReconTools,
   launchReconScan,
   listReconInterfaces,
   listReconScans,
@@ -474,6 +479,11 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
     queryFn: () => listReconInterfaces(),
     enabled: open,
   });
+  const tools = useQuery({
+    queryKey: ["recon", "tools"],
+    queryFn: () => getReconTools(),
+    enabled: open,
+  });
   const interfaceList = useMemo<ReconInterface[]>(
     () => (Array.isArray(interfaces.data) ? interfaces.data : []),
     [interfaces.data],
@@ -528,6 +538,8 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
             <X className="h-3 w-3" />
           </button>
         </header>
+
+        <ToolsPanel status={tools.data} loading={tools.isLoading} onChange={() => tools.refetch()} />
 
         <div className="space-y-2">
           <div className="text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)]">
@@ -643,6 +655,137 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
           </button>
         </footer>
       </div>
+    </div>
+  );
+}
+
+
+// ---------------------------- Tools panel ---------------------------- //
+
+function ToolsPanel({
+  status,
+  loading,
+  onChange,
+}: {
+  status: ReconToolStatus | undefined;
+  loading: boolean;
+  onChange: () => void;
+}) {
+  const [installing, setInstalling] = useState(false);
+  const [installLog, setInstallLog] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setInstallLog(null);
+    setInstallError(null);
+    try {
+      const report = await installReconTools();
+      setInstallLog(report.log);
+      if (!report.ok) {
+        setInstallError("Installation incomplète — voir le log");
+      }
+      onChange();
+    } catch (e) {
+      setInstallError((e as Error).message);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  if (loading || !status) {
+    return (
+      <div className="text-[10px] text-[color:var(--color-cyber-muted)]">
+        Détection des outils…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2 p-2 border border-[color:var(--color-cyber-border)]/40 rounded-sm">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-cyber-muted)] flex items-center gap-2">
+          <Zap className="h-3 w-3" />
+          Moteur de scan
+        </div>
+        <div className="text-[10px] font-mono text-[color:var(--color-cyber-muted)]">
+          {status.fully_installed ? (
+            <span className="text-emerald-300">avancé (nmap + arp-scan)</span>
+          ) : (
+            <span className="text-amber-300">basique (ping + nc)</span>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+        <ToolBadge
+          name="nmap"
+          installed={status.has_nmap}
+          version={status.nmap_version}
+        />
+        <ToolBadge
+          name="arp-scan"
+          installed={status.has_arp_scan}
+          version={status.arp_scan_version}
+        />
+      </div>
+      {!status.fully_installed && (
+        <div className="space-y-2">
+          <div className="text-[10px] text-[color:var(--color-cyber-muted)]">
+            Outils avancés non installés. L'install ajoute ~5-10 MB sur{" "}
+            <span className="font-mono">/overlay</span> (libre : {status.overlay_free_mb} MB).
+            Apporte : discovery layer-2 (arp-scan voit les hôtes silencieux) +
+            détection de version (<span className="font-mono">nmap -sV</span> → bannières propres
+            type <span className="font-mono">OpenSSH_9.6</span>).
+          </div>
+          <button
+            onClick={handleInstall}
+            disabled={installing}
+            className="cyber-button-primary px-3 py-1 text-[10px] flex items-center gap-2"
+          >
+            {installing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+            {installing ? "Installation en cours…" : "Installer nmap + arp-scan"}
+          </button>
+        </div>
+      )}
+      {installError && (
+        <div className="text-[10px] text-rose-300">{installError}</div>
+      )}
+      {installLog && (
+        <details className="text-[10px]">
+          <summary className="cursor-pointer text-[color:var(--color-cyber-muted)]">
+            Log opkg
+          </summary>
+          <pre className="mt-1 max-h-48 overflow-y-auto text-[9px] font-mono whitespace-pre-wrap text-[color:var(--color-cyber-muted)] bg-[color:var(--color-cyber-bg-2)]/40 p-2 rounded">
+            {installLog}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ToolBadge({
+  name,
+  installed,
+  version,
+}: {
+  name: string;
+  installed: boolean;
+  version: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      {installed ? (
+        <CheckCircle2 className="h-3 w-3 text-emerald-300 shrink-0" />
+      ) : (
+        <XCircle className="h-3 w-3 text-[color:var(--color-cyber-muted)] shrink-0" />
+      )}
+      <span className={cn(installed ? "text-emerald-300" : "text-[color:var(--color-cyber-muted)]")}>
+        {name}
+      </span>
+      {installed && version && (
+        <span className="text-[color:var(--color-cyber-muted)] text-[9px]">v{version}</span>
+      )}
     </div>
   );
 }
