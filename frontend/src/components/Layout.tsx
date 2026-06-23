@@ -83,6 +83,7 @@ const AUDIT_CHILDREN: NavItem[] = [
   { to: "/security/tailscale", labelKey: "nav.item_tailscale_audit" },
   { to: "/security/tor-audit", labelKey: "nav.item_tor_audit" },
   { to: "/security/air-watch", labelKey: "nav.item_air_watch" },
+  { to: "/security/wan-recon", labelKey: "nav.item_wan_recon" },
   { to: "/security/anti-theft", labelKey: "nav.item_anti_theft" },
 ];
 

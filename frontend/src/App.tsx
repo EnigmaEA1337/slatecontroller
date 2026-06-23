@@ -20,6 +20,7 @@ const Vulnerabilities = lazy(() => import("./pages/security/Vulnerabilities"));
 const SecurityTailscaleAudit = lazy(
   () => import("./pages/security/TailscaleAudit"),
 );
+const SecurityWanRecon = lazy(() => import("./pages/security/WanRecon"));
 const Profiles = lazy(() => import("./pages/Profiles"));
 const ProfileForm = lazy(() => import("./pages/ProfileForm"));
 const Wifi = lazy(() => import("./pages/Wifi"));
@@ -144,6 +145,7 @@ export default function App() {
             element={<NetworksSurveillanceDetail />}
           />
           <Route path="/security/air-watch" element={<SecurityAirWatch />} />
+          <Route path="/security/wan-recon" element={<SecurityWanRecon />} />
           <Route path="/security/anti-theft" element={<SecurityAntiTheft />} />
           <Route path="/settings/appearance" element={<SettingsAppearance />} />
           <Route path="/settings" element={<SettingsHub />} />
