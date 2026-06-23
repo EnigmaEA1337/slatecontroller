@@ -1,0 +1,44 @@
+name: Shell CI
+
+# Lint every shell script the controller ships to the Slate. The on-
+# device agent runs busybox ash, so we hint shellcheck to a POSIX shell
+# (the default is bash). Findings flagged as severity=warning or higher
+# fail the job ; informational nits don't.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "backend/app/slate_agent/scripts/**"
+      - "builders/**/*.sh"
+      - ".github/workflows/shell.yml"
+  pull_request:
+    paths:
+      - "backend/app/slate_agent/scripts/**"
+      - "builders/**/*.sh"
+      - ".github/workflows/shell.yml"
+
+concurrency:
+  group: shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint agent handlers + scripts (busybox ash target)
+        run: |
+          # Agent scripts target busybox ash, not bash. Force the
+          # interpreter so shellcheck doesn't flag legit POSIX-isms as
+          # "bash-only".
+          shellcheck --shell=sh --severity=warning \
+            backend/app/slate_agent/scripts/slate-ctrl \
+            backend/app/slate_agent/scripts/handlers/*.sh \
+            backend/app/slate_agent/scripts/*.sh
+      - name: Lint builder scripts (bash, Alpine container)
+        # The forti-builder runs Alpine /bin/sh which IS dash/busybox-
+        # like ; same POSIX target. Keep it strict.
+        run: |
+          shellcheck --shell=sh --severity=warning builders/forti/build.sh

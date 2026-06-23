@@ -90,9 +90,32 @@ services:
       - ./backend/alembic.ini:/app/alembic.ini
       - ./data/db:/app/data/db
       - ./data/logs:/app/data/logs
+      # Internal CA root key + cert + issued leaves. Without this mount
+      # the CA lives in the container's writable layer and disappears
+      # on every `up --force-recreate` — re-issuing every cert is not
+      # only painful, it changes the root pin pushed to clients.
+      - ./data/ca:/app/data/ca
+      # Security feeds cache (KEV / ExploitDB / CERT-FR / Metasploit
+      # snapshots). Surviving across restarts avoids re-downloading
+      # 25 MB+ on every boot and keeps the "last refreshed" timestamps
+      # in the security pages honest.
+      - ./data/cache:/app/data/cache
+      # OUI vendor lookup cache (~1 MB CSV). Cheap to re-download but
+      # the refresh adds 5-10 s to startup ; persisting it makes cold
+      # boots noticeably snappier.
+      - ./data/oui_cache:/app/data/oui_cache
       # Sidecar's tailscaled socket — used by /api/settings/controller-https
       # to read Serve status / hostname / cert info.
       - tailscale-socket:/var/run/tailscale
+      # Read-only access to the forti-builder artifact volume so the
+      # backend's /api/vpn/fortinet/sideload endpoint can SCP the freshly
+      # built openfortivpn binary onto the Slate without docker-in-docker.
+      - forti-artifacts:/forti-artifacts:ro
+      # Docker socket so /api/vpn/fortinet/build can trigger the builder
+      # container directly from the UI. Mounted RO would suffice for `run`
+      # only ; we mount RW because the same client also needs to fetch
+      # image build progress (BuildKit gRPC over the same socket).
+      - /var/run/docker.sock:/var/run/docker.sock
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
@@ -112,6 +135,20 @@ services:
       - VITE_BACKEND_URL=http://localhost:8000
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
 
+  # One-shot Docker builder for the static aarch64-musl openfortivpn
+  # binary the Slate firmware needs (opkg doesn't ship it for this MTK
+  # target). The backend can spawn this container on demand via the
+  # mounted docker socket — see app/vpn/fortinet/builder.py. Profile
+  # `forti` keeps it out of the default `docker compose up`.
+  forti-builder:
+    build:
+      context: ./builders/forti
+    image: slate-forti-builder:latest
+    container_name: slate-forti-builder
+    volumes:
+      - forti-artifacts:/out
+    profiles: ["forti"]
+
 networks:
   slate-net:
     driver: bridge
@@ -120,3 +157,6 @@ volumes:
   # Holds the sidecar's tailscaled.sock so the backend can read it.
   # Named volume (not bind mount) → portable across hosts.
   tailscale-socket:
+  # Static openfortivpn binary built by `forti-builder` lives here. The
+  # backend mounts it read-only and SCPs to the Slate on /sideload.
+  forti-artifacts:

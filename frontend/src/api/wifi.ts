@@ -7,6 +7,26 @@ export async function listWifiSsids(): Promise<WifiSsidPublic[]> {
   return data;
 }
 
+export interface WifiReapplyResult {
+  ok: boolean;
+  output: string;
+  needs_reboot: boolean;
+}
+
+/** Manual companion to the on-device wifi-drift watchdog. Triggers
+ *  ``slate-ctrl apply-only wifi`` against the currently-active profile —
+ *  reconciles UCI + ip link without re-running the rest of the
+ *  pipeline. Useful when a LCD travel-router toggle drops a managed
+ *  VAP and the operator wants to recover faster than the 2-min cron. */
+export async function reapplyActiveWifi(): Promise<WifiReapplyResult> {
+  const { data } = await api.post<WifiReapplyResult>(
+    "/api/wifi/reapply-active",
+    undefined,
+    { timeout: 90_000 },
+  );
+  return data;
+}
+
 export async function getWifiSsid(slug: string): Promise<WifiSsidPublic> {
   const { data } = await api.get<WifiSsidPublic>(
     `/api/wifi/${encodeURIComponent(slug)}`,

@@ -1,20 +1,34 @@
-"""Profile application — Phase 2b dry-run.
+"""Profile application — dry-run preview.
 
-For a given Profile, compute the list of operations we WOULD perform on the
-Slate to materialize it. Nothing is executed against the device. The output
-is consumed by the UI so the user can review what an activation actually
-entails before we flip on real execution in a follow-up phase.
+For a given Profile, compute the list of operations the slate-ctrl agent
+would perform on the Slate to materialize it. Nothing is executed against
+the device. The output is consumed by the UI's PlanModal so the operator
+can review what an activation actually entails before pressing Activer.
 
-Each subsystem returns a small list of `PlanStep`. Steps carry:
-  - the target subsystem (vpn / dns / firewall / wifi / tor / tailscale)
-  - the kind of action (rpc / uci / service)
+Mapping to the agent (see `backend/app/slate_agent/scripts/handlers/`) :
+  network.sh    → catalog reconcile (bridges, DHCP, zones, SC_FR_NET_*,
+                  SC_FR_FWD_*) — global state, planned as one envelope step
+  firewall.sh   → lockdown / wan forward / leak rules / geoip / block_*
+  wifi.sh       → catalog-driven layout + mwctl no_bcn + ip link toggles
+  radio.sh      → per-band channel / htmode / txpower (radio settings,
+                  global state — planned as one envelope step)
+  tor.sh        → daemon state + per-network routing (per-NetworkRow)
+  tailscale.sh  → daemon up/down + admin_only whitelist (SC_FR_TS_ADMIN_*)
+  vpn.sh        → wireguard client up/down + kill-switch
+  adguard.sh    → daemon start/stop (no per-profile filterlists anymore)
+  screen.sh     → one-shot loading overlay during the apply
+  wallpaper.sh  → push the profile's `home` + `lock` wallpapers
+
+Each subsystem returns a small list of `PlanStep`. Steps carry :
+  - the target subsystem
+  - the kind of action (uci / service / noop)
   - target values (what we'd push)
-  - readiness (ready / needs_probe / skipped / blocker)
+  - readiness (ready / skipped / blocker)
   - a human note in French
 
-Readiness `needs_probe` flags subsystems where we haven't yet confirmed the
-right RPC endpoint on firmware 4.8.4 (e.g. `wireguard_client.*` returned
-"Method not found" during initial probe). Phase 2b real will close those.
+The `needs_probe` readiness was a Phase 2 placeholder for RPC endpoints we
+hadn't validated. The agent path replaced that with shell handlers so any
+new code here should use `ready` unless a real prerequisite is missing.
 """
 
 from __future__ import annotations
@@ -31,9 +45,13 @@ Subsystem = Literal[
     "dns",
     "firewall",
     "wifi",
+    "radio",
+    "network",
     "adguard",
     "tor",
     "tailscale",
+    "screen",
+    "wallpaper",
     "logging",
 ]
 ActionKind = Literal["rpc", "uci", "service", "noop"]
@@ -91,15 +109,25 @@ class ProfileApplier:
         self._vpn = vpn_config_store
 
     async def plan(self, profile: Profile) -> ActivationPlan:
+        # Order mirrors the agent's actual run order in scripts/slate-ctrl :
+        #   screen → network → firewall → wifi → vpn → tor → tailscale →
+        #   wallpaper. We surface screen first and wallpaper last so the
+        #   plan reads like a timeline of what the operator would see.
         steps: list[PlanStep] = []
-        steps.extend(await self._plan_vpn(profile))
-        # DNS protection + AdGuard filtering are no longer profile-driven —
-        # see Networks page (per-network DNS protections drive AdGuard
-        # persistent clients).
+        steps.extend(self._plan_screen(profile))
+        steps.extend(self._plan_network())
+        steps.extend(self._plan_radio())
         steps.extend(self._plan_firewall(profile))
+        steps.extend(self._plan_adguard())
+        # DNS protection + AdGuard filterlists removed from the profile model
+        # — they live on each NetworkRow (Networks page → per-network DNS
+        # protection drives AdGuard's persistent-clients REST API). The
+        # adguard.sh handler only deals with the daemon start/stop now.
         steps.extend(await self._plan_wifi(profile))
-        steps.extend(self._plan_tor(profile))
+        steps.extend(await self._plan_vpn(profile))
+        steps.extend(self._plan_tor())
         steps.extend(self._plan_tailscale(profile))
+        steps.extend(self._plan_wallpaper(profile))
         steps.extend(self._plan_logging(profile))
         return ActivationPlan(profile_name=profile.name, steps=steps)
 
@@ -155,11 +183,12 @@ class ProfileApplier:
                 action_kind="uci",
                 summary=f"Provisionner le client {vpn.type} '{vpn.client}'",
                 note=(
-                    "Pousser la config (clé privée + peer + endpoint) dans "
-                    "/etc/config/network ou via le RPC client-side dédié."
+                    "vpn.sh handler — pousser la config (clé privée + peer + "
+                    "endpoint) dans /etc/config/network. Désactive les autres "
+                    "clients en sortie pour éviter le dual-tunnel."
                 ),
                 target_values={"type": vpn.type, "client_name": vpn.client},
-                readiness="needs_probe",
+                readiness="ready" if vpn.type == "wireguard" else "needs_probe",
             )
         )
         steps.append(
@@ -167,8 +196,11 @@ class ProfileApplier:
                 subsystem="vpn",
                 action_kind="service",
                 summary=f"Activer la connexion {vpn.client}",
-                note="ifup wgclient0 (ou équivalent OpenVPN).",
-                readiness="needs_probe",
+                note=(
+                    "ifup <ifname> du client WireGuard via netifd. OpenVPN reste "
+                    "à câbler (pas dans la roadmap actuelle)."
+                ),
+                readiness="ready" if vpn.type == "wireguard" else "needs_probe",
             )
         )
         if vpn.kill_switch:
@@ -176,13 +208,14 @@ class ProfileApplier:
                 PlanStep(
                     subsystem="vpn",
                     action_kind="uci",
-                    summary="Activer le kill-switch (firewall lock)",
+                    summary="Kill-switch firewall : DROP si oif != client VPN",
                     note=(
-                        "Bloquer tout trafic sortant si le tunnel tombe : règle firewall "
-                        "qui DROP si oif != wgclient0."
+                        "Ajoute une règle SC_FR_KS_WAN_DROP : si le tunnel tombe, "
+                        "le trafic LAN→WAN est bloqué. Couplé à block_all_outbound "
+                        "pour un fail-closed strict."
                     ),
                     target_values={"kill_switch": True},
-                    readiness="needs_probe",
+                    readiness="ready",
                 )
             )
         return steps
@@ -198,37 +231,57 @@ class ProfileApplier:
                 PlanStep(
                     subsystem="firewall",
                     action_kind="uci",
-                    summary="Activer le mode lockdown",
+                    summary="Mode lockdown : wan forward=REJECT + activer les leak-rules",
                     note=(
-                        "Zone lan: input=ACCEPT, output=REJECT par défaut, autoriser uniquement "
-                        "les services whitelistés (DNS, NTP, VPN tunnel)."
+                        "uci set firewall.@zone[wan].forward=REJECT + enable=1 sur "
+                        "lan/guest/wgserver/ovpnserver_drop_leaked_dns + leak_adgdns. "
+                        "fw3 reload (background, 1s delay) après commit."
                     ),
                     target_values={"lockdown": True},
-                    readiness="needs_probe",
+                    readiness="ready",
+                )
+            )
+        else:
+            steps.append(
+                PlanStep(
+                    subsystem="firewall",
+                    action_kind="uci",
+                    summary="wan forward=ACCEPT (mode standard)",
+                    note=(
+                        "Lockdown OFF : restaure la wan zone à forward=ACCEPT. "
+                        "Les leak-rules sont laissées comme l'opérateur les a configurées "
+                        "(page Hardening), on ne les force pas off."
+                    ),
+                    target_values={"lockdown": False},
+                    readiness="ready",
                 )
             )
         if fw.geoip_whitelist:
             steps.append(
                 PlanStep(
                     subsystem="firewall",
-                    action_kind="uci",
-                    summary=f"GeoIP whitelist: {', '.join(fw.geoip_whitelist)}",
+                    action_kind="noop",
+                    summary=f"GeoIP whitelist demandée: {', '.join(fw.geoip_whitelist)}",
                     note=(
-                        "Nécessite le paquet `ipset` + une source GeoIP. "
-                        "Règle: DROP par défaut, ACCEPT si dest_country IN whitelist."
+                        "V2 : nécessite iptables-mod-geoip + GeoLite2 DB (~12 MB, non "
+                        "shippé par défaut). Le handler agent log et skip pour l'instant."
                     ),
                     target_values={"whitelist": fw.geoip_whitelist},
-                    readiness="needs_probe",
+                    readiness="skipped",
                 )
             )
         if fw.block_telemetry:
             steps.append(
                 PlanStep(
                     subsystem="firewall",
-                    action_kind="uci",
-                    summary="Bloquer les domaines de télémétrie connus",
-                    note="Liste pré-établie (Microsoft, Apple, Google, Samsung…) via dnsmasq blocklist.",
-                    readiness="needs_probe",
+                    action_kind="noop",
+                    summary="block_telemetry délégué à AdGuard",
+                    note=(
+                        "Les domaines de télémétrie vivent dans les filterlists "
+                        "AdGuard (hagezi-tracker-radio, hagezi-pro). Pas une "
+                        "responsabilité du firewall — handler log seulement."
+                    ),
+                    readiness="skipped",
                 )
             )
         if fw.block_all_outbound:
@@ -236,21 +289,15 @@ class ProfileApplier:
                 PlanStep(
                     subsystem="firewall",
                     action_kind="uci",
-                    summary="DROP par défaut sur tout l'outbound",
-                    note="Mode panic — n'autoriser QUE les whitelist explicites. Très restrictif.",
+                    summary="block_all_outbound : désactiver lan→wan forwarding",
+                    note=(
+                        "uci set firewall.@forwarding[lan→wan].enabled=0. "
+                        "Très restrictif — couplé au kill-switch VPN."
+                    ),
                     target_values={"deny_all_outbound": True},
-                    readiness="needs_probe",
+                    readiness="ready",
                 )
             )
-        if not steps:
-            return [
-                PlanStep(
-                    subsystem="firewall",
-                    action_kind="noop",
-                    summary="Firewall: défauts (pas de durcissement)",
-                    readiness="skipped",
-                )
-            ]
         return steps
 
     async def _plan_wifi(self, profile: Profile) -> list[PlanStep]:
@@ -274,16 +321,25 @@ class ProfileApplier:
                 "MLO " + "/".join(ssid.bands) if ssid.mlo
                 else "/".join(f"{b}GHz" for b in ssid.bands)
             )
+            # wifi.sh handler flow per SSID :
+            #   - up    : ip link up <ifname>   ; mwctl <ifname> set no_bcn 0
+            #   - down  : mwctl <ifname> set no_bcn 1 ; ip link down <ifname>
+            # Layout (ssid, encryption, network, mld) only changes on catalog
+            # edits — pure profile activation stays reboot-free.
+            action_desc = (
+                "ip link up + mwctl no_bcn=0 (réarme le chip MTK)"
+                if ref.enabled
+                else "mwctl no_bcn=1 + ip link down (stoppe le beacon chip-level)"
+            )
             steps.append(
                 PlanStep(
                     subsystem="wifi",
                     action_kind="uci",
                     summary=f"{verb} SSID '{ssid.ssid_name}' ({band_label} · {ssid.security})",
                     note=(
-                        f"uci set wireless.<iface>.disabled={'0' if ref.enabled else '1'} "
-                        f"sur toutes les ifaces matchant '{ssid.ssid_name}', "
-                        f"puis `wifi reload`. Bridge: {ref.network_slug}. "
-                        f"Client-iso: {ssid.client_isolation}."
+                        f"{action_desc}. Bridge: br-{ref.network_slug}. "
+                        f"Client-iso: {ssid.client_isolation}. Pas de reboot "
+                        f"tant que le layout (ssid/enc/network) ne change pas."
                     ),
                     target_values={
                         "slug": ssid.slug,
@@ -293,7 +349,7 @@ class ProfileApplier:
                         "network": ref.network_slug,
                         "enabled": ref.enabled,
                     },
-                    readiness="needs_probe",
+                    readiness="ready",
                 )
             )
         if not steps:
@@ -307,14 +363,27 @@ class ProfileApplier:
             ]
         return steps
 
-    def _plan_tor(self, _profile: Profile) -> list[PlanStep]:
-        # Per-profile Tor was removed from the model — the global daemon
-        # switch + bridges + exit_country live in TorSettings (DB), and
-        # routing decisions live on NetworkRow.tor_route_mode. No profile-
-        # scoped Tor planning anymore. Kept as a stub so any caller that
-        # still iterates _plan_* methods gets an empty list instead of an
-        # AttributeError on the removed `profile.tor` field.
-        return []
+    def _plan_tor(self) -> list[PlanStep]:
+        # Per-profile Tor was removed from the model. Daemon state lives in
+        # TorSettings (DB, global), bridges in TorBridgeStore, per-network
+        # routing modes on NetworkRow.tor_route_mode. The agent's tor.sh
+        # handler reads the synced payload and reconciles all of these. We
+        # surface a single envelope step here so the operator sees the
+        # subsystem is touched without enumerating every network row.
+        return [
+            PlanStep(
+                subsystem="tor",
+                action_kind="service",
+                summary="Tor : réconcilier daemon + per-network routing",
+                note=(
+                    "tor.sh handler — start/stop tor selon TorSettings.daemon_enabled, "
+                    "pousse les bridges + exit-country, installe les DNAT REDIRECT "
+                    "vers TransPort/DNSPort pour chaque NetworkRow.tor_route_mode = "
+                    "transparent. Idempotent sur les modes inchangés."
+                ),
+                readiness="ready",
+            )
+        ]
 
     def _plan_tailscale(self, profile: Profile) -> list[PlanStep]:
         ts = profile.tailscale
@@ -323,61 +392,168 @@ class ProfileApplier:
                 PlanStep(
                     subsystem="tailscale",
                     action_kind="service",
-                    summary="Tailscale: déconnecter",
-                    note="tailscale down",
-                    readiness="needs_probe",
+                    summary="Tailscale : déconnecter",
+                    note="tailscale down — termine la session tailnet sur le Slate.",
+                    readiness="ready",
                 )
             ]
         steps = [
             PlanStep(
                 subsystem="tailscale",
                 action_kind="service",
-                summary="Tailscale: connecter",
-                note="tailscale up (RPC tailscale.get_status confirmé OK).",
-                readiness="needs_probe",
+                summary="Tailscale : connecter + advertise subnets exposés",
+                note=(
+                    "tailscale up avec --advertise-routes calculé depuis la "
+                    "colonne expose_to_tailnet de chaque NetworkRow (source de "
+                    "vérité catalogue, pas une option profil). HA watchdog "
+                    "réconcilié côté controller en parallèle."
+                ),
+                readiness="ready",
             )
         ]
-        if ts.admin_only:
-            # Source of truth for the port list lives in the sync layer
-            # (single ADMIN_PORTS_TCP tuple). Import lazily to avoid
-            # cycles between profiles ↔ slate_agent at module load.
-            from app.slate_agent.sync import ADMIN_PORTS_TCP
-            ports = ", ".join(str(p) for p in ADMIN_PORTS_TCP)
-            steps.append(
-                PlanStep(
-                    subsystem="tailscale",
-                    action_kind="uci",
-                    summary=f"Restreindre l'admin tailnet aux IPs whitelistées (TCP {ports})",
-                    note=(
-                        "Génère SC_FR_TS_ADMIN_ALLOW_<ip> + SC_FR_TS_ADMIN_DROP_ALL "
-                        "puis fw3 reload. La whitelist se gère dans Settings > "
-                        "Tailnet admin IPs ; vide = no-op (auto-downgrade côté sync)."
-                    ),
-                    readiness="ready",
-                )
+        # Admin-only enforcement : depuis 2026-06-01 le flag profil est
+        # ignoré côté sync — la whitelist (admin_ips non vide) suffit. On
+        # le reflète ici pour que le plan corresponde au sync.
+        from app.slate_agent.sync import ADMIN_PORTS_TCP
+        ports = ", ".join(str(p) for p in ADMIN_PORTS_TCP)
+        steps.append(
+            PlanStep(
+                subsystem="tailscale",
+                action_kind="uci",
+                summary=f"Tailnet admin whitelist : SC_FR_TS_ADMIN_* (TCP {ports})",
+                note=(
+                    "Le handler tailscale.sh purge tous les SC_FR_TS_ADMIN_* puis "
+                    "re-crée ALLOW par IP whitelistée (Settings → Tailnet admin) + "
+                    "DROP_ALL sur la plage tailnet. Whitelist vide = no-op (anti-"
+                    "self-DoS). Indépendant du flag admin_only profil (retiré)."
+                ),
+                readiness="ready",
             )
+        )
         return steps
 
+    # ---------------------------- new envelope planners ---------------------- #
+
+    def _plan_screen(self, profile: Profile) -> list[PlanStep]:
+        return [
+            PlanStep(
+                subsystem="screen",
+                action_kind="service",
+                summary=f"LCD : afficher l'overlay 'loading {profile.name}'",
+                note=(
+                    "screen.sh handler — paint un PNG status via fb takeover, "
+                    "puis restart gl_screen une fois l'apply terminé. Visible "
+                    "pendant ~6 s sur l'écran tactile. Gated par "
+                    "Settings.show_screen_messages."
+                ),
+                readiness="ready",
+            )
+        ]
+
+    def _plan_network(self) -> list[PlanStep]:
+        return [
+            PlanStep(
+                subsystem="network",
+                action_kind="uci",
+                summary="Réseaux : réconcilier le catalogue (bridges, DHCP, zones, forwardings)",
+                note=(
+                    "network.sh handler — upsert par réseau du catalogue : "
+                    "device br-<slug>, interface (static/DHCPv6-PD), pool dhcp, "
+                    "zone firewall + règles SC_FR_NET_<SLUG>_{DHCP,DNS,ICMP,"
+                    "LUCI,SSH} + forwardings SC_FR_FWD_<SLUG>_TO_{WAN,<peer>}. "
+                    "Orphan purger sur slate_ctrl_managed='1' uniquement. "
+                    "Reload séquentiel : network → dnsmasq → firewall."
+                ),
+                readiness="ready",
+            )
+        ]
+
+    def _plan_radio(self) -> list[PlanStep]:
+        return [
+            PlanStep(
+                subsystem="radio",
+                action_kind="uci",
+                summary="Radio L1 : channel / htmode / txpower par bande (si configuré)",
+                note=(
+                    "radio.sh handler — réconcilie wireless.radio<N>.{channel,"
+                    "htmode,txpower,country} depuis les RadioConfig store. "
+                    "Optionnel : payload vide = handler no-op, le driver MTK "
+                    "garde ses défauts ACS/EHT."
+                ),
+                readiness="ready",
+            )
+        ]
+
+    def _plan_adguard(self) -> list[PlanStep]:
+        return [
+            PlanStep(
+                subsystem="adguard",
+                action_kind="service",
+                summary="AdGuard Home : assurer le daemon démarré",
+                note=(
+                    "adguard.sh handler — start/stop le daemon AdGuard selon "
+                    "présence de NetworkRows avec DNS protection activée. Pas "
+                    "de filterlists profil-spécifiques (architecture per-network "
+                    "via REST API persistent-clients, gérée par DnsProtectionManager)."
+                ),
+                readiness="ready",
+            )
+        ]
+
+    def _plan_wallpaper(self, profile: Profile) -> list[PlanStep]:
+        return [
+            PlanStep(
+                subsystem="wallpaper",
+                action_kind="service",
+                summary=f"LCD : pousser les wallpapers du profil '{profile.name}'",
+                note=(
+                    "wallpaper.sh handler — copie /etc/slate-controller/"
+                    "wallpapers/<profile>_{home,lock}.png vers /etc/gl_screen/"
+                    "wallpaper_{home,wake_display}.png puis restart gl_screen. "
+                    "No-op si le profil n'a pas de wallpapers uploadés."
+                ),
+                readiness="ready",
+            )
+        ]
+
     def _plan_logging(self, profile: Profile) -> list[PlanStep]:
+        # Logging is declared in the profile model (level, forward_to_siem)
+        # but the agent has no `logging.sh` handler — the dispatcher's
+        # handler loop is :
+        #   screen network firewall wifi radio vpn tor adguard tailscale wallpaper
+        # So we surface the intent honestly as a "skipped" step rather than
+        # claim something happens. To wire this up later : add a
+        # logging.sh handler that uci-sets system.@system[0].log_level (+
+        # log_ip/log_proto/log_port for SIEM forward), and append `logging`
+        # to the slate-ctrl dispatcher loop. This step keeps the UI showing
+        # the user's declared intent so the gap is visible.
         log = profile.logging
         steps = [
             PlanStep(
                 subsystem="logging",
-                action_kind="uci",
-                summary=f"Niveau de log système: {log.level}",
-                note="uci set system.@system[0].log_level=<level>",
+                action_kind="noop",
+                summary=f"Logging déclaré : level={log.level} (pas encore appliqué)",
+                note=(
+                    "Aucun handler logging.sh côté agent — le champ est "
+                    "préservé dans le profil mais aucun uci set n'est poussé. "
+                    "À câbler quand un cas d'usage SIEM se concrétisera."
+                ),
                 target_values={"level": log.level},
-                readiness="ready",
+                readiness="skipped",
             )
         ]
         if log.forward_to_siem:
             steps.append(
                 PlanStep(
                     subsystem="logging",
-                    action_kind="uci",
-                    summary="Activer le forward syslog → SIEM externe",
-                    note="uci set system.@system[0].log_ip + log_proto (+ port). Requiert SIEM_URL configuré.",
-                    readiness="needs_probe",
+                    action_kind="noop",
+                    summary="Forward syslog → SIEM demandé (non implémenté)",
+                    note=(
+                        "Champ profile.logging.forward_to_siem=true mais pas "
+                        "de handler agent. Requiert SIEM_URL configuré + "
+                        "logging.sh à écrire."
+                    ),
+                    readiness="skipped",
                 )
             )
         return steps

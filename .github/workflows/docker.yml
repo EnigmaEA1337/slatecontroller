@@ -1,0 +1,80 @@
+name: Docker CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "**/Dockerfile"
+      - "docker-compose*.yml"
+      - "builders/**/Dockerfile"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "**/Dockerfile"
+      - "docker-compose*.yml"
+      - "builders/**/Dockerfile"
+      - ".github/workflows/docker.yml"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hadolint:
+    runs-on: ubuntu-latest
+    name: hadolint Dockerfiles
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/Dockerfile
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: builders/forti/Dockerfile
+
+  compose-validate:
+    runs-on: ubuntu-latest
+    name: docker compose config
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dev compose
+        # Skip `volumes:` substitution by not setting env — compose still
+        # validates structure + version + service references.
+        run: docker compose -f docker-compose.dev.yml config --quiet
+      - name: Validate prod compose
+        run: docker compose -f docker-compose.yml config --quiet
+
+  build-images:
+    runs-on: ubuntu-latest
+    name: build images (dev target)
+    needs: [hadolint, compose-validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend (dev target)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: dev
+          push: false
+          cache-from: type=gha,scope=backend-dev
+          cache-to: type=gha,mode=max,scope=backend-dev
+      - name: Build frontend (prod target)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          build-args: |
+            VITE_API_URL=
+      - name: Build forti-builder
+        uses: docker/build-push-action@v6
+        with:
+          context: ./builders/forti
+          push: false
+          cache-from: type=gha,scope=forti-builder
+          cache-to: type=gha,mode=max,scope=forti-builder

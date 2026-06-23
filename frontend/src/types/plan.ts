@@ -3,9 +3,13 @@ export type PlanSubsystem =
   | "dns"
   | "firewall"
   | "wifi"
+  | "radio"
+  | "network"
   | "adguard"
   | "tor"
   | "tailscale"
+  | "screen"
+  | "wallpaper"
   | "logging";
 
 export type PlanActionKind = "rpc" | "uci" | "service" | "noop";

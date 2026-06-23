@@ -70,6 +70,7 @@ class DeviceStore:
         rpc_username: str,
         rpc_password: str,
         notes: str,
+        security_label: str = "",
         is_default: bool = False,
     ) -> DeviceRow:
         encrypted = encrypt(rpc_password)
@@ -91,6 +92,7 @@ class DeviceStore:
                 rpc_scheme=rpc_scheme,
                 ssh_port=ssh_port,
                 notes=notes,
+                security_label=security_label,
                 is_default=is_default,
                 status="pending",
             )

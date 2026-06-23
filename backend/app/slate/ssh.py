@@ -53,6 +53,40 @@ def _extract_host(slate_url: str) -> str:
     return parsed.hostname or slate_url
 
 
+def _normalize_pubkey(pk: str) -> str:
+    """Return ``<algo> <b64>`` (drop the trailing comment / hostname).
+
+    OpenSSH host pubkeys are usually exported with a trailing comment ;
+    we compare the algorithm + base64 payload only so a benign comment
+    change (kernel hostname rewrite, etc.) doesn't look like a MITM.
+    """
+    parts = pk.strip().split(None, 2)
+    if len(parts) < 2:
+        return pk.strip()
+    return f"{parts[0]} {parts[1]}"
+
+
+def _pubkeys_equal(a: str, b: str) -> bool:
+    return _normalize_pubkey(a) == _normalize_pubkey(b)
+
+
+def _pubkey_fingerprint(pk: str) -> str:
+    """sha256:<base64> — same format as ``ssh-keygen -l -E sha256``."""
+    import base64
+    import hashlib
+
+    parts = pk.strip().split(None, 2)
+    if len(parts) < 2:
+        return ""
+    try:
+        raw = base64.b64decode(parts[1])
+    except Exception:  # noqa: BLE001
+        return ""
+    digest = hashlib.sha256(raw).digest()
+    b64 = base64.b64encode(digest).decode().rstrip("=")
+    return f"SHA256:{b64}"
+
+
 class SlateSSH:
     """One persistent SSH connection to the Slate, serialized by an asyncio lock.
 
@@ -75,7 +109,26 @@ class SlateSSH:
         timeout: float = 10.0,
         private_key_pem: str | None = None,
         url_resolver: SlateUrlResolver | None = None,
+        expected_host_pubkey: str = "",
+        on_host_pubkey_seen: object | None = None,
     ) -> None:
+        """
+        ``expected_host_pubkey`` + ``on_host_pubkey_seen`` implement the
+        TOFU pin (nightly audit 2026-06-23 high finding) :
+
+          - Empty ``expected_host_pubkey`` + a callback → first-connect
+            TOFU mode : the live host key is accepted and forwarded to
+            the callback for persistence (typically into DeviceRow.
+            ssh_host_pubkey).
+          - Non-empty ``expected_host_pubkey`` → strict mode : the live
+            key MUST match byte-for-byte (whitespace-trimmed). Mismatch
+            raises SlateSSHError and drops the connection ; this is the
+            UI-visible "possible MITM or device re-flash" signal.
+          - No callback AND empty pin → legacy permissive mode (kept so
+            tests + bootstrap paths don't break). A warning is logged.
+
+        ``on_host_pubkey_seen`` is an ``async (pubkey: str) -> None`` coroutine.
+        """
         self._resolver = url_resolver
         if url_resolver is not None:
             # Initial host = the resolver's last known active. Will be
@@ -88,6 +141,8 @@ class SlateSSH:
         self._port = port
         self._timeout = timeout
         self._private_key_pem = private_key_pem
+        self._expected_host_pubkey = expected_host_pubkey.strip()
+        self._on_host_pubkey_seen = on_host_pubkey_seen
         self._conn: asyncssh.SSHClientConnection | None = None
         self._lock = asyncio.Lock()
 
@@ -193,8 +248,86 @@ class SlateSSH:
         # Defensive: loop should either set _conn or raise. assert helps
         # mypy + catches future logic changes.
         assert self._conn is not None, f"loop exited without conn (last={last_exc!r})"
+        # TOFU host-key pin check. Failure here closes the connection and
+        # raises — the SSH session never serves a command on a non-trusted
+        # peer.
+        await self._verify_or_record_host_pubkey()
         logger.info("slate_ssh.connected", host=self._host, auth_mode=self.auth_mode)
         return self._conn
+
+    async def _verify_or_record_host_pubkey(self) -> None:
+        """Compare the live host key against the stored TOFU pin.
+
+        Behaviour matrix (see __init__ docstring) :
+          - pin set + live matches      → return silently
+          - pin set + live differs      → close + raise SlateSSHError
+          - pin empty + callback set    → record live key via callback
+          - pin empty + no callback     → warn + accept (legacy)
+        """
+        assert self._conn is not None
+        try:
+            srv_key = self._conn.get_server_host_key()
+        except Exception as exc:  # noqa: BLE001 — defensive, never break the call
+            logger.warning(
+                "slate_ssh.host_key_inspect_failed",
+                host=self._host, error=str(exc),
+            )
+            return
+        if srv_key is None:
+            return
+        try:
+            live = srv_key.export_public_key("openssh").decode().strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "slate_ssh.host_key_export_failed",
+                host=self._host, error=str(exc),
+            )
+            return
+
+        pinned = self._expected_host_pubkey
+        if pinned:
+            if _pubkeys_equal(live, pinned):
+                return
+            # MITM or device re-flash. Drop the connection and bail — we
+            # must NOT serve commands on a peer that doesn't match the
+            # expected identity.
+            logger.error(
+                "slate_ssh.host_key_mismatch",
+                host=self._host,
+                live_fingerprint=_pubkey_fingerprint(live),
+                pinned_fingerprint=_pubkey_fingerprint(pinned),
+            )
+            await self._drop_locked()
+            raise SlateSSHError(
+                "SSH host key mismatch — possible MITM or device re-flash. "
+                "Live key does not match the pinned value. To re-trust after "
+                "an intentional re-flash, clear ssh_host_pubkey on the device "
+                "row and reconnect."
+            )
+
+        # No pin yet → TOFU record (if callback provided).
+        if self._on_host_pubkey_seen is not None:
+            try:
+                await self._on_host_pubkey_seen(live)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "slate_ssh.host_key_persist_failed",
+                    host=self._host, error=str(exc),
+                )
+            # Update the in-memory pin so subsequent reconnects validate
+            # without an extra DB round-trip.
+            self._expected_host_pubkey = live
+            logger.info(
+                "slate_ssh.host_key_tofu",
+                host=self._host,
+                fingerprint=_pubkey_fingerprint(live),
+            )
+        else:
+            logger.warning(
+                "slate_ssh.host_key_unpinned",
+                host=self._host,
+                note="no pin recorded and no persistence callback — operating in legacy permissive mode",
+            )
 
     async def run(self, command: str, *, timeout: float | None = None) -> SSHResult:
         """Run a command, return stdout/stderr/exit. Raises on transport errors.
@@ -238,7 +371,12 @@ class SlateSSH:
         )
 
     async def put_bytes(
-        self, payload: bytes, remote_path: str, *, mode: int = 0o644
+        self,
+        payload: bytes,
+        remote_path: str,
+        *,
+        mode: int = 0o644,
+        timeout: float | None = None,
     ) -> None:
         """Upload raw bytes to `remote_path`. Atomic via .tmp + mv.
 
@@ -250,7 +388,16 @@ class SlateSSH:
 
         Atomic semantics: write to `<remote>.tmp`, then `mv` onto the target.
         Original is preserved if the write fails mid-stream.
+
+        Timeout : nightly audit 2026-06-23 flagged the absence of a
+        deadline on remote stdin streaming as a stability risk — a remote
+        ``cat >`` that stalls (disk full, fs read-only, dropbear backpressure)
+        used to wedge the call indefinitely. The default upper bound is
+        generous (60 s) to fit large wallpaper / openfortivpn binary
+        pushes, but callers can pass an explicit ``timeout`` (in seconds)
+        when they know the payload is small + fast.
         """
+        t = timeout if timeout is not None else max(self._timeout, 60.0)
         async with self._lock:
             conn = await self._ensure_connected()
         tmp_path = f"{remote_path}.tmp"
@@ -261,25 +408,37 @@ class SlateSSH:
         q_target = shlex.quote(remote_path)
         try:
             # 1. Stream the payload via stdin into a fresh temp file.
-            r = await conn.run(
-                f"cat > {q_tmp}", input=payload, encoding=None, check=False,
+            r = await asyncio.wait_for(
+                conn.run(
+                    f"cat > {q_tmp}", input=payload, encoding=None, check=False,
+                ),
+                timeout=t,
             )
             if r.exit_status != 0:
                 raise SlateSSHError(
                     f"upload {remote_path!r}: cat > tmp returned exit={r.exit_status}"
                 )
-            # 2. chmod + atomic move.
-            r2 = await conn.run(
-                f"chmod {mode:o} {q_tmp} && mv {q_tmp} {q_target}",
-                check=False,
+            # 2. chmod + atomic move. Use a smaller timeout — these are
+            # millisecond operations on the remote so anything past a few
+            # seconds is a hung shell, not legitimate work.
+            r2 = await asyncio.wait_for(
+                conn.run(
+                    f"chmod {mode:o} {q_tmp} && mv {q_tmp} {q_target}",
+                    check=False,
+                ),
+                timeout=10.0,
             )
             if r2.exit_status != 0:
                 # Try to clean up the tmp so we don't litter.
-                await conn.run(f"rm -f {q_tmp}", check=False)
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        conn.run(f"rm -f {q_tmp}", check=False),
+                        timeout=5.0,
+                    )
                 raise SlateSSHError(
                     f"upload {remote_path!r}: chmod/mv exit={r2.exit_status}"
                 )
-        except (asyncssh.Error, OSError, ConnectionError) as exc:
+        except (TimeoutError, asyncssh.Error, OSError, ConnectionError) as exc:
             async with self._lock:
                 await self._drop_locked()
             raise SlateSSHError(f"put_bytes {remote_path!r}: {exc!r}") from exc
@@ -313,21 +472,32 @@ class SlateSSH:
         return bytes(out or b"")
 
     async def put_bytes_raw(
-        self, payload: bytes, remote_path: str,
+        self,
+        payload: bytes,
+        remote_path: str,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Stream bytes directly into `remote_path` — no .tmp + mv dance.
 
         Used for char devices like /dev/fb0 where atomic rename is not
         applicable. Bytes go via stdin to a remote `cat > path` in binary
         mode. Caller is responsible for the path being writable in-place.
+
+        Same timeout discipline as :meth:`put_bytes` — default 60 s cap,
+        explicit override available.
         """
+        t = timeout if timeout is not None else max(self._timeout, 60.0)
         async with self._lock:
             conn = await self._ensure_connected()
         import shlex
         cmd = f"cat > {shlex.quote(remote_path)}"
         try:
-            r = await conn.run(cmd, input=payload, encoding=None, check=False)
-        except (asyncssh.Error, OSError, ConnectionError) as exc:
+            r = await asyncio.wait_for(
+                conn.run(cmd, input=payload, encoding=None, check=False),
+                timeout=t,
+            )
+        except (TimeoutError, asyncssh.Error, OSError, ConnectionError) as exc:
             async with self._lock:
                 await self._drop_locked()
             raise SlateSSHError(f"put_bytes_raw {remote_path!r}: {exc!r}") from exc

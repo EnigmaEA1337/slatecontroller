@@ -550,17 +550,41 @@ _wifi_link_master() {
 # does at boot, so a VAP that wasn't bridged stays UP-but-orphan and never
 # beacons (the br-<net> stays NO-CARRIER). Idempotent : only acts if the
 # current state differs.
+#
+# **MTK chip-level beacon engine** : on MT7990, plain ``ip link set down``
+# only drops the netdev's TX/RX queue (visible via /proc/net/dev counters
+# stuck at 0), it does NOT tell the chip's internal beacon table to stop
+# broadcasting that BSS over the air. The canonical MTK way (seen in
+# /lib/wifi/set_bcn.lua and /lib/wifi/mtwifi.lua used by /sbin/wifi) is
+# ``mwctl <ifname> set no_bcn 0|1`` which flips the per-VAP beacon flag
+# on the chip directly. We pair it with the link toggle so both layers
+# agree :
+#   - down  : mwctl no_bcn=1  +  ip link down
+#   - up    : ip link up      +  mwctl no_bcn=0   (set BEFORE bridging so
+#             beacons resume in sync with the link coming up)
+# Failures are silently swallowed via ``|| true`` because mwctl is MTK-
+# specific — running this script on a non-MTK build (mac80211 only) must
+# stay a no-op there, not error out.
 #   $1 ifname  $2 want (up|down)  $3 net_slug (empty → no bridging step)
 _wifi_link_apply() {
   local ifname="$1" want="$2" net="$3"
   [ -z "$ifname" ] && return 0
   local cur
   cur=$(_wifi_link_state "$ifname")
-  case "$cur" in
-    missing) return 0 ;;
-    UP)  [ "$want" = "down" ] && ip link set "$ifname" down ;;
-    DOWN) [ "$want" = "up"   ] && ip link set "$ifname" up   ;;
-  esac
+  if [ "$want" = "down" ]; then
+    # Stop chip beacons FIRST, then drop the netdev. Reversing the order
+    # leaves a window where the chip still beacons a half-torn-down VAP.
+    mwctl "$ifname" set no_bcn 1 2>/dev/null || true
+    [ "$cur" = "UP" ] && ip link set "$ifname" down
+  else  # want=up
+    case "$cur" in
+      missing) return 0 ;;
+      DOWN) ip link set "$ifname" up ;;
+    esac
+    # Re-arm chip beacons AFTER the netdev is up so the driver finds the
+    # iface in the expected state when it accepts the no_bcn=0 flip.
+    mwctl "$ifname" set no_bcn 0 2>/dev/null || true
+  fi
   if [ "$want" = "up" ] && [ -n "$net" ]; then
     local want_master="br-$net" cur_master
     cur_master=$(_wifi_link_master "$ifname")
@@ -810,6 +834,21 @@ wifi_apply() {
   fi
   for sec in $(_wifi_all_iface_sections); do
     _wifi_is_claimed "$sec" && continue
+    # STA-mode + mesh sections are upstream-link / peer-link wifi-iface
+    # entries we do NOT own. They're created by :
+    #   - GL.iNet stock LCD "Hotel mode" / travel-router (wireless.sta →
+    #     apclii0 associating with the upstream hotel WiFi),
+    #   - the OEM stock UI when the operator switches to repeater mode,
+    #   - a future repeater/mesh feature on the controller side.
+    # The catalog only owns AP-mode SSIDs ; touching STA/mesh sections
+    # would churn `-wireless.sta` on every apply, falsely fire the
+    # layout-pending path (= REBOOT), and sever the upstream uplink. So
+    # we skip them entirely (NEITHER keep NOR delete — leave intact).
+    local _sec_mode
+    _sec_mode=$(uci -q get "wireless.$sec.mode" 2>/dev/null)
+    case "$_sec_mode" in
+      sta|mesh) continue ;;
+    esac
     case "$keep_pat" in
       *" $sec "*)
         # KEEP — just disable + mark managed. We need this section as a
@@ -860,6 +899,11 @@ wifi_apply() {
     # Slot layout itself changed (ssid / enc / network / mld / iface list
     # / isolate / hidden / mark). The MTK driver only applies these at
     # boot — signal the controller to reboot.
+    # Diagnostic line so the operator can see WHICH fields changed when
+    # they're surprised by a reboot (e.g. when only profile activation
+    # was expected, but a catalog edit / advanced-option drift snuck in).
+    echo "wifi: layout-pending uci lines that forced reboot:" >&2
+    printf '  %s\n' $layout_pending >&2
     uci commit wireless 2>&1 || { echo "wifi: uci commit failed" >&2; return 1; }
     echo "wifi: layout changed — REBOOT required to apply (uplink-safe)"
     [ "$errors" -gt 0 ] && return 1

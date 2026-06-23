@@ -114,6 +114,12 @@ class ProfileEnvelope(BaseModel):
     scores: ProfileScoresModel
     created_at: datetime
     updated_at: datetime
+    # Sync state vs the Slate's /etc/slate-controller/profiles/<name>.json.
+    # `last_synced_at` is NULL when the JSON was never pushed ; the UI uses
+    # `out_of_sync` to badge profiles whose edits haven't been mirrored to
+    # the device — those would be replayed stale by the button cycle / LCD.
+    last_synced_at: datetime | None = None
+    out_of_sync: bool = True
     # Per-kind wallpaper metadata. The UI renders one upload slot per kind
     # and uses `uploaded_at` as cache-buster on the image URL.
     wallpapers: dict[str, WallpaperSlotInfo] = Field(default_factory=dict)
@@ -148,6 +154,8 @@ class ProfileEnvelope(BaseModel):
             scores=ProfileScoresModel.of(scores),
             created_at=stored.created_at,
             updated_at=stored.updated_at,
+            last_synced_at=stored.last_synced_at,
+            out_of_sync=stored.out_of_sync,
             wallpapers=slots,
         )
 
@@ -302,11 +310,51 @@ async def create_profile(
     return ProfileEnvelope.of(stored, active_name=active)
 
 
+async def _sync_one_to_slate(
+    *,
+    profile: Profile,
+    request: Request,
+    ssh: SlateSSH,
+    wifi: WifiSsidStore,
+    store: ProfileStore,
+) -> dict:
+    """Push ONE profile's resolved JSON to the Slate and mark it synced.
+
+    Returns the SyncReport.to_dict() for the caller to surface to the UI.
+    Failure is non-fatal at the SSH level (the report carries `errors[]`);
+    only an unexpected exception propagates. ``last_synced_at`` is stamped
+    ONLY on a clean push (rep.ok and the file landed in pushed list).
+
+    Used both by the auto-sync hook on PUT and by the explicit
+    POST /sync-to-slate endpoint so the two paths can't drift.
+    """
+    from app.networks.store import NetworkStore
+    from app.slate_agent.sync import sync_profiles
+    from app.tor.store import TorBridgeStore, TorSettingsStore
+
+    sf = make_session_factory(request.app.state.db_engine)
+    wifi_catalog = await wifi.list_all()
+    network_catalog = await NetworkStore(sf).list_all()
+    rep = await sync_profiles(
+        ssh, [profile], wifi_catalog=wifi_catalog,
+        network_catalog=network_catalog,
+        wallpaper_store=_wallpaper_store(request),
+        tor_settings_store=TorSettingsStore(sf),
+        tor_bridge_store=TorBridgeStore(sf),
+    )
+    if rep.ok and any(profile.name in p for p in rep.pushed):
+        await store.mark_synced(profile.name)
+    return rep.to_dict()
+
+
 @router.put("/{name}", response_model=ProfileEnvelope)
 async def update_profile(
     name: str,
     profile: Profile,
+    request: Request,
     store: Annotated[ProfileStore, Depends(get_profile_store)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> ProfileEnvelope:
     try:
@@ -316,9 +364,90 @@ async def update_profile(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Profile {name!r} not found",
         ) from exc
+    # Auto-sync to the Slate so the agent / LCD never replays a stale
+    # profile.json. Best-effort : if the Slate is offline / SSH errors out,
+    # we still return the updated envelope ; `out_of_sync` will stay true
+    # so the UI shows a "désynchronisé" badge and offers a manual retry.
+    try:
+        sync_dict = await _sync_one_to_slate(
+            profile=stored.profile, request=request, ssh=ssh,
+            wifi=wifi, store=store,
+        )
+        logger.info(
+            "profile.updated.autosync", name=name,
+            ok=sync_dict.get("ok"), errors=sync_dict.get("errors"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # SSH unreachable / TOR adapter crash / etc. — non-fatal here.
+        logger.warning(
+            "profile.updated.autosync_failed", name=name, error=str(exc),
+        )
+    # Re-read so `last_synced_at` reflects the just-completed sync.
+    stored = await store.get(name)
     active = await store.get_active_name()
     logger.info("profile.updated", name=name)
     return ProfileEnvelope.of(stored, active_name=active)
+
+
+class SyncToSlateResponse(BaseModel):
+    """Outcome of an explicit POST /profiles/{name}/sync-to-slate call.
+
+    The frontend uses this to show "synchronisé à HH:MM" or surface the
+    backend error message inline next to the profile card."""
+
+    ok: bool
+    pushed: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    last_synced_at: datetime | None = None
+
+
+@router.post("/{name}/sync-to-slate", response_model=SyncToSlateResponse)
+async def sync_profile_to_slate(
+    name: str,
+    request: Request,
+    store: Annotated[ProfileStore, Depends(get_profile_store)],
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    wifi: Annotated[WifiSsidStore, Depends(get_wifi_store)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> SyncToSlateResponse:
+    """Explicitly re-push this profile's resolved JSON to the Slate.
+
+    Use when the auto-sync on edit failed (Slate was offline) and the
+    operator wants to retry without re-saving the profile. Idempotent —
+    overwrites whatever was on ``/etc/slate-controller/profiles/<name>.json``.
+    Does NOT trigger an apply : the agent / button cycle / LCD will use
+    the new JSON at their next activation.
+    """
+    try:
+        stored = await store.get(name)
+    except ProfileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile {name!r} not found",
+        ) from exc
+    try:
+        sync_dict = await _sync_one_to_slate(
+            profile=stored.profile, request=request, ssh=ssh,
+            wifi=wifi, store=store,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("profile.sync_to_slate.crashed", name=name, error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"sync failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    refreshed = await store.get(name)
+    logger.info(
+        "profile.sync_to_slate", name=name,
+        ok=sync_dict.get("ok"), pushed=sync_dict.get("pushed"),
+        errors=sync_dict.get("errors"),
+    )
+    return SyncToSlateResponse(
+        ok=bool(sync_dict.get("ok")),
+        pushed=list(sync_dict.get("pushed") or []),
+        errors=list(sync_dict.get("errors") or []),
+        last_synced_at=refreshed.last_synced_at,
+    )
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -873,6 +1002,16 @@ async def _activate_via_agent(
         tor_settings_store=TorSettingsStore(sf),
         tor_bridge_store=TorBridgeStore(sf),
     )
+    # Stamp last_synced_at so the UI badge clears as soon as activation
+    # succeeds (same JSON the agent will read). Only on a CLEAN push :
+    # `json_rep.ok` is False if any sync error landed in the report, in
+    # which case we leave last_synced_at stale so the operator keeps
+    # seeing the "désynchronisé" badge until a successful re-sync.
+    # (Earlier comment claimed partial pushes were stamped too — they
+    # aren't, and the gate above already enforces that.)
+    if json_rep.ok:
+        from app.profiles.store import ProfileStore as _PS
+        await _PS(sf).mark_synced(profile.name)
     screen_rep = await sync_loading_screens(ssh, [profile])
     wallpaper_rep = await sync_profile_wallpapers(
         ssh, [profile], wallpaper_store,

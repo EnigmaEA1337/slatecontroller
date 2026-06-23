@@ -95,6 +95,39 @@ async def read_slate_wifi_state(
     ]
 
 
+class ReapplyResponse(BaseModel):
+    """Outcome of a manual ``apply-only wifi`` triggered from the UI."""
+
+    ok: bool
+    output: str
+    needs_reboot: bool = False
+
+
+@router.post("/reapply-active", response_model=ReapplyResponse)
+async def reapply_active_profile_wifi(
+    ssh: Annotated[SlateSSH, Depends(get_slate_ssh)],
+    _user: Annotated[User, Depends(get_current_user)],
+) -> ReapplyResponse:
+    """Run ``slate-ctrl apply-only wifi`` against the currently-active
+    profile on the Slate — without touching network/firewall/tor/etc.
+
+    Used as the manual companion to the on-device wifi-drift watchdog :
+    when the operator notices a SSID missing (e.g. after toggling Hotel
+    mode on the LCD), one click here forces an immediate reconcile of
+    the WiFi handler — no profile re-activation, no fw3 reload, no
+    reboot unless the wifi.sh handler decides one is required for a
+    layout change (rare on this path).
+    """
+    from app.slate_agent.sync import REBOOT_SENTINEL, apply_single_handler
+
+    ok, output = await apply_single_handler(ssh, "wifi", timeout=60.0)
+    return ReapplyResponse(
+        ok=ok,
+        output=output[-4000:],  # tail to keep the payload UI-friendly
+        needs_reboot=REBOOT_SENTINEL in output,
+    )
+
+
 @router.get("/suggestions", response_model=SsidSuggestionsLibrary)
 async def list_suggestions(
     _user: Annotated[User, Depends(get_current_user)],

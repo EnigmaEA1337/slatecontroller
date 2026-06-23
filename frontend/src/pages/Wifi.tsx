@@ -1,6 +1,8 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
+  CheckCircle2,
   Eye,
   EyeOff,
   KeyRound,
@@ -8,6 +10,7 @@ import {
   Pencil,
   Plus,
   QrCode,
+  RefreshCw,
   Trash2,
   Users,
   Wifi as WifiIcon,
@@ -17,6 +20,7 @@ import {
   createWifiSsid,
   deleteWifiSsid,
   listWifiSsids,
+  reapplyActiveWifi,
   updateWifiSsid,
 } from "@/api/wifi";
 import PasswordGenerator from "@/components/PasswordGenerator";
@@ -671,6 +675,17 @@ export default function Wifi() {
 
   const ssids = useQuery({ queryKey: ["wifi"], queryFn: listWifiSsids });
 
+  // Manual reconcile : runs `slate-ctrl apply-only wifi` for the active
+  // profile. Used to recover after a LCD travel-router toggle drops a
+  // managed VAP between the 2-min cron ticks of the on-device watchdog.
+  const reapply = useMutation({
+    mutationFn: reapplyActiveWifi,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["wifi"] });
+      queryClient.invalidateQueries({ queryKey: ["wifi", "slate-state"] });
+    },
+  });
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["wifi"] });
   const closeForm = () => {
     setEditing(null);
@@ -701,14 +716,55 @@ export default function Wifi() {
           </p>
         </div>
         {!creating && !editing && (
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {t("wifi.new")}
-          </button>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={reapply.isPending}
+                onClick={() => reapply.mutate()}
+                className="inline-flex items-center gap-1.5 border border-[color:var(--color-cyber-border-strong)] px-3 py-2 text-[11px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)] disabled:opacity-50"
+                title="slate-ctrl apply-only wifi — reconcilie le profil actif sans toucher au reste. Anti-drift LCD."
+              >
+                <RefreshCw
+                  className={cn(
+                    "h-3 w-3",
+                    reapply.isPending && "animate-spin",
+                  )}
+                />
+                {reapply.isPending ? "reconcile…" : "Ré-appliquer profil actif"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreating(true)}
+                className="cyber-button inline-flex items-center gap-2 px-4 py-2.5 text-xs"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {t("wifi.new")}
+              </button>
+            </div>
+            {reapply.data && (
+              <span
+                className={cn(
+                  "cyber-chip inline-flex items-center gap-1 text-[10px]",
+                  reapply.data.ok ? "cyber-chip-ok" : "cyber-chip-on",
+                )}
+                title={reapply.data.output.slice(-300)}
+              >
+                {reapply.data.ok ? (
+                  <CheckCircle2 className="h-2.5 w-2.5" />
+                ) : (
+                  <AlertTriangle className="h-2.5 w-2.5" />
+                )}
+                {reapply.data.ok ? "reconcilié" : "échec"}
+                {reapply.data.needs_reboot && " · reboot demandé"}
+              </span>
+            )}
+            {reapply.error && (
+              <span className="cyber-chip cyber-chip-on text-[10px]">
+                {errorMessage(reapply.error)}
+              </span>
+            )}
+          </div>
         )}
       </header>
 

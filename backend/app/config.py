@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     jwt_expiration_hours: int = Field(default=24)
     admin_username: str = Field(default="admin")
     admin_password: str = Field(default="change-me")
+    # Set this env var to "1" only in dev/test to allow boot with a
+    # placeholder JWT_SECRET. In any non-trivial deployment, leaving it
+    # unset means the app refuses to start when JWT_SECRET is a known
+    # placeholder — a hard guard against the nightly-audit critical
+    # finding (2026-06-23) where the same secret was reused as the
+    # Fernet at-rest key, leaking every stored device/VPN/WiFi password.
+    allow_placeholder_jwt_secret: bool = Field(default=False)
 
     # ---- CORS ----
     cors_origins: str = Field(default="http://localhost:5173")

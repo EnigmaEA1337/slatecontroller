@@ -46,6 +46,32 @@ export async function deleteProfile(name: string): Promise<void> {
   await api.delete(`/api/profiles/${encodeURIComponent(name)}`);
 }
 
+export interface SyncToSlateResponse {
+  ok: boolean;
+  pushed: string[];
+  errors: string[];
+  last_synced_at: string | null;
+}
+
+/**
+ * Re-push this profile's resolved JSON to
+ * /etc/slate-controller/profiles/<name>.json on the Slate. Used by the
+ * "Re-synchroniser" button next to a profile flagged out_of_sync (auto-
+ * sync on edit failed because the Slate was offline at save time).
+ * Does NOT trigger an apply — only refreshes the artifact the agent
+ * will read at next activation.
+ */
+export async function syncProfileToSlate(
+  name: string,
+): Promise<SyncToSlateResponse> {
+  const { data } = await api.post<SyncToSlateResponse>(
+    `/api/profiles/${encodeURIComponent(name)}/sync-to-slate`,
+    undefined,
+    { timeout: 60_000 },
+  );
+  return data;
+}
+
 export async function duplicateProfile(
   name: string,
   newName: string,

@@ -24,6 +24,7 @@ dependencies = [
     "qrcode[pil]>=7.4.2",
     "python-gnupg>=0.5.2",
     "python-glinet>=0.8.2,<1.0",
+    "docker>=7.1.0",
 ]
 
 [project.optional-dependencies]

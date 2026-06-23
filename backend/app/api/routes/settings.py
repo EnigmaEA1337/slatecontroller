@@ -246,26 +246,56 @@ async def deploy_ssh_keypair(
     },
 )
 async def export_ssh_private_key(
+    request: Request,
     user: Annotated[User, Depends(get_current_user)],
     store: Annotated[SSHKeypairStore, Depends(get_ssh_keypair_store)],
     device_store: Annotated[DeviceStore, Depends(get_device_store)],
 ) -> PlainTextResponse:
-    """Download the private key PEM. Auth-protected, audit-logged.
+    """Download the private key PEM. Auth-protected, PIN-gated, audit-logged.
 
     Use case: cold backup before disabling password auth on the Slate.
     The returned file matches what `ssh-keygen` would produce — usable with
     `ssh -i <file> root@<slate>`.
+
+    Hardening (nightly audit 2026-06-23 high finding) :
+      - Throttled via PinLockoutService scope ``export_ssh_key`` keyed on
+        client IP — 3 failed attempts within the rolling window lock the
+        endpoint for the cooldown. A successful download counts as a
+        verification and resets the counter.
+      - Audit log enriched with client IP + User-Agent so a stolen-token
+        replay leaves a forensic trail.
     """
+    lockout = getattr(request.app.state, "pin_lockout", None)
+    # Reuse the same _client_ip helper from the auth route — keep a local
+    # copy here to avoid the cross-package import + circular risk.
+    if request.client and request.client.host:
+        ip = request.client.host
+    else:
+        fwd = request.headers.get("x-forwarded-for") or ""
+        ip = fwd.split(",")[0].strip() or "unknown"
+    ua = (request.headers.get("user-agent") or "")[:200]
+
+    if lockout is not None:
+        await lockout.check_or_raise(ip, "export_ssh_key")
+
     slug = await _default_device_slug(device_store)
     pem = await store.get_private_pem(slug)
     if pem is None:
+        # "No key to export" is NOT an auth failure — don't count it
+        # against the lockout. Otherwise a fresh install would lock out
+        # legitimate first-time exports.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="no keypair to export",
         )
+    if lockout is not None:
+        await lockout.record_success(ip, "export_ssh_key")
     logger.warning(
         "settings.ssh_keypair.private_key_exported",
         username=user.username,
+        client_ip=ip,
+        user_agent=ua,
+        slug=slug,
     )
     return PlainTextResponse(
         content=pem,

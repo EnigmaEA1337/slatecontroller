@@ -31,6 +31,7 @@ REMOTE_SCRIPTS_DIR = f"{REMOTE_ROOT}/scripts"
 REMOTE_ADGUARD_SECRET = f"{REMOTE_SECRETS_DIR}/adguard.env"
 REMOTE_WIFI_SECRET = f"{REMOTE_SECRETS_DIR}/wifi.env"
 REMOTE_RAM_MITIGATION = f"{REMOTE_SCRIPTS_DIR}/ram-mitigation.sh"
+REMOTE_WIFI_DRIFT_WATCHDOG = f"{REMOTE_SCRIPTS_DIR}/wifi-drift-watchdog.sh"
 REMOTE_CYCLE_SCRIPT = f"{REMOTE_SCRIPTS_DIR}/cycle-profile.sh"
 REMOTE_CYCLE_ACTION_UPDATE = f"{REMOTE_SCRIPTS_DIR}/cycle-action-update.sh"
 REMOTE_RC_BUTTON_RESET = "/etc/rc.button/reset"
@@ -61,6 +62,15 @@ CRON_MARKER = "# slate-ctrl:ram-mitigation"
 # `>/dev/null 2>&1` part keeps cron from mailing root each run.
 CRON_ENTRY = (
     f"0 4 * * * {REMOTE_RAM_MITIGATION} >>/tmp/slate-ctrl-ram.log 2>&1 {CRON_MARKER}"
+)
+
+# Wifi drift watchdog — runs every 2 min. Counter-measures the
+# GL.iNet LCD / travel-router mode toggles that silently drop our
+# managed VAPs (cf. 2026-06 hotel drift incident). The script self-locks
+# on /etc/slate-controller/.apply.lock so it can't race a manual apply.
+CRON_MARKER_WIFI = "# slate-ctrl:wifi-drift-watchdog"
+CRON_ENTRY_WIFI = (
+    f"*/2 * * * * {REMOTE_WIFI_DRIFT_WATCHDOG} >/dev/null 2>&1 {CRON_MARKER_WIFI}"
 )
 
 # Where the agent files live in the controller's source tree.
@@ -217,12 +227,30 @@ async def deploy_agent(
             rep.pushed.append(f"{REMOTE_RAM_MITIGATION} ({len(payload)} bytes)")
         except (SlateSSHError, OSError) as exc:
             rep.errors.append(f"push ram-mitigation script: {exc}")
-        else:
-            try:
-                await _install_cron_entry(ssh)
-                rep.pushed.append(f"crontab :: {CRON_ENTRY}")
-            except SlateSSHError as exc:
-                rep.errors.append(f"install cron entry: {exc}")
+
+    # 7. WiFi drift watchdog — runs every 2 min on the Slate to detect
+    # and self-heal the LCD-toggle / travel-router-mode drift the user
+    # hit during 2026-06 hotel debug (blackice silently went DOWN at
+    # netdev level after the stock LCD captured an upstream WiFi).
+    wifi_watchdog = LOCAL_SCRIPTS_DIR / "wifi-drift-watchdog.sh"
+    if wifi_watchdog.is_file():
+        try:
+            payload = wifi_watchdog.read_bytes()
+            await ssh.put_bytes(payload, REMOTE_WIFI_DRIFT_WATCHDOG, mode=0o755)
+            rep.pushed.append(
+                f"{REMOTE_WIFI_DRIFT_WATCHDOG} ({len(payload)} bytes)"
+            )
+        except (SlateSSHError, OSError) as exc:
+            rep.errors.append(f"push wifi-drift-watchdog: {exc}")
+
+    # Install both cron entries in one shot — single crontab rewrite +
+    # one crond reload, instead of two round-trips.
+    try:
+        await _install_cron_entries(ssh)
+        rep.pushed.append(f"crontab :: {CRON_ENTRY}")
+        rep.pushed.append(f"crontab :: {CRON_ENTRY_WIFI}")
+    except SlateSSHError as exc:
+        rep.errors.append(f"install cron entries: {exc}")
 
     logger.info(
         "slate_agent.deploy",
@@ -274,13 +302,16 @@ async def _install_reset_button_hook(ssh: SlateSSH) -> None:
     await ssh.put_bytes(payload, REMOTE_RC_BUTTON_RESET, mode=0o755)
 
 
-async def _install_cron_entry(ssh: SlateSSH) -> None:
-    """Idempotently install our cron line in /etc/crontabs/root.
+async def _install_cron_entries(ssh: SlateSSH) -> None:
+    """Idempotently install our cron lines in /etc/crontabs/root.
 
-    Strategy : read the existing crontab, drop any line tagged with
-    CRON_MARKER (handles upgrades when we change the schedule), append
-    our current line, write it back, then poke crond so it picks up the
-    change without a full restart.
+    Strategy : read the existing crontab, drop any line tagged with one
+    of our markers (handles schedule upgrades), append the current
+    entries, write back, poke crond.
+
+    Markers managed here :
+      - CRON_MARKER       (RAM mitigation, daily 04:00)
+      - CRON_MARKER_WIFI  (WiFi drift watchdog, every 2 min)
 
     busybox crond constraints :
       - crontab file lives at /etc/crontabs/root (per-user, root only here)
@@ -289,29 +320,35 @@ async def _install_cron_entry(ssh: SlateSSH) -> None:
       - missing /etc/crontabs/root is normal on a fresh device → we
         create it ourselves
     """
-    # Read whatever is there now ; tolerate "no such file".
+    markers = (CRON_MARKER, CRON_MARKER_WIFI)
+    entries = (CRON_ENTRY, CRON_ENTRY_WIFI)
     read = await ssh.run(
         "cat /etc/crontabs/root 2>/dev/null || true",
         timeout=10,
     )
     current_lines = read.stdout.splitlines() if read.exit_status == 0 else []
-    # Drop our previous line(s). Use a substring match on the marker so
-    # we don't depend on the exact CRON_ENTRY string staying stable.
-    kept = [ln for ln in current_lines if CRON_MARKER not in ln]
-    kept.append(CRON_ENTRY)
+    # Drop every line tagged with any of our markers so re-deploys never
+    # accumulate duplicates.
+    kept = [
+        ln for ln in current_lines
+        if not any(m in ln for m in markers)
+    ]
+    kept.extend(entries)
     new_content = ("\n".join(kept) + "\n").encode("utf-8")
     # mkdir + write atomically. crontabs/root must be 0600 (busybox crond
-    # refuses to read world-readable crontabs on some builds).
+    # refuses world-readable crontabs on some builds).
     await ssh.run("mkdir -p /etc/crontabs", timeout=5)
     await ssh.put_bytes(new_content, "/etc/crontabs/root", mode=0o600)
-    # Ensure crond is enabled + running, then poke it. enable+start are
-    # idempotent ; reload prompts re-read of the file.
     await ssh.run(
         "/etc/init.d/cron enable 2>/dev/null; "
         "/etc/init.d/cron start 2>/dev/null; "
         "/etc/init.d/cron reload 2>/dev/null || true",
         timeout=10,
     )
+
+
+# Back-compat alias — older callers may still reference the singular form.
+_install_cron_entry = _install_cron_entries
 
 
 async def _write_adguard_secret(

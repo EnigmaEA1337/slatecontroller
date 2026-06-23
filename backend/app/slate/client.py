@@ -73,6 +73,7 @@ class SlateClient:
         password: str,
         *,
         url_resolver: SlateUrlResolver | None = None,
+        tls_fingerprint_sha256: str = "",
     ) -> None:
         # `_url` is the fallback when the resolver isn't provided OR when it
         # has no reachable candidate. When the resolver IS provided, _url is
@@ -81,6 +82,19 @@ class SlateClient:
         self._username = username
         self._password = password
         self._resolver = url_resolver
+        # SHA256 of the Slate's leaf cert, hex without colons (lowercase).
+        # When set, the requests.Session inside pyglinet is mounted with an
+        # adapter that pins the connection to this fingerprint — without it
+        # the admin password used to be transmitted on a TLS session with
+        # verification fully disabled (nightly audit 2026-06-23, medium).
+        # The probe path already stores this value at adoption-time on
+        # ``DeviceRow.tls_fingerprint_sha256`` ; the device registry now
+        # forwards it here so routine RPC traffic enjoys the same pin.
+        self._tls_pin_sha256 = (
+            tls_fingerprint_sha256.replace(":", "").lower()
+            if tls_fingerprint_sha256
+            else ""
+        )
         self._glinet: Any = None  # GlInet | None; typed Any so pyglinet remains optional
         self._lock = asyncio.Lock()
         # Circuit breaker state. Trips after _CB_FAILURE_THRESHOLD
@@ -296,11 +310,20 @@ class SlateClient:
             verify_ssl_certificate=False,
             keep_alive=True,
         )
+        # When a TLS fingerprint pin is configured, mount a custom
+        # HTTPAdapter on the requests.Session that asserts the leaf cert
+        # SHA256 matches the pinned value — done BEFORE gl.login() so the
+        # admin password never lands on a non-validated session.
+        session = getattr(gl, "_session", None)
+        if session is not None and self._tls_pin_sha256:
+            from app.slate._pin_adapter import FingerprintAdapter
+
+            adapter = FingerprintAdapter(self._tls_pin_sha256)
+            session.mount("https://", adapter)
         gl.login()
         # Inject a default timeout into the underlying requests.Session so a
         # silent TCP stall can't wedge the keep-alive thread (which has no
         # asyncio supervision). pyglinet's keep-alive lives inside that thread.
-        session = getattr(gl, "_session", None)
         if session is not None:
             original = session.request
             timeout = self._SESSION_REQ_TIMEOUT

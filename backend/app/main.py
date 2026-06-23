@@ -28,6 +28,7 @@ from app.api.routes import slate as slate_routes
 from app.api.routes import tailscale as tailscale_routes
 from app.api.routes import tor as tor_routes
 from app.api.routes import vpn_configs as vpn_config_routes
+from app.api.routes import fortinet as fortinet_routes
 from app.api.routes import air_watch as air_watch_routes
 from app.api.routes import ambient_scan as ambient_scan_routes
 from app.api.routes import anti_theft as anti_theft_routes
@@ -68,10 +69,58 @@ from app.wifi.store import WifiSsidStore
 logger = structlog.get_logger(__name__)
 
 
+# Placeholder JWT_SECRET values that ship with the repo or appear in
+# shoddy onboarding examples. Booting the controller with any of these
+# is a P0 security finding (nightly audit 2026-06-23) — the same secret
+# is reused as the Fernet at-rest key, so an attacker forges admin
+# tokens AND decrypts every stored device/VPN/WiFi password. The guard
+# can be bypassed with ALLOW_PLACEHOLDER_JWT_SECRET=1 for dev/test only.
+_PLACEHOLDER_JWT_SECRETS = frozenset({
+    "dev-secret-change-me",
+    "change-me",
+    "change-me-to-a-long-random-string",
+    "changeme",
+    "secret",
+    "",
+})
+
+
+def _refuse_placeholder_jwt_secret(settings) -> None:
+    """Block startup when JWT_SECRET is a well-known placeholder.
+
+    See _PLACEHOLDER_JWT_SECRETS for the blacklist. We also reject any
+    secret shorter than 32 characters since HS256 with a low-entropy
+    key is brute-forceable in minutes.
+    """
+    if settings.allow_placeholder_jwt_secret:
+        logger.warning(
+            "config.jwt_secret.placeholder_allowed",
+            reason="ALLOW_PLACEHOLDER_JWT_SECRET=1 — dev/test only",
+        )
+        return
+    if settings.jwt_secret in _PLACEHOLDER_JWT_SECRETS:
+        raise RuntimeError(
+            "JWT_SECRET is a known placeholder value. Set the JWT_SECRET "
+            "env var to a long random string (>= 32 chars). For dev/test "
+            "ONLY, set ALLOW_PLACEHOLDER_JWT_SECRET=1 to bypass. Note : "
+            "this same secret is used to derive the Fernet at-rest key — "
+            "changing it later DESTROYS every encrypted password in the "
+            "database."
+        )
+    if len(settings.jwt_secret) < 32:
+        raise RuntimeError(
+            f"JWT_SECRET is too short ({len(settings.jwt_secret)} chars). "
+            "Use at least 32 random characters (suggested : `openssl rand "
+            "-base64 48`). Bypass with ALLOW_PLACEHOLDER_JWT_SECRET=1 in "
+            "dev only."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown hooks."""
     settings = get_settings()
+    _refuse_placeholder_jwt_secret(settings)
     logger.info("slate_controller.starting", version=__version__, slate_url=settings.slate_url)
 
     app.state.profile_manager = ProfileManager(settings.profiles_dir)
@@ -372,11 +421,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("post_adoption.security_warmup.started")
         cur_t = getattr(app.state, "_tailscale_ha_task", None)
         if cur_t is None or cur_t.done():
-            app.state._tailscale_ha_task = _asyncio.create_task(
-                run_watchdog(
-                    _TSClient(app.state.slate_ssh),
+            # Resolve the active SSH bundle via the device registry instead
+            # of relying on the (possibly None) singleton app.state.slate_ssh
+            # — nightly audit 2026-06-23 low : without a default device
+            # at boot, `app.state.slate_ssh` is None and TSClient(None)
+            # crashed the post-adoption hook.
+            async def _ha_watchdog_runner() -> None:
+                try:
+                    conn = await app.state.device_registry.for_default()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "post_adoption.ha_watchdog.no_default_device",
+                        error=str(exc),
+                    )
+                    return
+                await run_watchdog(
+                    _TSClient(conn.ssh),
                     app.state.tailscale_ha_store,
                 )
+
+            app.state._tailscale_ha_task = _asyncio.create_task(
+                _ha_watchdog_runner(), name="tailscale-ha-watchdog",
             )
             logger.info("post_adoption.ha_watchdog.started")
         # Ambient scan : restore whatever was enabled before shutdown.
@@ -426,10 +491,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The scanner only enriches when the registry is loaded ; otherwise
     # neighbour.vendor stays empty and the UI shows a "?" cell. Re-runs
     # every REFRESH_INTERVAL_S (a week) checked at each call.
+    # Track the task on app.state so the lifespan teardown can cancel it
+    # — without the reference the coroutine could outlive engine.dispose
+    # and emit "Task was destroyed but it is pending!" warnings on
+    # reload (nightly audit 2026-06-23 medium).
     try:
         from app.wifi.oui import refresh_async as _oui_refresh
         import asyncio as _aio
-        _aio.create_task(_oui_refresh())
+        app.state._oui_refresh_task = _aio.create_task(
+            _oui_refresh(), name="oui-refresh-boot",
+        )
     except Exception as exc:  # noqa: BLE001 — boot must keep going
         logger.warning("wifi.oui.boot_task_failed", error=str(exc))
 
@@ -438,16 +509,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         logger.info("slate_controller.stopping")
         app.state.scheduler.shutdown(wait=False)
-        # Stop the watchdog before tearing down SSH — otherwise its in-flight
-        # ssh.run() call could raise during cleanup. Watchdog may be None
-        # if no device was ever adopted in this run (post-adoption gating).
-        ha_task = getattr(app.state, "_tailscale_ha_task", None)
-        if ha_task is not None:
-            ha_task.cancel()
+        # Cancel EVERY tracked background task before tearing down their
+        # dependencies (SSH bundles, engine). The nightly audit
+        # 2026-06-23 flagged the previous code as only cancelling the
+        # HA watchdog — security_warmup / ambient_scan / surveillance
+        # boot tasks (and a fire-and-forget OUI refresh) were left to
+        # race the SSH close and the engine.dispose, producing
+        # "Task was destroyed but it is pending!" warnings and
+        # occasional asyncssh.ConnectionLost on reload. Gather the
+        # cancellations so a slow one doesn't block the others.
+        background_attrs = (
+            "_tailscale_ha_task",
+            "_security_warmup_task",
+            "_ambient_scan_boot_task",
+            "_surveillance_boot_task",
+            "_oui_refresh_task",  # captured by _start_oui_refresh below
+        )
+        pending = []
+        for name in background_attrs:
+            task = getattr(app.state, name, None)
+            if task is not None and not task.done():
+                task.cancel()
+                pending.append(task)
+        if pending:
             try:
-                await ha_task
-            except (Exception, _asyncio.CancelledError):  # noqa: BLE001
-                pass
+                await _asyncio.wait_for(
+                    _asyncio.gather(*pending, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except _asyncio.TimeoutError:
+                logger.warning(
+                    "lifespan.shutdown.tasks_timeout",
+                    pending=[t.get_name() for t in pending if not t.done()],
+                )
         # Close every per-device bundle in the registry. This supersedes
         # the old "close the singleton client+ssh+adguard" trio — each
         # bundle's aclose() handles them all.
@@ -497,6 +591,7 @@ def create_app() -> FastAPI:
     app.include_router(slate_routes.router, prefix="/api")
     app.include_router(proton_routes.router, prefix="/api")
     app.include_router(vpn_config_routes.router, prefix="/api")
+    app.include_router(fortinet_routes.router, prefix="/api")
     # IMPORTANT : wifi_radio must register BEFORE wifi_routes — both share
     # the /wifi prefix, and wifi_routes has a catch-all `GET /wifi/{slug}`
     # for SSID lookup that would shadow `/wifi/radios` otherwise.

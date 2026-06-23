@@ -93,6 +93,7 @@ export interface DevicePatch {
   rpc_username?: string;
   rpc_password?: string;
   notes?: string;
+  security_label?: string;
 }
 
 export async function patchDevice(

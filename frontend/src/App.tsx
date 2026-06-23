@@ -32,6 +32,8 @@ const NetworkDiagnostic = lazy(
 );
 const SlateScreen = lazy(() => import("./pages/SlateScreen"));
 const ProtonVPN = lazy(() => import("./pages/ProtonVPN"));
+const Fortinet = lazy(() => import("./pages/Fortinet"));
+const FortinetConnect = lazy(() => import("./pages/FortinetConnect"));
 const Tailscale = lazy(() => import("./pages/Tailscale"));
 const AdGuard = lazy(() => import("./pages/AdGuard"));
 const ProtectionDns = lazy(() => import("./pages/protection/Dns"));
@@ -111,6 +113,8 @@ export default function App() {
           />
           <Route path="/slate-screen" element={<SlateScreen />} />
           <Route path="/vpn/proton" element={<ProtonVPN />} />
+          <Route path="/vpn/fortinet" element={<Fortinet />} />
+          <Route path="/vpn/fortinet/connect" element={<FortinetConnect />} />
           <Route path="/vpn/tailscale" element={<Tailscale />} />
           <Route path="/protection/adguard" element={<AdGuard />} />
           <Route path="/protection/dns" element={<ProtectionDns />} />

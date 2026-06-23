@@ -54,8 +54,16 @@ services:
     volumes:
       - ./data/db:/app/data/db
       - ./data/logs:/app/data/logs
+      # Persist the same /app/data/* subdirs as in docker-compose.dev.yml
+      # — anything that's regenerated cheaply on cold start can stay
+      # ephemeral, but the CA root must survive container recreation.
+      - ./data/ca:/app/data/ca
+      - ./data/cache:/app/data/cache
+      - ./data/oui_cache:/app/data/oui_cache
       - ./backend/profiles:/app/profiles:ro
       - tailscale-socket:/var/run/tailscale
+      - forti-artifacts:/forti-artifacts:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -77,5 +85,18 @@ services:
     depends_on:
       - slate-tailscale
 
+  # On-demand builder for the openfortivpn binary the Slate firmware
+  # can't apt-get. Same role as in docker-compose.dev.yml — opt-in via
+  # `--profile forti` so it never starts as part of a normal `up`.
+  forti-builder:
+    build:
+      context: ./builders/forti
+    image: slate-forti-builder:latest
+    container_name: slate-forti-builder
+    volumes:
+      - forti-artifacts:/out
+    profiles: ["forti"]
+
 volumes:
   tailscale-socket:
+  forti-artifacts:

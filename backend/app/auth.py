@@ -37,27 +37,54 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+def _sha256(data: str) -> bytes:
+    """Constant-length (32 bytes) digest used by :func:`authenticate`.
+
+    ``secrets.compare_digest`` only runs in constant time when both
+    inputs share the same length — feeding raw user-supplied bytes
+    against the admin secret leaks the secret's length when the user
+    types something of different size (nightly audit 2026-06-23 low).
+    Hashing both sides first removes the length channel entirely.
+    """
+    import hashlib
+
+    return hashlib.sha256(data.encode("utf-8")).digest()
+
+
 def authenticate(username: str, password: str, settings: Settings | None = None) -> User | None:
     """Validate credentials against the configured admin.
 
-    Uses constant-time comparison to avoid leaking username/password length
-    via timing side-channels. Returns `None` on any mismatch.
+    Uses constant-time comparison over fixed-length SHA256 digests to
+    avoid leaking username/password length via timing side-channels.
+    Returns ``None`` on any mismatch.
     """
     s = settings or get_settings()
     if not (
-        secrets.compare_digest(username.encode("utf-8"), s.admin_username.encode("utf-8"))
-        & secrets.compare_digest(password.encode("utf-8"), s.admin_password.encode("utf-8"))
+        secrets.compare_digest(_sha256(username), _sha256(s.admin_username))
+        & secrets.compare_digest(_sha256(password), _sha256(s.admin_password))
     ):
         return None
     return User(username=username)
 
 
 def create_access_token(username: str, settings: Settings | None = None) -> TokenResponse:
-    """Mint a signed JWT for `username`."""
+    """Mint a signed JWT for ``username``.
+
+    The token carries an ``iat`` claim (issued-at) so a future revoke-on-
+    timestamp policy can invalidate everything older than a given epoch
+    (e.g. after a password rotation) — nightly audit 2026-06-23 low.
+    Without iat, the only revoke knob is letting ``exp`` lapse, which
+    means leaked tokens stay valid for ``JWT_EXPIRATION_HOURS``.
+    """
     s = settings or get_settings()
     expires_delta = timedelta(hours=s.jwt_expiration_hours)
-    expire = datetime.now(UTC) + expires_delta
-    payload: dict[str, Any] = {"sub": username, "exp": expire}
+    now = datetime.now(UTC)
+    expire = now + expires_delta
+    payload: dict[str, Any] = {
+        "sub": username,
+        "iat": int(now.timestamp()),
+        "exp": expire,
+    }
     token = jwt.encode(payload, s.jwt_secret, algorithm=s.jwt_algorithm)
     return TokenResponse(access_token=token, expires_in=int(expires_delta.total_seconds()))
 

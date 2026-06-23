@@ -111,6 +111,15 @@ export interface ProfileEnvelope {
   scores: ProfileScores;
   created_at: string;
   updated_at: string;
+  /** ISO timestamp of the LAST successful push of this profile's
+   *  resolved JSON to /etc/slate-controller/profiles/<name>.json on the
+   *  Slate. `null` = never synced (fresh DB or sync always failed). */
+  last_synced_at: string | null;
+  /** Derived server-side flag : true when the local edit is more recent
+   *  than what's deployed on the device (or never deployed at all). The
+   *  agent / LCD would replay the stale JSON in that case — UI surfaces
+   *  this with a badge + a one-click resync button. */
+  out_of_sync: boolean;
   wallpapers: Record<WallpaperKind, WallpaperSlotInfo>;
 }
 

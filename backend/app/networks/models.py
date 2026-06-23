@@ -148,6 +148,10 @@ class NetworkPublic(BaseModel):
     tor_dns_over_tor: bool = False
     tor_kill_switch: bool = False
 
+    # Fortinet SSL VPN per-network egress.
+    egress_via_forti: bool = False
+    forti_kill_switch: bool = True
+
     created_at: datetime
     updated_at: datetime
 
@@ -293,6 +297,27 @@ class NetworkWrite(BaseModel):
             "down DROP this network's WAN egress (fail-closed). Default "
             "OFF = fail-open (clients keep regular internet, lose Tor). "
             "Turn ON when leakage is unacceptable."
+        ),
+    )
+
+    # ── Fortinet SSL VPN per-network egress ──────────────────────
+    egress_via_forti: bool = Field(
+        default=False,
+        description=(
+            "Opt-in flag. When True AND the Fortinet tunnel is UP, every "
+            "byte from this bridge is routed through the openfortivpn ppp "
+            "interface instead of the WAN. Independent of profile state — "
+            "the routing intent persists across profile switches; only the "
+            "tunnel state changes."
+        ),
+    )
+    forti_kill_switch: bool = Field(
+        default=True,
+        description=(
+            "Coupled to `egress_via_forti`. When True AND the Forti tunnel "
+            "is DOWN, the bridge's egress is REJECTed (fail-closed). False "
+            "= fall back to WAN in clear (fail-open). Ignored when "
+            "`egress_via_forti=False`."
         ),
     )
 

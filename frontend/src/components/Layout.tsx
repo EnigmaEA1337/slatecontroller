@@ -101,6 +101,8 @@ const SETTINGS_CHILDREN: NavItem[] = [
 
 const VPN_CHILDREN: NavItem[] = [
   { to: "/vpn/proton", labelKey: "nav.item_proton_vpn" },
+  { to: "/vpn/fortinet/connect", labelKey: "nav.item_fortinet_connect" },
+  { to: "/vpn/fortinet", labelKey: "nav.item_fortinet" },
   { to: "/vpn/tailscale", labelKey: "nav.item_tailscale" },
 ];
 

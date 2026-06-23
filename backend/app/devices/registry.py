@@ -211,13 +211,28 @@ class DeviceConnectionsRegistry:
             username=username,
             password=password,
             url_resolver=resolver,
+            tls_fingerprint_sha256=row.tls_fingerprint_sha256 or "",
         )
+        # Capture slug at closure-build time for the TOFU persist callback.
+        async def _persist_host_pubkey(pubkey: str, _slug: str = slug) -> None:
+            try:
+                await self._device_store.update_fields(
+                    _slug, ssh_host_pubkey=pubkey,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "device_registry.host_pubkey_persist_failed",
+                    slug=_slug, error=str(exc),
+                )
+
         ssh = SlateSSH(
             slate_url=initial_url,
             username=username,
             password=password,
             port=row.ssh_port or 22,
             url_resolver=resolver,
+            expected_host_pubkey=row.ssh_host_pubkey or "",
+            on_host_pubkey_seen=_persist_host_pubkey,
         )
 
         # If the device has a deployed SSH keypair, switch to key auth so

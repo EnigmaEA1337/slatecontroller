@@ -187,6 +187,12 @@ function NetworkForm({
   const [torKillSwitch, setTorKillSwitch] = useState(
     initial?.tor_kill_switch ?? false,
   );
+  const [egressViaForti, setEgressViaForti] = useState(
+    initial?.egress_via_forti ?? false,
+  );
+  const [fortiKillSwitch, setFortiKillSwitch] = useState(
+    initial?.forti_kill_switch ?? true,
+  );
 
   // Peers candidate to "reachable_networks" : every other network in
   // the catalog. We exclude the current one (no self-routing).
@@ -238,6 +244,8 @@ function NetworkForm({
         tor_route_mode: torMode,
         tor_dns_over_tor: torDnsOverTor,
         tor_kill_switch: torKillSwitch,
+        egress_via_forti: egressViaForti,
+        forti_kill_switch: fortiKillSwitch,
       };
       return isEdit
         ? updateNetwork(initial!.slug, body)
@@ -559,13 +567,28 @@ function NetworkForm({
               </span>
             </span>
           </label>
+        </div>
+
+        {/* Politique de routage — destinations atteignables + règles DNS.
+            Sorti exprès du bloc Tailnet ci-dessus : la sortie peut être
+            Tailscale, WAN, Proton VPN ou Tor au choix par destination
+            ou par règle, indépendamment de l'exposition tailnet. */}
+        <div className="mt-4 border-t border-[color:var(--color-cyber-border)] pt-3">
+          <div className="cyber-label !text-[9px] mb-1.5 text-[color:var(--color-cyber-muted)]">
+            politique de routage
+          </div>
+          <p className="mb-3 text-[10px] text-[color:var(--color-cyber-muted)] max-w-prose">
+            ▸ Choisir quels CIDR et quels domaines, depuis ce réseau,
+            sortent par Tailscale / WAN / Proton / Tor.
+          </p>
 
           {/* Per-destination reverse routing : grille cochable des
-              subnets que les pairs Tailscale annoncent. Pour chaque
-              entrée l'opérateur choisit Désactivé / Routé / NAT. */}
-          <div className="mt-3 rounded border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)]/30 p-2">
+              subnets que les pairs Tailscale annoncent ou des CIDR
+              libres. Pour chaque entrée l'opérateur choisit
+              Désactivé / Routé / NAT + l'interface de sortie. */}
+          <div className="rounded border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-surface)]/30 p-2">
             <div className="cyber-label !text-[9px] mb-1 text-[color:var(--color-cyber-muted)]">
-              destinations atteignables depuis ce réseau (routage inverse)
+              destinations par CIDR
             </div>
             <p className="mb-2 text-[10px] text-[color:var(--color-cyber-muted)] max-w-prose">
               Choisir, pour chaque sous-réseau annoncé par les peers
@@ -1082,6 +1105,48 @@ function NetworkForm({
               ▸ Configure ton navigateur sur{" "}
               <code>socks5://{gateway || "&lt;gateway&gt;"}:9050</code>
             </p>
+          )}
+        </div>
+
+        {/* Fortinet SSL VPN — per-network egress opt-in. The tunnel itself
+            lives in Settings → Fortinet ; this section just says "when
+            it's up, route this bridge through it". Kill-switch nested so
+            we don't show the option for nets that aren't opt-in. */}
+        <div className="mt-4 border-t border-amber-500/30 pt-3">
+          <div className="cyber-label !text-[9px] mb-1.5 text-amber-300">
+            fortinet · egress per-réseau
+          </div>
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={egressViaForti}
+              onChange={(e) => setEgressViaForti(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-amber-400"
+            />
+            <span>
+              <strong>Router via Fortinet</strong>
+              <span className="block text-[10px] text-[color:var(--color-cyber-muted)]">
+                ▸ tout le trafic de ce bridge sort par le tunnel openfortivpn
+                quand il est UP (config dans Settings → VPN → Fortinet)
+              </span>
+            </span>
+          </label>
+          {egressViaForti && (
+            <div className="mt-2 space-y-1.5 rounded border border-amber-500/40 bg-amber-950/15 p-2 text-[11px]">
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={fortiKillSwitch}
+                  onChange={(e) => setFortiKillSwitch(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-amber-400"
+                />
+                <span>
+                  <strong>Kill-switch strict</strong> — si le tunnel tombe,
+                  drop le trafic de ce bridge (fail-closed). Décoche pour
+                  fall-back WAN en clair (fail-open).
+                </span>
+              </label>
+            </div>
           )}
         </div>
       </div>

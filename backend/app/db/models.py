@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.database import Base
@@ -65,6 +65,16 @@ class ProfileRow(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
+    )
+    # Timestamp of the LAST successful push of this profile's resolved JSON
+    # to /etc/slate-controller/profiles/<name>.json on the Slate. NULL = never
+    # synced. The UI flags a profile as "out of sync" when
+    # ``updated_at > last_synced_at`` so the operator knows the agent / LCD
+    # would replay an outdated version.
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
     )
 
 
@@ -228,6 +238,21 @@ class NetworkRow(Base):
     # out through the chosen egress (`via`). See `app/tailscale/dns_
     # routing.py` for the apply logic.
     domain_routing_rules: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    # Fortinet SSL VPN per-network egress. When True, ALL traffic from
+    # this bridge is routed through the active openfortivpn ppp interface
+    # instead of the WAN. Independent of profile activation : the flag
+    # persists across profile switches, only the tunnel state changes
+    # (a "Mission" profile activates the tunnel, a "Home" profile drops
+    # it ; the egress flag stays). See `app/vpn/fortinet/network_routing.py`
+    # for the apply logic.
+    egress_via_forti: Mapped[bool] = mapped_column(default=False)
+    # Kill-switch coupled to `egress_via_forti` : when both are True and
+    # the Forti tunnel is DOWN, the bridge's egress is REJECTed (fail-
+    # closed). When `forti_kill_switch=False`, traffic falls back to WAN
+    # in clear if the tunnel dies (fail-open). Per-network because the
+    # risk tolerance differs (guest may tolerate fail-open, mission must
+    # not). Ignored when `egress_via_forti=False`.
+    forti_kill_switch: Mapped[bool] = mapped_column(default=True)
 
     # ── Per-network Tor routing ──────────────────────────────────────
     # ``tor_route_mode``  off / transparent / socks_only
@@ -346,9 +371,24 @@ class DeviceRow(Base):
     # SHA256 of the server's leaf cert, hex-encoded ("ab:cd:…"). Empty until
     # the TLS pinning step of adoption runs.
     tls_fingerprint_sha256: Mapped[str] = mapped_column(String(128), default="")
+    # OpenSSH-format host public key recorded on the first successful SSH
+    # connect (TOFU). Format : "ssh-ed25519 AAAA…" or "ecdsa-sha2-nistp256 …".
+    # SlateSSH compares the live host key against this on every reconnect ;
+    # a mismatch raises and refuses to proceed (possible MITM or device
+    # re-flash). Operators can wipe the field from the UI to re-trust after
+    # an intentional re-flash. Empty = no TOFU recorded yet (next connect
+    # records and trusts).
+    ssh_host_pubkey: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(16), default="pending")
     is_default: Mapped[bool] = mapped_column(default=False)
     notes: Mapped[str] = mapped_column(String(256), default="")
+    # Numéro inscrit sur l'étiquette tamper-evident posée sur les vis
+    # du boîtier. L'opérateur le saisit à l'adoption ; si un jour il
+    # constate que l'étiquette physique ne porte plus ce même numéro,
+    # c'est qu'on a ouvert le Slate entre temps. Champ libre, court
+    # (typiquement 6-12 chars alphanumériques selon le fournisseur
+    # d'étiquettes). Vide = pas d'étiquette enregistrée.
+    security_label: Mapped[str] = mapped_column(String(64), default="")
     last_probe_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
@@ -1237,3 +1277,86 @@ class BssidReviewRow(Base):
         default=lambda: datetime.now(UTC),
     )
     reviewed_by: Mapped[str] = mapped_column(String(64), default="")
+
+
+class FortinetConfigRow(Base):
+    """One stored FortiGate SSL VPN endpoint (openfortivpn-based).
+
+    Public fields (gateway, port, username, trusted_cert pin, CA PEM,
+    notes, status) live plaintext for fast list rendering. The password
+    is Fernet-encrypted in :class:`FortinetSecretRow` keyed by config id
+    — same pattern as device RPC creds.
+
+    OTP is NEVER persisted : the operator types the 6-digit TOTP at
+    connect-time on each session. TOTPs expire within 30 s anyway, so
+    storage costs more than it buys (one more credential to protect at
+    rest for negligible UX gain).
+
+    `last_status` / `last_connected_at` / `last_error` are stamped by the
+    controller after each agent round-trip, so the UI can render a "UP
+    since HH:MM" badge without polling.
+    """
+
+    __tablename__ = "fortinet_configs"
+    __table_args__ = (UniqueConstraint("slug", name="uq_fortinet_configs_slug"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    gateway_host: Mapped[str] = mapped_column(String(255), nullable=False)
+    gateway_port: Mapped[int] = mapped_column(default=443)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    # SHA256 hex of the FortiGate server certificate — passed as
+    # `--trusted-cert` to openfortivpn. Empty = no pinning (system CA
+    # store trusted). The UI provides a helper that fetches the cert from
+    # the gateway and shows its SHA256 so the operator can pin in one click.
+    trusted_cert_sha256: Mapped[str] = mapped_column(String(128), default="")
+    # Optional CA PEM the operator can paste for self-signed corporate CAs.
+    # Pasted verbatim and openfortivpn is invoked with `--ca-file <path>`.
+    ca_cert_pem: Mapped[str] = mapped_column(Text, default="")
+    notes: Mapped[str] = mapped_column(String(512), default="")
+
+    last_status: Mapped[str] = mapped_column(String(32), default="unknown")
+    last_connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
+    last_disconnected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
+    last_error: Mapped[str] = mapped_column(String(512), default="")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class FortinetSecretRow(Base):
+    """Encrypted secrets (password today, extensible to client cert / key)
+    for one Fortinet config."""
+
+    __tablename__ = "fortinet_secrets"
+    __table_args__ = (
+        UniqueConstraint("config_id", "kind", name="uq_fortinet_secrets_config_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    config_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "fortinet_configs.id",
+            ondelete="CASCADE",
+            name="fk_fortinet_secrets_config_id",
+        ),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(32), default="password")
+    encrypted_value: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )

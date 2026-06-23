@@ -52,6 +52,8 @@ def _to_public(row: NetworkRow) -> NetworkPublic:
         tor_route_mode=row.tor_route_mode,  # type: ignore[arg-type]
         tor_dns_over_tor=row.tor_dns_over_tor,
         tor_kill_switch=row.tor_kill_switch,
+        egress_via_forti=row.egress_via_forti,
+        forti_kill_switch=row.forti_kill_switch,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -109,6 +111,8 @@ def _copy_write_fields(row: NetworkRow, body: NetworkWrite) -> None:
     row.tor_route_mode = body.tor_route_mode
     row.tor_dns_over_tor = body.tor_dns_over_tor
     row.tor_kill_switch = body.tor_kill_switch
+    row.egress_via_forti = body.egress_via_forti
+    row.forti_kill_switch = body.forti_kill_switch
 
 
 class NetworkStore:

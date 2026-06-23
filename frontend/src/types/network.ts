@@ -66,6 +66,13 @@ export interface NetworkPublic {
   tor_dns_over_tor: boolean;
   tor_kill_switch: boolean;
 
+  /** Route ALL traffic from this bridge through the openfortivpn ppp
+   *  interface when the Forti tunnel is UP. Independent of profile state. */
+  egress_via_forti: boolean;
+  /** Fail-closed (true, default) vs fail-open (false) when
+   *  `egress_via_forti=true` and the tunnel is DOWN. */
+  forti_kill_switch: boolean;
+
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +127,8 @@ export interface NetworkWrite {
   tor_route_mode: "off" | "transparent" | "socks_only";
   tor_dns_over_tor: boolean;
   tor_kill_switch: boolean;
+  egress_via_forti: boolean;
+  forti_kill_switch: boolean;
 }
 
 export interface NetworkCreate extends NetworkWrite {

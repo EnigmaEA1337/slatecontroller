@@ -24,6 +24,16 @@ class DeviceCreate(BaseModel):
     rpc_username: str = Field(min_length=1, max_length=64)
     rpc_password: str = Field(min_length=1, max_length=256)
     notes: str = Field(default="", max_length=256)
+    security_label: str = Field(
+        default="", max_length=64,
+        description=(
+            "Numéro de l'étiquette tamper-evident posée sur les vis du "
+            "boîtier. Sert de référence physique : si à un contrôle "
+            "ultérieur le numéro de l'étiquette physique diffère de "
+            "celui enregistré ici, c'est que le Slate a été ouvert "
+            "entre temps. Vide = pas d'étiquette suivie."
+        ),
+    )
 
 
 class DeviceUpdate(BaseModel):
@@ -41,6 +51,7 @@ class DeviceUpdate(BaseModel):
     rpc_username: str | None = Field(default=None, max_length=64)
     rpc_password: str | None = Field(default=None, max_length=256)
     notes: str | None = Field(default=None, max_length=256)
+    security_label: str | None = Field(default=None, max_length=64)
 
 
 class DevicePublic(BaseModel):
@@ -60,6 +71,7 @@ class DevicePublic(BaseModel):
     status: DeviceStatus
     is_default: bool
     notes: str
+    security_label: str = ""
     last_probe_at: datetime | None
     adopted_at: datetime | None
     created_at: datetime

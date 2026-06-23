@@ -8,6 +8,7 @@ and seed the DB on first boot.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import structlog
@@ -51,6 +52,31 @@ class StoredProfile:
         self.source: ProfileSource = row.source  # type: ignore[assignment]
         self.created_at = row.created_at
         self.updated_at = row.updated_at
+        # NULL until the controller successfully pushes the resolved JSON
+        # to /etc/slate-controller/profiles/<name>.json on the Slate. The
+        # API derives ``out_of_sync = updated_at > last_synced_at`` to flag
+        # profiles whose live edit hasn't been mirrored to the device yet
+        # — those would be replayed stale by the button cycle / LCD.
+        self.last_synced_at: datetime | None = row.last_synced_at
+
+    @property
+    def out_of_sync(self) -> bool:
+        """True when this profile's local payload is newer than the JSON
+        last pushed to the Slate (or was never pushed).
+
+        Uses a 2-second tolerance because SQLAlchemy's ``onupdate`` hook on
+        ``updated_at`` fires for any row change including a pure sync
+        stamp — both ``last_synced_at`` and ``updated_at`` call
+        ``datetime.now(UTC)`` sequentially in the same transaction, so
+        ``updated_at`` lands a few microseconds (occasionally up to ~1s on
+        a loaded SQLite) after ``last_synced_at``. Without tolerance every
+        fresh sync would still look out of sync. 2 s is well above the
+        intra-tx drift and well below any plausible user-edit-to-resync
+        delay (a human takes seconds-to-minutes to even open the form
+        again)."""
+        if self.last_synced_at is None:
+            return True
+        return self.updated_at > self.last_synced_at + timedelta(seconds=2)
 
 
 class ProfileStore:
@@ -146,6 +172,18 @@ class ProfileStore:
                 active.value = ""
             await session.commit()
 
+    async def mark_synced(self, name: str) -> None:
+        """Stamp this profile as just-pushed to the Slate. Best-effort :
+        if the row was deleted in the meantime, silently no-ops."""
+        async with self._sf() as session:
+            row = await session.scalar(
+                select(ProfileRow).where(ProfileRow.name == name)
+            )
+            if row is None:
+                return
+            row.last_synced_at = datetime.now(UTC)
+            await session.commit()
+
     async def duplicate(self, source_name: str, new_name: str) -> StoredProfile:
         original = await self.get(source_name)
         cloned = original.profile.model_copy(
@@ -169,16 +207,24 @@ class ProfileStore:
             return row.value
 
     async def set_active(self, name: str) -> None:
-        # Ensure profile exists first
-        await self.get(name)
+        # Existence check + write must share one transaction (nightly
+        # audit 2026-06-23 low) — splitting them across two sessions
+        # opened a race where DELETE /profiles/{name} could land between
+        # the get() and the AppState write, leaving the marker pointing
+        # at a deleted profile and crashing the next /active read.
         async with self._sf() as session:
             row = await session.scalar(
-                select(AppStateRow).where(AppStateRow.key == ACTIVE_PROFILE_KEY)
+                select(ProfileRow).where(ProfileRow.name == name)
             )
             if row is None:
+                raise ProfileNotFoundError(name)
+            active_row = await session.scalar(
+                select(AppStateRow).where(AppStateRow.key == ACTIVE_PROFILE_KEY)
+            )
+            if active_row is None:
                 session.add(AppStateRow(key=ACTIVE_PROFILE_KEY, value=name))
             else:
-                row.value = name
+                active_row.value = name
             await session.commit()
 
     # ---------------------------- seed helpers ---------------------------- #

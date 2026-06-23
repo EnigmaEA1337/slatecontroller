@@ -17,7 +17,9 @@
  */
 
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   MapContainer,
   Marker,
@@ -89,13 +91,22 @@ function FitToMarkers({ points }: { points: MapPoint[] }) {
 
 export default function RadioMap() {
   const t = useT();
+  const queryClient = useQueryClient();
+  // refetchOnWindowFocus + 60 s polling : la position peut être
+  // épinglée depuis la page Devices d'un autre onglet, on veut que la
+  // carte se rafraîchisse sans reload manuel.
   const locations = useQuery({
     queryKey: ["device-locations"],
     queryFn: getDeviceLocations,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
+    staleTime: 0,
   });
   const scans = useQuery({
     queryKey: ["scan-history", "for-map"],
     queryFn: () => listScanHistory({ limit: 200 }),
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
   const allPoints: MapPoint[] = useMemo(() => {
@@ -123,13 +134,32 @@ export default function RadioMap() {
 
   return (
     <div className="space-y-4">
-      <header>
-        <h1 className="cyber-display cyber-glow text-2xl">
-          {t("net_radio_map.title").toUpperCase()}
-        </h1>
-        <p className="cyber-label text-[10px] mt-1">
-          {t("net_radio_map.subtitle")}
-        </p>
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="cyber-display cyber-glow text-2xl">
+            {t("net_radio_map.title").toUpperCase()}
+          </h1>
+          <p className="cyber-label text-[10px] mt-1">
+            {t("net_radio_map.subtitle")}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ["device-locations"] });
+            queryClient.invalidateQueries({ queryKey: ["scan-history", "for-map"] });
+          }}
+          className="inline-flex items-center gap-1.5 border border-[color:var(--color-cyber-border-strong)] px-3 py-1.5 text-[11px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+          title="Re-charger les positions et scans (auto refresh = 60 s)"
+        >
+          <RefreshCw
+            className={cn(
+              "h-3 w-3",
+              (locations.isFetching || scans.isFetching) && "animate-spin",
+            )}
+          />
+          actualiser
+        </button>
       </header>
 
       {locations.isError && (

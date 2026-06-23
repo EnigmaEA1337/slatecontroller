@@ -8,9 +8,13 @@ import {
   Cog,
   Globe,
   HardDrive,
+  Image,
   Lock,
+  Monitor,
   Network,
+  Radio,
   ShieldAlert,
+  Share2,
   Terminal,
   Wifi,
   X,
@@ -32,9 +36,13 @@ const SUBSYS_ICON: Record<PlanSubsystem, typeof Wifi> = {
   dns: Globe,
   firewall: ShieldAlert,
   wifi: Wifi,
+  radio: Radio,
+  network: Share2,
   adguard: HardDrive,
   tor: Network,
   tailscale: Network,
+  screen: Monitor,
+  wallpaper: Image,
   logging: Terminal,
 };
 
@@ -43,9 +51,13 @@ const SUBSYS_LABEL: Record<PlanSubsystem, string> = {
   dns: "DNS",
   firewall: "Firewall",
   wifi: "Wi-Fi",
+  radio: "Radio",
+  network: "Réseaux",
   adguard: "AdGuard",
   tor: "Tor",
   tailscale: "Tailscale",
+  screen: "Écran LCD",
+  wallpaper: "Wallpaper",
   logging: "Logging",
 };
 
@@ -120,25 +132,34 @@ function StepRow({ step }: { step: PlanStep }) {
 }
 
 function PlanContent({ plan }: { plan: ActivationPlan }) {
-  // Group by subsystem in a stable order.
+  // Group by subsystem in the order the agent actually runs handlers
+  // (slate-ctrl dispatcher loop) — so the UI reads like a timeline.
   const order: PlanSubsystem[] = [
-    "vpn",
-    "dns",
+    "screen",
+    "network",
+    "radio",
     "firewall",
-    "wifi",
     "adguard",
+    "wifi",
+    "vpn",
     "tor",
     "tailscale",
+    "wallpaper",
+    "dns",
     "logging",
   ];
   const grouped: Record<PlanSubsystem, PlanStep[]> = {
-    vpn: [],
-    dns: [],
+    screen: [],
+    network: [],
+    radio: [],
     firewall: [],
-    wifi: [],
     adguard: [],
+    wifi: [],
+    vpn: [],
     tor: [],
     tailscale: [],
+    wallpaper: [],
+    dns: [],
     logging: [],
   };
   for (const s of plan.steps) {

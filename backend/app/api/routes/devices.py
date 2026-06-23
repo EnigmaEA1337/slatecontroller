@@ -27,7 +27,7 @@ from app.devices.models import (
     FactoryResetReport,
 )
 from app.api.deps import get_device_registry
-from app.devices.registry import DeviceConnectionsRegistry
+from app.devices.registry import DeviceConnectionsRegistry, DeviceRegistryError
 from app.devices.store import DeviceStore, DeviceStoreError
 from app.devices.tls import fetch_cert
 from app.settings.ssh_keys import SSHKeypairStore
@@ -82,6 +82,7 @@ async def _to_public(
         status=row.status,
         is_default=row.is_default,
         notes=row.notes,
+        security_label=row.security_label or "",
         last_probe_at=row.last_probe_at,
         adopted_at=row.adopted_at,
         created_at=row.created_at,
@@ -162,6 +163,7 @@ async def create_device(
             rpc_username=body.rpc_username,
             rpc_password=body.rpc_password,
             notes=body.notes,
+            security_label=body.security_label,
             is_default=False,
         )
     except DeviceStoreError as exc:
@@ -187,6 +189,7 @@ async def update_device(
         "rpc_port": body.rpc_port,
         "ssh_port": body.ssh_port,
         "notes": body.notes,
+        "security_label": body.security_label,
     }
     # admin_urls: optional list. If provided, validate + normalize each
     # entry (trim, strip trailing /). Empty list is legal and reverts to
@@ -346,28 +349,35 @@ async def probe_device(
             ),
         )
 
-    # SSH reachability — reuse the app singleton for the default device (it
-    # already carries the keypair if deployed). Open a fresh password-auth
-    # channel for non-default devices (they haven't been adopted yet).
-    needs_close = False
-    if row.is_default:
-        ssh: SlateSSH = request.app.state.slate_ssh
-    else:
-        ssh = SlateSSH(
-            slate_url=f"{row.rpc_scheme}://{row.host}",
-            username=username,
-            password=password,
-            port=row.ssh_port,
+    # SSH reachability — always go through the device registry so we use
+    # the SAME SSH bundle the rest of the app uses (with the deployed
+    # keypair, TOFU host-key pin, URL resolver…). The old code built a
+    # fresh password-auth SlateSSH for non-default devices, which fails
+    # once the Slate has been hardened to key-only auth (PermissionDenied
+    # 2026-06-23). The registry's bundle is long-lived ; we don't close
+    # it here.
+    registry = getattr(request.app.state, "device_registry", None)
+    if registry is None:
+        # Shouldn't happen in normal app lifespan, but guard anyway.
+        await store.mark_probed(slug, status="error", tls_fingerprint_sha256=fingerprint)
+        raise HTTPException(
+            status_code=500,
+            detail="device registry unavailable — backend not fully started",
         )
-        needs_close = True
+    try:
+        conn = await registry.for_slug(slug)
+    except DeviceRegistryError as exc:
+        await store.mark_probed(slug, status="error", tls_fingerprint_sha256=fingerprint)
+        raise HTTPException(
+            status_code=500,
+            detail=f"device registry build failed: {exc}",
+        ) from exc
+    ssh: SlateSSH = conn.ssh
     try:
         result = await ssh.run("echo OK")
     except SlateSSHError as exc:
         await store.mark_probed(slug, status="error", tls_fingerprint_sha256=fingerprint)
         raise HTTPException(status_code=502, detail=f"SSH probe failed: {exc}") from exc
-    finally:
-        if needs_close:
-            await ssh.close()
 
     if "OK" not in result.stdout:
         await store.mark_probed(slug, status="error", tls_fingerprint_sha256=fingerprint)
@@ -387,6 +397,21 @@ async def probe_device(
     else:
         new_status = "pending"
     await store.mark_probed(slug, status=new_status, tls_fingerprint_sha256=fingerprint)
+    # Invalidate the device registry's cached connection bundle so the
+    # next call rebuilds SlateClient with the fresh TLS pin — without
+    # this, the cached SlateClient keeps verifying against the OLD pin
+    # value baked in at construction time, and every RPC call after a
+    # probe-driven rotation fails with "Fingerprints did not match"
+    # until the backend is restarted (audit follow-up 2026-06-23).
+    registry = getattr(request.app.state, "device_registry", None)
+    if registry is not None:
+        try:
+            await registry.invalidate(slug)
+        except Exception as exc:  # noqa: BLE001 — never block the probe response
+            logger.warning(
+                "device_registry.invalidate_after_probe_failed",
+                slug=slug, error=str(exc),
+            )
     row = await store.get_by_slug(slug)
     assert row is not None
     return await _to_public(row=row, store=store, keypair_store=keypair_store)

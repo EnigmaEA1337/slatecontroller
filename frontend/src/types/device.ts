@@ -21,6 +21,10 @@ export interface DevicePublic {
   status: DeviceStatus;
   is_default: boolean;
   notes: string;
+  /** Serial printed on the tamper-evident sticker covering the chassis
+   *  screws. Reference value : if a later physical check shows a
+   *  different sticker number, the box was opened. Empty = not tracked. */
+  security_label: string;
   last_probe_at: string | null;
   adopted_at: string | null;
   created_at: string;
@@ -39,6 +43,7 @@ export interface DeviceCreate {
   rpc_username: string;
   rpc_password: string;
   notes?: string;
+  security_label?: string;
 }
 
 export interface AdoptionOptions {

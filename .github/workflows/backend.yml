@@ -1,0 +1,95 @@
+name: Backend CI
+
+# Triggered on push to any branch + on every PR. Concurrency cancels in-
+# flight runs for the same branch so a quick succession of pushes only
+# pays for the last one.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: ruff + mypy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: ruff (lint)
+        working-directory: backend
+        run: ruff check app tests
+      - name: ruff (format check)
+        working-directory: backend
+        run: ruff format --check app tests
+      - name: mypy
+        working-directory: backend
+        # Mypy is opt-in strict via mypy.ini ; surface failures but don't
+        # block merges yet — the codebase isn't fully annotated. Flip
+        # `continue-on-error: false` once the baseline is clean.
+        continue-on-error: true
+        run: mypy app
+
+  tests:
+    runs-on: ubuntu-latest
+    name: pytest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pytest
+        working-directory: backend
+        env:
+          # Most tests stub the SSH/Slate layer, but a few touch the
+          # crypto module via a derived key. Provide a deterministic test
+          # secret so cold runs don't depend on a random one.
+          JWT_SECRET: test-only-jwt-secret-do-not-use-in-prod
+        run: pytest -v --tb=short
+
+  alembic-check:
+    runs-on: ubuntu-latest
+    name: alembic upgrade head (smoke)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Apply all migrations on a fresh SQLite
+        working-directory: backend
+        env:
+          DB_URL: "sqlite+aiosqlite:///./ci-alembic.db"
+          JWT_SECRET: test-only-jwt-secret
+        run: alembic upgrade head

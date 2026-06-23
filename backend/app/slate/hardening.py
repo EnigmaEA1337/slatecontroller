@@ -747,6 +747,84 @@ def _controller_admin_password_check() -> HardeningCheck:
     )
 
 
+def _controller_jwt_secret_check() -> HardeningCheck:
+    """Verify JWT_SECRET is not a known placeholder + has decent entropy.
+
+    The nightly audit (2026-06-23) flagged this as P0 critical : the
+    same secret is reused as the Fernet at-rest key. A placeholder here
+    means an attacker forges admin JWTs AND decrypts every stored
+    device/VPN/WiFi password. The boot guard in main.py refuses to
+    start in that case — this hardening check surfaces the verdict in
+    the UI so the operator sees the gauge stay red until they rotate.
+
+    The note never exposes the secret itself ; we only show length and
+    whether the placeholder bypass flag is on.
+
+    Scoring :
+      placeholder OR bypass=True  → 0 pts (CRITICAL)
+      < 32 chars                  → 4 pts (faible)
+      32-47 chars                 → 10 pts (acceptable)
+      ≥ 48 chars                  → 15 pts (fort)
+    """
+    from app.config import get_settings
+    from app.main import _PLACEHOLDER_JWT_SECRETS
+
+    settings = get_settings()
+    secret = settings.jwt_secret or ""
+    if settings.allow_placeholder_jwt_secret:
+        return HardeningCheck(
+            name="JWT_SECRET contrôleur",
+            points=0,
+            max_points=15,
+            status="ready",
+            note=(
+                "ALLOW_PLACEHOLDER_JWT_SECRET=1 actif — bypass dev/test. "
+                "À retirer immédiatement en production. Le secret est "
+                "réutilisé comme clé Fernet at-rest (configs VPN, mdp "
+                "device, PSK WiFi), un placeholder = compromission totale."
+            ),
+        )
+    if secret in _PLACEHOLDER_JWT_SECRETS:
+        return HardeningCheck(
+            name="JWT_SECRET contrôleur",
+            points=0,
+            max_points=15,
+            status="ready",
+            note=(
+                "VALEUR PAR DÉFAUT détectée — incohérent : le boot aurait "
+                "dû échouer. Si tu vois ce message, vérifier que le check "
+                "de boot dans main.py est bien câblé."
+            ),
+        )
+    n = len(secret)
+    if n < 32:
+        return HardeningCheck(
+            name="JWT_SECRET contrôleur (faible)",
+            points=4,
+            max_points=15,
+            status="ready",
+            note=(
+                f"{n} caractères — entropie insuffisante pour HS256. "
+                "Recommandé ≥ 48 chars (openssl rand -base64 48)."
+            ),
+        )
+    if n < 48:
+        return HardeningCheck(
+            name="JWT_SECRET contrôleur",
+            points=10,
+            max_points=15,
+            status="ready",
+            note=f"{n} caractères — acceptable. Idéal ≥ 48 chars aléatoires.",
+        )
+    return HardeningCheck(
+        name="JWT_SECRET contrôleur",
+        points=15,
+        max_points=15,
+        status="ready",
+        note=f"{n} caractères — fort",
+    )
+
+
 async def _adguard_dns_protection_check(
     manager: AdGuardManager | None,
 ) -> list[HardeningCheck]:
@@ -1131,6 +1209,15 @@ async def _admin_ip_whitelist_check(ssh: SlateSSH | None) -> HardeningCheck:
         )
 
     # Parse uci output → {section: {attr: value}}.
+    # UCI emits two line shapes :
+    #   firewall.<section>=<type>              ← section header (.type)
+    #   firewall.<section>.<attr>=<value>      ← attribute line
+    # The previous parser only handled the 3-part attribute case, then
+    # filtered on attrs.get('.type') which was therefore ALWAYS missing
+    # → the rule-only gate was a no-op and the check counted zone /
+    # forwarding / defaults sections as if they were rules (nightly
+    # audit 2026-06-23 low). We now stash the type under ``__type__`` so
+    # the gate below actually filters.
     sections: dict[str, dict[str, str]] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -1141,16 +1228,23 @@ async def _admin_ip_whitelist_check(ssh: SlateSSH | None) -> HardeningCheck:
         except ValueError:
             continue
         parts = key.split(".", 2)
-        if len(parts) != 3:
-            continue
-        _, section, attr = parts
-        sections.setdefault(section, {})[attr] = value.strip().strip("'\"")
+        clean_value = value.strip().strip("'\"")
+        if len(parts) == 2:
+            # Section header — record its type.
+            _, section = parts
+            sections.setdefault(section, {})["__type__"] = clean_value
+        elif len(parts) == 3:
+            _, section, attr = parts
+            sections.setdefault(section, {})[attr] = clean_value
+        # else: malformed, skip silently
 
     admin_ports = {"22", "80", "443"}
     matches: list[str] = []
     for section, attrs in sections.items():
-        # Only rule-type sections matter.
-        if attrs.get(".type") and attrs.get(".type") != "rule":
+        # Only rule-type sections matter — zone / forwarding / defaults
+        # never carry a src_ip whitelist semantic so counting them would
+        # inflate the score with false positives.
+        if attrs.get("__type__") != "rule":
             continue
         if attrs.get("enabled") == "0":
             continue
@@ -1464,6 +1558,7 @@ async def compute_hardening(
     # Controller-local check: always runs, doesn't depend on Slate or SSH.
     # Critical because a weak controller password defeats every other check.
     checks.append(_controller_admin_password_check())
+    checks.append(_controller_jwt_secret_check())
 
     # AdGuard-side DNS protection (DNSSEC + DoH/VPN bypass blocklist).
     # Hits AdGuard REST directly (one config read + one filters list).

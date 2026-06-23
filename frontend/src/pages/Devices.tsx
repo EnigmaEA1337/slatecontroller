@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertOctagon,
   AlertTriangle,
+  Check,
   CheckCircle2,
   CircleDashed,
   Eraser,
@@ -10,6 +11,7 @@ import {
   EyeOff,
   Fingerprint,
   Globe,
+  Pencil,
   Plus,
   Radio,
   RefreshCw,
@@ -17,6 +19,7 @@ import {
   Router,
   Shield,
   Star,
+  Tag,
   Trash2,
   X,
   XCircle,
@@ -27,12 +30,14 @@ import {
   deleteDevice,
   forgetDevice,
   listDevices,
+  patchDevice,
   probeDevice,
   setDefaultDevice,
 } from "@/api/devices";
 import { ClickableHost, ClickableHostList } from "@/components/ClickableHost";
 import EditAdminUrlsModal from "@/components/EditAdminUrlsModal";
 import FactoryResetModal from "@/components/FactoryResetModal";
+import DeviceLocationButton from "@/components/DeviceLocationButton";
 import ScreenLockWidget from "@/components/ScreenLockWidget";
 import type {
   AdoptionOptions,
@@ -56,6 +61,7 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
   const [rpcUsername, setRpcUsername] = useState("root");
   const [rpcPassword, setRpcPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
+  const [securityLabel, setSecurityLabel] = useState("");
 
   const submit = useMutation({
     mutationFn: () =>
@@ -65,6 +71,7 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
         host,
         rpc_username: rpcUsername,
         rpc_password: rpcPassword,
+        security_label: securityLabel.trim() || undefined,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["devices"] });
@@ -155,6 +162,23 @@ function AddDeviceForm({ onClose }: { onClose: () => void }) {
               {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </button>
           </div>
+        </label>
+        <label className="col-span-2 block">
+          <span className="cyber-label mb-1.5 flex items-center gap-1.5">
+            <Tag className="h-3 w-3" />
+            étiquette de sécurité
+          </span>
+          <input
+            type="text"
+            value={securityLabel}
+            onChange={(e) => setSecurityLabel(e.target.value.slice(0, 64))}
+            maxLength={64}
+            placeholder="ex. SLT-0042-A — n° imprimé sur le sticker tamper-evident"
+            className="cyber-input w-full py-2 px-3 text-sm font-mono"
+          />
+          <span className="mt-1 block text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-dim)]">
+            Référence : si le numéro lu plus tard diffère, le boîtier a été ouvert.
+          </span>
         </label>
       </div>
 
@@ -476,6 +500,16 @@ const DeviceCard = memo(function DeviceCard({
   const queryClient = useQueryClient();
   const [editingUrls, setEditingUrls] = useState(false);
   const [factoryResetOpen, setFactoryResetOpen] = useState(false);
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(device.security_label || "");
+  const saveLabel = useMutation({
+    mutationFn: () =>
+      patchDevice(device.slug, { security_label: labelDraft.trim() }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["devices"] });
+      setEditingLabel(false);
+    },
+  });
   const probe = useMutation({
     mutationFn: () => probeDevice(device.slug),
     onSuccess: () =>
@@ -595,6 +629,97 @@ const DeviceCard = memo(function DeviceCard({
               </code>
             </div>
           )}
+          {/* Tamper-evident security label — serial printed on the sticker
+              covering the chassis screws. Reference value : the operator
+              records it once at adoption ; later, a physical check finding
+              a different sticker number = boîtier opened. Inline edit so
+              the operator can also fix a typo or re-set it after replacing
+              the sticker. */}
+          <div className="mt-2">
+            <div className="cyber-label mb-1 flex items-center gap-1.5">
+              <Tag className="h-3 w-3" />
+              étiquette de sécurité
+              {!editingLabel && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLabelDraft(device.security_label || "");
+                    setEditingLabel(true);
+                  }}
+                  className="ml-auto inline-flex items-center gap-1 border border-transparent px-1.5 py-0.5 text-[9px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-accent)]"
+                  title="Modifier le numéro d'étiquette tamper-evident"
+                >
+                  <Pencil className="h-2.5 w-2.5" />
+                  éditer
+                </button>
+              )}
+            </div>
+            {!editingLabel ? (
+              device.security_label ? (
+                /* Sceau de garantie — wide read-only display, fond holo
+                   iridescent multi-couleur évoquant la pellicule du
+                   sticker tamper-evident. select-all pour copier en un
+                   clic, font-mono pour la lisibilité du serial. */
+                <div
+                  className="block w-full select-all border border-[color:var(--color-cyber-border)] bg-[color:var(--color-cyber-bg-2)] px-3 py-2 font-mono text-sm tracking-[0.1em] text-[color:var(--color-cyber-fg)]"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(110deg, rgba(167,219,235,0.22) 0%, rgba(244,200,210,0.18) 25%, rgba(255,244,212,0.18) 50%, rgba(212,255,225,0.18) 75%, rgba(167,219,235,0.22) 100%)",
+                  }}
+                  title="Numéro lu lors de l'adoption. Si une inspection physique trouve un autre numéro, le boîtier a été ouvert."
+                >
+                  {device.security_label}
+                </div>
+              ) : (
+                <p className="block w-full border border-dashed border-[color:var(--color-cyber-border)] px-3 py-2 text-[10px] italic text-[color:var(--color-cyber-dim)]">
+                  Non renseigné — ajouter le n° du sticker pour pouvoir détecter une ouverture du boîtier.
+                </p>
+              )
+            ) : (
+              <div className="flex w-full gap-1.5">
+                <input
+                  type="text"
+                  autoFocus
+                  value={labelDraft}
+                  onChange={(e) => setLabelDraft(e.target.value.slice(0, 64))}
+                  maxLength={64}
+                  placeholder="ex. 613786 — n° du sticker tamper-evident"
+                  className="cyber-input flex-1 px-3 py-2 text-sm font-mono tracking-[0.1em]"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveLabel.mutate();
+                    if (e.key === "Escape") setEditingLabel(false);
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={saveLabel.isPending}
+                  onClick={() => saveLabel.mutate()}
+                  className="cyber-button inline-flex items-center gap-1 px-3 py-2 text-[10px] disabled:opacity-50"
+                  title="Enregistrer"
+                >
+                  <Check className="h-3 w-3" />
+                  ok
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingLabel(false)}
+                  className="border border-[color:var(--color-cyber-border-strong)] px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-[color:var(--color-cyber-muted)] hover:text-[color:var(--color-cyber-fg)]"
+                  title="Annuler"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            {saveLabel.error && (
+              <p className="mt-1 cyber-chip cyber-chip-on block !rounded-none px-2 py-1 text-[10px]">
+                {errorMessage(saveLabel.error)}
+              </p>
+            )}
+          </div>
+          {/* Geoloc — one-tap "Fix location" via browser GPS, or manual
+              lat/lon entry. Persists into the device_locations history
+              consumed by the radio map + ambient-scan tagging. */}
+          {isAdopted && <DeviceLocationButton />}
           {device.notes && (
             <p className="mt-2 text-[10px] italic text-[color:var(--color-cyber-dim)]">
               {device.notes}

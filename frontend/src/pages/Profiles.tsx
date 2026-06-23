@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   Briefcase,
+  CheckCircle2,
   ClipboardList,
   Copy,
   Home as HomeIcon,
@@ -12,6 +14,7 @@ import {
   Plus,
   Power,
   QrCode,
+  RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -24,6 +27,7 @@ import {
   duplicateProfile,
   listProfiles,
   regenerateAllWallpapers,
+  syncProfileToSlate,
 } from "@/api/profiles";
 import { listWifiSsids } from "@/api/wifi";
 import PlanModal from "@/components/PlanModal";
@@ -71,7 +75,7 @@ function ProfileCard({
   onShowQR: (ssid: WifiSsidPublic) => void;
 }) {
   const navigate = useNavigate();
-  const { profile, source, is_active } = envelope;
+  const { profile, source, is_active, out_of_sync, last_synced_at } = envelope;
   const Icon: LucideIcon =
     (profile.icon ? ICONS[profile.icon] : undefined) ?? ShieldCheck;
   const enabledSsidRefs = profile.ssids.filter((s) => s.enabled);
@@ -96,8 +100,12 @@ function ProfileCard({
       navigate(`/profiles/${env.profile.name}/edit`);
     },
   });
+  const resync = useMutation({
+    mutationFn: () => syncProfileToSlate(profile.name),
+    onSuccess: onMutated,
+  });
 
-  const lastError = activate.error || del.error || dup.error;
+  const lastError = activate.error || del.error || dup.error || resync.error;
 
   return (
     <article
@@ -118,6 +126,37 @@ function ProfileCard({
             <SourceBadge source={source} />
             {is_active && (
               <span className="cyber-chip cyber-chip-ok">active</span>
+            )}
+            {/* Out-of-sync = la version dans la DB est plus récente que
+                le profile.json déployé sur le Slate. Le bouton physique
+                / LCD rejouerait une version périmée — on flag ici en
+                clair pour que l'opérateur sache cliquer Re-sync. */}
+            {out_of_sync ? (
+              <span
+                className="cyber-chip cyber-chip-warn inline-flex items-center gap-1"
+                title={
+                  last_synced_at
+                    ? `Edit local plus récente que la dernière sync (${new Date(
+                        last_synced_at,
+                      ).toLocaleString("fr-FR")}). Cliquer « Re-sync » pour pousser la version actuelle.`
+                    : "Jamais synchronisé sur le Slate. Cliquer « Re-sync » pour pousser la définition actuelle."
+                }
+              >
+                <AlertTriangle className="h-2.5 w-2.5" />
+                désynchronisé
+              </span>
+            ) : (
+              <span
+                className="cyber-chip cyber-chip-ok inline-flex items-center gap-1"
+                title={
+                  last_synced_at
+                    ? `Synchronisé le ${new Date(last_synced_at).toLocaleString("fr-FR")}.`
+                    : "Synchronisé."
+                }
+              >
+                <CheckCircle2 className="h-2.5 w-2.5" />
+                sync
+              </span>
             )}
           </div>
           <p className="mt-1 text-xs text-[color:var(--color-cyber-muted)]">
@@ -259,6 +298,36 @@ function ProfileCard({
         >
           <Copy className="h-3 w-3" />
           Dupliquer
+        </button>
+        {/* Bouton manuel de re-sync : pousse /etc/slate-controller/profiles/
+            <name>.json sans déclencher d'apply. Utile quand l'auto-sync
+            au save a échoué (Slate offline) — l'opérateur retrouve un
+            chemin clair pour rétablir la cohérence sans devoir re-éditer
+            le profil. Mis en évidence (chip warn) si le profil est
+            actuellement désynchronisé. */}
+        <button
+          type="button"
+          onClick={() => resync.mutate()}
+          disabled={resync.isPending}
+          className={cn(
+            "flex items-center gap-1.5 border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.18em] transition disabled:opacity-40",
+            out_of_sync
+              ? "border-[color:var(--color-cyber-warn)] text-[color:var(--color-cyber-warn)] hover:bg-[color:var(--color-cyber-warn)]/10"
+              : "border-[color:var(--color-cyber-border-strong)] text-[color:var(--color-cyber-muted)] hover:border-[color:var(--color-cyber-accent)] hover:text-[color:var(--color-cyber-fg)]",
+          )}
+          title={
+            out_of_sync
+              ? "Re-pousser le profile.json à jour vers le Slate. Pas d'apply — la nouvelle conf prend effet à la prochaine activation."
+              : "Forcer une re-sync du profile.json. Idempotent."
+          }
+        >
+          <RefreshCw
+            className={cn(
+              "h-3 w-3",
+              resync.isPending && "animate-spin",
+            )}
+          />
+          {resync.isPending ? "Sync…" : "Re-sync"}
         </button>
         {source === "user" && (
           <button
