@@ -14,7 +14,7 @@
 // (one section per interface), each row optionally expandable to its
 // open ports + banners.
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -67,10 +67,14 @@ export default function WanReconPage() {
   const scans = useQuery({
     queryKey: ["recon", "scans"],
     queryFn: () => listReconScans(),
-    // Poll faster while a scan is running.
+    // Poll faster while a scan is running. Defensive : guard the
+    // type because TanStack Query can briefly hand us an error
+    // response body (object) instead of the array if the request
+    // 5xxed and was retried.
     refetchInterval: (q) => {
-      const data = q.state.data as ReconScanSummary[] | undefined;
-      return data?.some((s) => s.status === "running") ? 1500 : 30_000;
+      const data = q.state.data;
+      if (!Array.isArray(data)) return 30_000;
+      return data.some((s) => s.status === "running") ? 1500 : 30_000;
     },
   });
 
@@ -102,13 +106,17 @@ export default function WanReconPage() {
     pinGate.request();
   };
 
-  const activeScans = useMemo(
-    () => scans.data?.filter((s) => s.status === "running") ?? [],
+  const scansList = useMemo<ReconScanSummary[]>(
+    () => (Array.isArray(scans.data) ? scans.data : []),
     [scans.data],
   );
+  const activeScans = useMemo(
+    () => scansList.filter((s) => s.status === "running"),
+    [scansList],
+  );
   const pastScans = useMemo(
-    () => scans.data?.filter((s) => s.status !== "running") ?? [],
-    [scans.data],
+    () => scansList.filter((s) => s.status !== "running"),
+    [scansList],
   );
 
   return (
@@ -384,9 +392,8 @@ function HostTable({
           const ports = portsByIp.get(h.ip) ?? [];
           const isOpen = openIp === h.ip;
           return (
-            <>
+            <Fragment key={h.ip}>
               <tr
-                key={h.ip}
                 className="border-t border-[color:var(--color-cyber-border)]/30"
               >
                 <td className="px-2 py-0.5">
@@ -444,7 +451,7 @@ function HostTable({
                     </td>
                   </tr>
                 ))}
-            </>
+            </Fragment>
           );
         })}
       </tbody>
