@@ -69,43 +69,47 @@ NON_OVERLAP_24: tuple[frozenset[int], ...] = (
 def _ap_root_for(bssid: str) -> str:
     """Compute the physical-AP identifier for a BSSID.
 
-    A multi-SSID-capable AP firmware (UniFi, Aruba, Cisco Meraki,
-    GL.iNet, Ruckus, …) advertises its VAPs as BSSIDs derived from a
-    single anchor MAC. The variation pattern is vendor-specific :
+    Two main vendor conventions for sibling VAPs of the same physical
+    radio :
 
-      - UniFi-style : the FIRST octet increments / flips U/L bit, the
-        lower 5 bytes stay the same.
-      - Ruckus / Aruba / Cisco-style : the LAST octet increments
-        (``…:b3:81:20`` → ``:22`` → ``:25`` for hotel ACCORHOTELS
-        VAPs), the upper 5 bytes stay the same.
+    - **Last-byte increment** (Ruckus, Aruba, Cisco Meraki, GL.iNet) :
+      the LAST octet counts up (``…:b3:81:20`` → ``:22`` → ``:25``),
+      the upper 5 bytes stay stable.
+    - **First-byte LA flip** (UniFi, some Mikrotik) : the FIRST octet
+      flips the locally-administered bit (``0x02``) and increments the
+      LA counter bits (``0x04``, ``0x08``), the lower 5 bytes stay
+      stable. So a UniFi anchor ``78:48:dc:20:fe:XX`` spawns sibling
+      VAPs at ``7a:…``, ``7e:…``, ``7c:…``, etc.
 
-    Both patterns collapse cleanly when we drop ONE end of the MAC.
-    Empirically dropping the LAST octet (the Ruckus-style variation
-    point) catches Ruckus AND still groups UniFi-style VAPs together
-    when their U/L bit + first-octet shift keeps the upper 5 bytes
-    identical (the typical UniFi U/L trick : ``78:48:dc:…`` and
-    ``7a:48:dc:…`` share their upper 5 bytes from position 1 onward,
-    so neither end is a perfect anchor). We pick the UPPER 5 bytes
-    (= OUI + first NIC octet) because it preserves the OUI lookup
-    semantics (vendor identification still works on the cluster id)
-    and matches the dominant Ruckus/Aruba/Cisco pattern.
+    We collapse both patterns into a single rule : take the upper 5
+    bytes (catches the last-byte family) AND mask the LA family bits
+    (``0x0E``) on the first octet (catches the first-byte family).
+    The mask normalises ``78`` / ``7a`` / ``7c`` / ``7e`` to ``70``,
+    so every UniFi sibling lands on the same canonical anchor without
+    needing a vendor table. The trade-off : two unrelated real OUIs
+    that differ only in bits ``0x0E`` of their first octet AND share
+    the next 4 octets would collide — physically possible but
+    astronomically unlikely (the OUI/CID registries are sparse).
 
     Channel is intentionally NOT part of the key : a dual-radio AP
-    (one box, 2.4 + 5 GHz from the same physical enclosure) is the
-    same physical AP to the operator and should appear as ONE row
-    with its channels aggregated. The previous keying ``<suffix>@N``
-    split it into N separate rows, which read as N distinct APs in
-    the UI even though the operator could see only one device in
-    front of them.
+    (one box, 2.4 + 5 GHz) is the same physical device to the operator
+    and should render as ONE row with its channels aggregated.
 
-    Output is lowercase + colon-separated for human readability in
-    the UI : ``"a8:0b:fb:b3:81"``.
+    Output is lowercase + colon-separated :
+    ``"a0:0b:fb:b3:81"`` (Ruckus a8:0b:fb:b3:81:XX, first byte masked
+    a8→a0), ``"70:48:dc:20:fe"`` (UniFi 78/7a/7e:48:dc:20:fe:XX).
     """
     norm = bssid.lower().strip()
     parts = norm.split(":")
     if len(parts) != 6:
         return norm
-    return ":".join(parts[:5])
+    try:
+        first_canonical = int(parts[0], 16) & 0xF1
+    except ValueError:
+        # Bogus byte — fall back to plain upper-5-bytes ; we still
+        # cluster Ruckus-style correctly even without the mask.
+        return ":".join(parts[:5])
+    return f"{first_canonical:02x}:" + ":".join(parts[1:5])
 
 
 def _band_for_channel(ch: int) -> WifiBand:
