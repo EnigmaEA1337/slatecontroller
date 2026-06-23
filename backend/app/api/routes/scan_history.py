@@ -81,7 +81,12 @@ class ChannelScoreView(BaseModel):
 
 class PhysicalAPGroupView(BaseModel):
     ap_root: str
+    # Primary channel = strongest member's channel. Kept for callers
+    # that need a single representative value ; the UI displays the
+    # aggregated ``channels`` list.
     channel: int
+    channels: list[int]
+    bands: list[str]
     rssi_dbm: int
     vendor: str
     vendor_slug: str
@@ -229,7 +234,9 @@ async def get_history(
         ],
         physical_aps=[
             PhysicalAPGroupView(
-                ap_root=g.ap_root, channel=g.channel, rssi_dbm=g.rssi_dbm,
+                ap_root=g.ap_root, channel=g.channel,
+                channels=list(g.channels), bands=list(g.bands),
+                rssi_dbm=g.rssi_dbm,
                 vendor=g.vendor, vendor_slug=g.vendor_slug,
                 is_all_randomized=g.is_all_randomized, has_wps=g.has_wps,
                 ssids=g.ssids, hidden_count=g.hidden_count,

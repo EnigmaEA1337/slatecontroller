@@ -827,7 +827,14 @@ function APTreeView({
                 </span>
               )}
               <span className="text-[color:var(--color-cyber-muted)] text-[10px]">
-                ch {g.channel}
+                {g.channels && g.channels.length > 0
+                  ? `ch ${g.channels.join(", ")}`
+                  : `ch ${g.channel}`}
+                {g.bands && g.bands.length > 1 && (
+                  <span className="ml-1 text-[color:var(--color-cyber-accent)]">
+                    · {g.bands.join("/")} GHz
+                  </span>
+                )}
               </span>
               <DistanceBadge rssi_dbm={g.rssi_dbm} />
               <span className="font-mono text-[10px]">{g.rssi_dbm} dBm</span>
@@ -875,6 +882,8 @@ function APTreeView({
                     <tr className="text-[color:var(--color-cyber-muted)] text-left">
                       <th className="px-2 py-1">SSID</th>
                       <th className="px-2 py-1">BSSID</th>
+                      <th className="px-2 py-1">ch</th>
+                      <th className="px-2 py-1">band</th>
                       <th className="px-2 py-1">vendor</th>
                       <th className="px-2 py-1">RSSI</th>
                       <th className="px-2 py-1">distance</th>
@@ -901,6 +910,12 @@ function APTreeView({
                           )}
                         </td>
                         <td className="px-2 py-0.5 text-[10px]">{n.bssid}</td>
+                        <td className="px-2 py-0.5 text-[10px] font-mono">
+                          {n.channel}
+                        </td>
+                        <td className="px-2 py-0.5 text-[10px] font-mono text-[color:var(--color-cyber-muted)]">
+                          {n.band}
+                        </td>
                         <td className="px-2 py-0.5 text-[10px]">
                           <VendorLogo
                             slug={n.vendor_slug}

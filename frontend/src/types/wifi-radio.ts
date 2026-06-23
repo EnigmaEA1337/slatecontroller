@@ -55,7 +55,12 @@ export interface NeighborAPView {
 
 export interface PhysicalAPGroupView {
   ap_root: string;
+  // Primary channel = strongest member's channel. The UI displays
+  // the multi-radio aggregate via ``channels`` ; ``channel`` is kept
+  // for review-modal seeds and channel-scoring callers.
   channel: number;
+  channels: number[];
+  bands: WifiBand[];
   rssi_dbm: number;
   vendor: string;
   vendor_slug: string;

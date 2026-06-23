@@ -59,6 +59,8 @@ export interface ScanHistoryChannelScore {
 export interface ScanHistoryPhysicalAP {
   ap_root: string;
   channel: number;
+  channels: number[];
+  bands: WifiBand[];
   rssi_dbm: number;
   vendor: string;
   vendor_slug: string;

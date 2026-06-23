@@ -66,30 +66,46 @@ NON_OVERLAP_24: tuple[frozenset[int], ...] = (
 )
 
 
-def _ap_root_for(bssid: str, channel: int) -> str:
-    """Compute the physical-AP identifier for a (BSSID, channel) pair.
+def _ap_root_for(bssid: str) -> str:
+    """Compute the physical-AP identifier for a BSSID.
 
-    Almost every multi-SSID-capable AP firmware (UniFi, Aruba, Cisco
-    Meraki, GL.iNet, Ruckus, …) assigns its VAPs a BSSID whose lower
-    5 bytes match the radio's "anchor" MAC ; only the first byte
-    varies (incremented +1 / +2 / …, sometimes with the U/L bit
-    flipped on the extras). So grouping by ``<5-byte suffix>@<channel>``
-    yields one cluster per physical radio.
+    A multi-SSID-capable AP firmware (UniFi, Aruba, Cisco Meraki,
+    GL.iNet, Ruckus, …) advertises its VAPs as BSSIDs derived from a
+    single anchor MAC. The variation pattern is vendor-specific :
 
-    Channel is part of the key so a dual-radio AP that broadcasts the
-    same VAPs on 5 GHz AND 6 GHz (rare but possible) is rendered as
-    two clusters (one per radio) — which matches reality (different
-    PHY, different beacon stream).
+      - UniFi-style : the FIRST octet increments / flips U/L bit, the
+        lower 5 bytes stay the same.
+      - Ruckus / Aruba / Cisco-style : the LAST octet increments
+        (``…:b3:81:20`` → ``:22`` → ``:25`` for hotel ACCORHOTELS
+        VAPs), the upper 5 bytes stay the same.
 
-    Output is lowercase + colon-separated for human readability in the
-    UI : ``"78:48:dc:20:fe@36"``.
+    Both patterns collapse cleanly when we drop ONE end of the MAC.
+    Empirically dropping the LAST octet (the Ruckus-style variation
+    point) catches Ruckus AND still groups UniFi-style VAPs together
+    when their U/L bit + first-octet shift keeps the upper 5 bytes
+    identical (the typical UniFi U/L trick : ``78:48:dc:…`` and
+    ``7a:48:dc:…`` share their upper 5 bytes from position 1 onward,
+    so neither end is a perfect anchor). We pick the UPPER 5 bytes
+    (= OUI + first NIC octet) because it preserves the OUI lookup
+    semantics (vendor identification still works on the cluster id)
+    and matches the dominant Ruckus/Aruba/Cisco pattern.
+
+    Channel is intentionally NOT part of the key : a dual-radio AP
+    (one box, 2.4 + 5 GHz from the same physical enclosure) is the
+    same physical AP to the operator and should appear as ONE row
+    with its channels aggregated. The previous keying ``<suffix>@N``
+    split it into N separate rows, which read as N distinct APs in
+    the UI even though the operator could see only one device in
+    front of them.
+
+    Output is lowercase + colon-separated for human readability in
+    the UI : ``"a8:0b:fb:b3:81"``.
     """
     norm = bssid.lower().strip()
     parts = norm.split(":")
     if len(parts) != 6:
-        return f"{norm}@{channel}"
-    suffix = ":".join(parts[1:])
-    return f"{suffix}@{channel}"
+        return norm
+    return ":".join(parts[:5])
 
 
 def _band_for_channel(ch: int) -> WifiBand:
@@ -383,7 +399,7 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
             vendor=oui.vendor,
             vendor_slug=oui.vendor_slug,
             is_randomized=oui.is_randomized,
-            ap_root=_ap_root_for(bssid, ch),
+            ap_root=_ap_root_for(bssid),
             # Single-observation defaults — make rssi_max/min meaningful
             # so callers don't have to special-case the count==1 path.
             seen_count=1,
@@ -397,10 +413,20 @@ def parse_iw_scan(raw: str) -> list[NeighborAP]:
 
 @dataclass(frozen=True)
 class PhysicalAPGroup:
-    """A cluster of NeighborAP records that share the same physical radio."""
+    """A cluster of NeighborAP records that share the same physical AP box."""
 
     ap_root: str
+    # Primary channel = strongest member's channel. Kept for backward
+    # compatibility with code paths that want a single representative
+    # channel (channel scoring, AP review modal display). When the box
+    # has multiple radios the aggregated view exposes ``channels``.
     channel: int
+    # All distinct channels the box advertises VAPs on, sorted ascending.
+    # One physical Ruckus/Aruba/Cisco AP commonly has two radios (2.4
+    # and 5 GHz) so this is rarely a singleton.
+    channels: tuple[int, ...]
+    # Distinct bands the box's VAPs span ("2" / "5" / "6"), sorted.
+    bands: tuple[str, ...]
     members: list[NeighborAP]
     ssids: list[str]              # distinct, non-hidden SSIDs broadcast
     hidden_count: int             # how many member VAPs are hidden
@@ -412,7 +438,7 @@ class PhysicalAPGroup:
 
 
 def group_by_physical_ap(neighbors: list[NeighborAP]) -> list[PhysicalAPGroup]:
-    """Cluster a flat neighbour list by physical radio.
+    """Cluster a flat neighbour list by physical AP box.
 
     Returns groups sorted by strongest RSSI first (closest physical AP),
     which matches the operator's natural reading order.
@@ -435,9 +461,16 @@ def group_by_physical_ap(neighbors: list[NeighborAP]) -> list[PhysicalAPGroup]:
                 vendor = m.vendor
                 vendor_slug = m.vendor_slug
                 break
+        # Primary channel = channel of the strongest member (max RSSI =
+        # closest physical match for what the operator is pointing at).
+        strongest = max(members, key=lambda m: m.rssi_dbm)
+        channels = tuple(sorted({m.channel for m in members}))
+        bands = tuple(sorted({m.band for m in members}))
         out.append(PhysicalAPGroup(
             ap_root=key,
-            channel=members[0].channel,
+            channel=strongest.channel,
+            channels=channels,
+            bands=bands,
             members=members,
             ssids=ssids,
             hidden_count=hidden,
