@@ -1360,3 +1360,106 @@ class FortinetSecretRow(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
+
+
+class ReconScanRow(Base):
+    """One WAN/LAN reconnaissance scan run.
+
+    Used by the "Reconnaissance WAN" security page : the operator
+    triggers an active discovery sweep on the Slate's upstream/LAN
+    interfaces ; the scan walks four phases (ARP cache → ping sweep
+    → TCP probe → banner grab) on every L3 interface in scope and
+    persists the result so it can be reviewed later (e.g. comparing
+    "the hotel WiFi looked like X yesterday, now Y").
+
+    ``scope_json`` is the operator's request (which interfaces +
+    which scan types) captured at launch so the UI can replay it.
+    ``progress`` is a free-form short status the runner updates
+    incrementally — the frontend polls this for the live progress
+    bar without holding a WebSocket open.
+    """
+
+    __tablename__ = "recon_scans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # running / done / failed / cancelled.
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    # JSON payload : {"interfaces": ["wan"|...], "scan_types": ["arp","ping","tcp","banner"]}.
+    scope_json: Mapped[str] = mapped_column(String(2048), default="{}")
+    # One-line progress descriptor updated by the runner ("ARP wan", "ping br-lan 42/254"…).
+    progress: Mapped[str] = mapped_column(String(256), default="")
+    error: Mapped[str] = mapped_column(String(512), default="")
+    host_count: Mapped[int] = mapped_column(default=0)
+    port_count: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        index=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+
+class ReconHostRow(Base):
+    """One IP host discovered during a recon scan."""
+
+    __tablename__ = "recon_hosts"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_id", "interface", "ip", name="uq_recon_hosts_scan_iface_ip",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("recon_scans.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # Interface the host was seen on (wan, br-lan, br-mission, ...).
+    interface: Mapped[str] = mapped_column(String(32), default="", index=True)
+    ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)  # IPv4/IPv6
+    mac: Mapped[str] = mapped_column(String(17), default="")
+    vendor: Mapped[str] = mapped_column(String(128), default="")
+    hostname: Mapped[str] = mapped_column(String(255), default="")
+    # arp / ping / both — how the host was discovered.
+    source: Mapped[str] = mapped_column(String(16), default="")
+    # True iff this IP is the gateway of its subnet on the slate.
+    is_gateway: Mapped[bool] = mapped_column(default=False)
+    # True iff this IP is the slate itself on that interface.
+    is_self: Mapped[bool] = mapped_column(default=False)
+    seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+
+class ReconPortRow(Base):
+    """One TCP probe result for a discovered host."""
+
+    __tablename__ = "recon_ports"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_id", "ip", "port", name="uq_recon_ports_scan_ip_port",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("recon_scans.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
+    port: Mapped[int] = mapped_column(nullable=False)
+    # open / closed / filtered.
+    state: Mapped[str] = mapped_column(String(16), default="closed")
+    # Free-text banner (first ~256 chars of what the service said).
+    banner: Mapped[str] = mapped_column(String(512), default="")
+    # Rough service guess derived from the port + banner content
+    # ("ssh", "http", "https", "smb"…). Empty when we couldn't tell.
+    service: Mapped[str] = mapped_column(String(32), default="")
+    probed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )

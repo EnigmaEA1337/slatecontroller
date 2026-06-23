@@ -41,6 +41,7 @@ from app.api.routes import surveillance as surveillance_routes
 from app.api.routes import wifi_orphans as wifi_orphans_routes
 from app.api.routes import wifi as wifi_routes
 from app.api.routes import wifi_radio as wifi_radio_routes
+from app.api.routes import recon as recon_routes
 from app.config import get_settings
 from app.db.database import init_db, make_engine, make_session_factory
 from app.devices.store import DeviceStore
@@ -612,6 +613,8 @@ def create_app() -> FastAPI:
     app.include_router(surveillance_routes.router, prefix="/api")
     # PCAP capture — /network/pcap.
     app.include_router(pcap_routes.router, prefix="/api")
+    # WAN/LAN reconnaissance — /recon/scans, /recon/interfaces.
+    app.include_router(recon_routes.router, prefix="/api")
     app.include_router(wifi_routes.router, prefix="/api")
     app.include_router(air_watch_routes.router, prefix="/api")
     app.include_router(device_locations_routes.router, prefix="/api")
