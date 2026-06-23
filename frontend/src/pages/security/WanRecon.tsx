@@ -474,6 +474,10 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
     queryFn: () => listReconInterfaces(),
     enabled: open,
   });
+  const interfaceList = useMemo<ReconInterface[]>(
+    () => (Array.isArray(interfaces.data) ? interfaces.data : []),
+    [interfaces.data],
+  );
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [doArp, setDoArp] = useState(true);
@@ -534,7 +538,12 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
               Chargement…
             </div>
           )}
-          {interfaces.data?.map((i) => (
+          {interfaces.isError && (
+            <div className="text-[10px] text-rose-300">
+              Échec de la liste d'interfaces : {(interfaces.error as Error)?.message ?? "réponse inattendue"}
+            </div>
+          )}
+          {interfaceList.map((i) => (
             <label
               key={i.name}
               className={cn(

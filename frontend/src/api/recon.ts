@@ -67,34 +67,34 @@ export interface ReconScanDetail extends ReconScanSummary {
 }
 
 export async function listReconInterfaces(): Promise<ReconInterface[]> {
-  const { data } = await api.get<ReconInterface[]>("/recon/interfaces");
+  const { data } = await api.get<ReconInterface[]>("/api/recon/interfaces");
   return data;
 }
 
 export async function launchReconScan(
   body: ReconLaunchRequest,
 ): Promise<ReconScanSummary> {
-  const { data } = await api.post<ReconScanSummary>("/recon/scans", body);
+  const { data } = await api.post<ReconScanSummary>("/api/recon/scans", body);
   return data;
 }
 
 export async function listReconScans(): Promise<ReconScanSummary[]> {
-  const { data } = await api.get<ReconScanSummary[]>("/recon/scans");
+  const { data } = await api.get<ReconScanSummary[]>("/api/recon/scans");
   return data;
 }
 
 export async function getReconScan(id: number): Promise<ReconScanDetail> {
-  const { data } = await api.get<ReconScanDetail>(`/recon/scans/${id}`);
+  const { data } = await api.get<ReconScanDetail>(`/api/recon/scans/${id}`);
   return data;
 }
 
 export async function cancelReconScan(id: number): Promise<ReconScanSummary> {
   const { data } = await api.post<ReconScanSummary>(
-    `/recon/scans/${id}/cancel`,
+    `/api/recon/scans/${id}/cancel`,
   );
   return data;
 }
 
 export async function deleteReconScan(id: number): Promise<void> {
-  await api.delete(`/recon/scans/${id}`);
+  await api.delete(`/api/recon/scans/${id}`);
 }
