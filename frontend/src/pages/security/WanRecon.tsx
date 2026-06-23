@@ -546,16 +546,12 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
           {interfaceList.map((i) => (
             <label
               key={i.name}
-              className={cn(
-                "flex items-center gap-2 p-2 border border-[color:var(--color-cyber-border)]/40 rounded-sm",
-                !i.scannable && "opacity-40",
-              )}
+              className="flex items-center gap-2 p-2 border border-[color:var(--color-cyber-border)]/40 rounded-sm"
             >
               <input
                 type="checkbox"
                 checked={selected.has(i.name)}
                 onChange={() => toggle(i.name)}
-                disabled={!i.scannable}
               />
               <span
                 className="font-mono text-[10px] uppercase shrink-0 px-1.5 py-0.5 rounded"
@@ -567,17 +563,17 @@ function LaunchScanModal({ open, onClose, onLaunched }: LaunchModalProps) {
                 {i.family}
               </span>
               <span className="font-mono text-xs flex-1">{i.name}</span>
-              <span className="font-mono text-[10px] text-[color:var(--color-cyber-muted)]">
-                {i.ipv4_cidr}
-              </span>
-              <span className="font-mono text-[10px] text-[color:var(--color-cyber-muted)]">
-                {i.host_count} hôtes
-              </span>
-              {!i.scannable && (
-                <span className="text-[9px] text-amber-300" title="Subnet trop large pour un sweep">
-                  trop large
-                </span>
-              )}
+              <div className="flex flex-col items-end gap-0.5 text-[10px] font-mono text-[color:var(--color-cyber-muted)]">
+                <span>{i.ipv4_cidr}</span>
+                {i.scan_clamped && (
+                  <span
+                    className="text-amber-300 text-[9px]"
+                    title={`Subnet trop large pour un sweep complet — limité au /24 autour de l'IP du Slate (${i.scan_cidr})`}
+                  >
+                    sweep clamp → {i.scan_cidr}
+                  </span>
+                )}
+              </div>
             </label>
           ))}
         </div>

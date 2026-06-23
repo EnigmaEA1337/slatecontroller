@@ -110,7 +110,7 @@ async def _run_one_interface(
         pinged = await ping_sweep(
             ssh,
             label,
-            iface.ipv4_cidr,
+            iface.scan_cidr,
             iface.slate_ip,
             on_progress=_on_progress,
         )

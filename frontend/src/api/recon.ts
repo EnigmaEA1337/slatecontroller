@@ -12,6 +12,11 @@ export interface ReconInterface {
   host_count: number;
   scannable: boolean;
   gateway: string;
+  /** Subnet actually swept (== ipv4_cidr, OR a /24 around the Slate when the
+   *  declared subnet was too wide to ping in reasonable time). */
+  scan_cidr: string;
+  /** True iff scan_cidr was clamped down from a wider ipv4_cidr. */
+  scan_clamped: boolean;
 }
 
 export interface ReconLaunchRequest {

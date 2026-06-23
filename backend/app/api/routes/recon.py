@@ -25,7 +25,6 @@ from app.api.deps import get_device_connections, get_slate_ssh
 from app.auth import User, get_current_user
 from app.devices.registry import DeviceConnections
 from app.recon.interfaces import (
-    MAX_PINGABLE_PREFIX,
     ReconInterface,
     list_active_interfaces,
 )
@@ -51,6 +50,8 @@ class ReconInterfaceView(BaseModel):
     host_count: int
     scannable: bool
     gateway: str
+    scan_cidr: str
+    scan_clamped: bool
 
     @classmethod
     def from_dc(cls, i: ReconInterface) -> "ReconInterfaceView":
@@ -61,6 +62,8 @@ class ReconInterfaceView(BaseModel):
             host_count=i.host_count,
             scannable=i.scannable,
             gateway=i.gateway,
+            scan_cidr=i.scan_cidr,
+            scan_clamped=i.scan_clamped,
         )
 
 
@@ -176,18 +179,6 @@ async def launch_scan(
         raise HTTPException(
             status_code=400,
             detail=f"interfaces inconnues : {', '.join(unknown)}",
-        )
-    too_wide = [
-        n for n in body.interfaces
-        if by_name[n].network.prefixlen < MAX_PINGABLE_PREFIX
-    ]
-    if too_wide:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"subnet trop large pour un sweep : {', '.join(too_wide)} "
-                f"(prefix < /{MAX_PINGABLE_PREFIX})"
-            ),
         )
     store = _store(request)
     row = await store.create(

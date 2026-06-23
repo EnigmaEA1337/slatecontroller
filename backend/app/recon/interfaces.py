@@ -47,13 +47,28 @@ class ReconInterface:
     name: str
     ipv4_cidr: str  # e.g. "192.168.8.1/24"
     family: str  # "wan" / "lan" / "guest" / "other"
-    host_count: int  # number of addressable hosts in the subnet
-    scannable: bool  # False when the prefix is too wide (see MAX_PINGABLE_PREFIX)
+    host_count: int  # number of addressable hosts in the declared subnet
+    scannable: bool  # always True now ; runner clamps wide subnets (see scan_cidr)
     gateway: str  # default gateway IP via this iface, "" if none
+    # Subnet the runner will ACTUALLY sweep. Equals ipv4_cidr when the
+    # operator-facing subnet fits under MAX_PINGABLE_PREFIX ; otherwise
+    # the /24 around the Slate's own IP (the immediate L2 neighbours,
+    # which matches the hotel-WiFi use case : the hotel hands out IPs
+    # on a flat /16 but each guest only ever sees their own /24 worth
+    # of physical neighbours). Operator can override via a future
+    # custom-CIDR field.
+    scan_cidr: str
+    # True iff scan_cidr was clamped down from a wider ipv4_cidr.
+    # The UI surfaces this with a "limité au /24 autour du Slate" note.
+    scan_clamped: bool
 
     @property
     def network(self) -> ipaddress.IPv4Network:
         return ipaddress.ip_network(self.ipv4_cidr, strict=False)
+
+    @property
+    def scan_network(self) -> ipaddress.IPv4Network:
+        return ipaddress.ip_network(self.scan_cidr, strict=False)
 
     @property
     def slate_ip(self) -> str:
@@ -133,14 +148,40 @@ async def list_active_interfaces(ssh: SlateSSH) -> list[ReconInterface]:
             continue
         prefix = net.prefixlen
         host_count = max(0, net.num_addresses - 2)  # minus network + broadcast
+        # Clamp wider-than-/MAX subnets down to a /24 around the Slate's
+        # own IP. A hotel hands out IPs on a flat /16 but each guest
+        # only ever shares L2 with their own /24 worth of neighbours,
+        # so the clamped scan still surfaces what the operator cares
+        # about (who's around me right now ?) — without spending 18h
+        # pinging a 65k-host subnet.
+        slate_ip_str = cidr.split("/")[0]
+        if prefix < MAX_PINGABLE_PREFIX:
+            try:
+                slate_addr = ipaddress.ip_address(slate_ip_str)
+                clamped = ipaddress.ip_network(f"{slate_addr}/24", strict=False)
+                scan_cidr = str(clamped)
+                scan_clamped = True
+            except ValueError:
+                scan_cidr = cidr
+                scan_clamped = False
+        else:
+            scan_cidr = cidr
+            scan_clamped = False
         out.append(
             ReconInterface(
                 name=iface,
                 ipv4_cidr=cidr,
                 family=_classify(iface),
                 host_count=host_count,
-                scannable=prefix >= MAX_PINGABLE_PREFIX,
+                # All interfaces are scannable now — the clamp above
+                # turns "too wide to sweep" into "sweep the clamped /24
+                # only". The operator's intent is preserved (recon on
+                # this interface) while the sweep stays under a couple
+                # of minutes.
+                scannable=True,
                 gateway=gws.get(iface, ""),
+                scan_cidr=scan_cidr,
+                scan_clamped=scan_clamped,
             )
         )
     # WAN family first (operator's primary concern), then LAN, guest, other.
